@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     // Hooks stay available in every mode (Ivan: not disabled in release); -Dhooks=false opts out.
     opts.addOption(bool, "hooks", b.option(bool, "hooks", "Default Assembler supports runtime emission hooks (default: on in all modes)") orelse true);
     // Benchmark only: attach a comptime CountingHooks instead of the default CallbackHooks.
+    opts.addOption(bool, "gp_fuzz", b.option(bool, "gp-fuzz", "test: include src/gp_fuzz.zig (written by scripts/fuzz_gp.py)") orelse false);
     opts.addOption(bool, "bench_counting", b.option(bool, "bench-counting", "bench: use comptime CountingHooks (implies validate setting as given)") orelse false);
 
     const zigjit = b.addModule("zigjit", .{

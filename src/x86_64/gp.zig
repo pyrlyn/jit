@@ -176,7 +176,8 @@ fn matchKind(f: Form, k: Kind, o: Op) bool {
             const n = normImm(v, opSize(f));
             return switch (k) {
                 .one => v == 1,
-                .i8 => fits(v, i8) or fits(v, u8),
+                // `push imm8` (6A) sign-extends to 64 bits, so 128..255 must take `push imm32`.
+                .i8 => if (f.op.len == 1 and f.op[0] == 0x6a) fits(v, i8) else fits(v, i8) or fits(v, u8),
                 .s8 => if (n) |x| fits(x, i8) else false,
                 .u8 => fits(v, u8),
                 .i16 => fits(v, i16) or fits(v, u16),
@@ -193,6 +194,9 @@ fn matchKind(f: Form, k: Kind, o: Op) bool {
 
 fn matches(f: Form, ops: []const Op) bool {
     if (f.ops.len != ops.len) return false;
+    // `xchg eax, eax` via 90+r would be `nop`, which does not zero-extend into rax: use 87 /r.
+    if (f.opreg != null and f.op.len == 1 and f.op[0] == 0x90 and !f.rexw and f.pre.len == 0 and
+        ops[0] == .reg and ops[1] == .reg and ops[0].reg.id == .rax and ops[1].reg.id == .rax) return false;
     for (f.ops, ops) |k, o| if (!matchKind(f, k, o)) return false;
     return true;
 }
@@ -310,13 +314,16 @@ pub fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype) Error!void {
 pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void {
     var best: ?Buf = null;
     var best_rip: ?u8 = null;
+    var best_imm: u8 = 0;
     for (forms) |f| {
         if (!matches(f, ops)) continue;
         var b: Buf = .{};
         const r = try encodeForm(f, ops, &b);
-        if (best == null or b.n < best.?.n) {
+        // Shortest wins; on a tie prefer the narrower immediate (`66 83 /r ib` over `66 05 iw`), like LLVM.
+        if (best == null or b.n < best.?.n or (b.n == best.?.n and f.imm < best_imm)) {
             best = b;
             best_rip = r;
+            best_imm = f.imm;
         }
     }
     const b = best orelse return error.NoMatchingForm;

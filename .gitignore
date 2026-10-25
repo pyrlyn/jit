@@ -17,3 +17,4 @@ bench/asmjit_bench
 *.so
 *.exe
 scripts/.gp_forms.json
+scripts/__pycache__/

@@ -146,4 +146,5 @@ def main():
     print(f"{len(got)} cases, {len(uniq) - len(got)} skipped by LLVM")
 
 
-main()
+if __name__ == "__main__":
+    main()

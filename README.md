@@ -268,6 +268,7 @@ try a.inst(.lea, .{ gp.r64(.rcx), gp.rip(-7, .none) });
 - CPU features come from the database (`gp.requiredFeatures`). `Options.deny_features` rejects an instruction at compile time in every mode. `cpu_check = .target/.host` (with `validate`) checks the target or the host.
 - Skipped: VEX/XOP/APX encodings, segment/control/debug registers, string instructions with implicit memory, moffs, far pointers and relative branches (use `jmp`/`jcc`/`call` with labels). `ah`..`bh` are not encodable. Hooks are not called on the `inst` path.
 - An AsmJit DB bug is overridden: `shrd r/m, r, imm8` has a spurious 66 prefix.
+- Differential fuzzing: `python3 scripts/fuzz_gp.py [cases=5000] [seed] [--target=x86_64-macos]` builds random forms (all registers, SIB/no-base/RIP memory, edge immediates), gets the bytes from LLVM, writes them to `src/gp_fuzz.zig`, runs `zig build test -Dgp-fuzz=true` and restores the placeholder. It found and fixed: `push 128..255` (6A sign-extends), `xchg eax, eax` (90 is `nop`, no zero-extension), and the 16-bit imm8 tie-break. Accepted, semantically identical deviations: `and r64, u32` drops REX.W (AsmJit), `xchg rax, rax` = `90`, `int 3` = `CD 03` (use `int3()` for `CC`).
 
 ### Sticky errors and error handler
 

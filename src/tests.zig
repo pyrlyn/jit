@@ -694,3 +694,21 @@ test "sticky error and error handler" {
     try t.expectEqual(@as(?anyerror, null), cb.sticky);
     try cb.finalize();
 }
+
+test "x86_64 gp: regressions found by scripts/fuzz_gp.py" {
+    if (!opts.x86_64) return error.SkipZigTest;
+    const gp = @import("x86_64/gp.zig");
+    const cases = .{
+        .{ &[_]u8{ 0x68, 0xca, 0, 0, 0 }, .push, .{@as(i64, 202)} }, // 6A would sign-extend to -54
+        .{ &[_]u8{ 0x6a, 0xca }, .push, .{@as(i64, -54)} },
+        .{ &[_]u8{ 0x87, 0xc0 }, .xchg, .{ gp.r32(.rax), gp.r32(.rax) } }, // 90 would not zero rax[63:32]
+        .{ &[_]u8{ 0x66, 0x83, 0xc0, 0x00 }, .add, .{ gp.r16(.rax), @as(i64, 0) } }, // tie: imm8 over 66 05 iw
+        .{ &[_]u8{ 0x66, 0x83, 0xf0, 0xff }, .xor, .{ gp.r16(.rax), @as(i64, 0xffff) } },
+    };
+    inline for (cases) |c| {
+        var cb = CodeBuffer.init(t.allocator);
+        defer cb.deinit();
+        try gp.emit(&cb, c[1], c[2]);
+        try t.expectEqualSlices(u8, c[0], cb.code());
+    }
+}
