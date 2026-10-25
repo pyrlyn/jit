@@ -25,12 +25,17 @@ pub const Fixup = struct {
     kind: FixupKind,
 };
 
-pub const Error = error{ OutOfMemory, UnboundLabel, LabelAlreadyBound, DisplacementOutOfRange, InvalidLabel, CodeTooLarge, TooManyLabels };
+pub const Error = error{ OutOfMemory, UnboundLabel, LabelAlreadyBound, DisplacementOutOfRange, InvalidLabel, CodeTooLarge, TooManyLabels, EmitFailed };
 
 /// Code is limited to 2 GiB so every rel32 / label offset fits in an i32 / u32.
 pub const max_code_size: usize = std.math.maxInt(i32);
 
 const unbound: u32 = std.math.maxInt(u32);
+
+pub const ErrorHandler = struct {
+    ctx: ?*anyopaque = null,
+    func: *const fn (ctx: ?*anyopaque, err: anyerror, offset: u32) void,
+};
 
 pub const CodeBuffer = struct {
     gpa: Allocator,
@@ -41,6 +46,10 @@ pub const CodeBuffer = struct {
     /// Limits (set after `init`): code size in bytes (<= `max_code_size`) and label count.
     max_size: usize = max_code_size,
     max_labels: u32 = std.math.maxInt(u32),
+    /// First error recorded by `keep` (sticky error); `finalize` then fails with `EmitFailed`.
+    sticky: ?anyerror = null,
+    /// Optional error handler, called by `keep` for every recorded error with the code offset.
+    error_handler: ?ErrorHandler = null,
 
     inline fn limit(self: *const CodeBuffer) usize {
         return @min(self.max_size, max_code_size);
@@ -60,6 +69,7 @@ pub const CodeBuffer = struct {
     /// Drops code, labels and fixups but keeps allocated capacity (cheap reuse).
     pub fn reset(self: *CodeBuffer) void {
         self.len = 0;
+        self.sticky = null;
         self.labels.clearRetainingCapacity();
         self.fixups.clearRetainingCapacity();
     }
@@ -91,6 +101,19 @@ pub const CodeBuffer = struct {
         @memcpy(nd[0..self.len], self.data[0..self.len]);
         self.gpa.free(self.data);
         self.data = nd;
+    }
+
+    /// Sticky-error style emission without `try` at every call:
+    ///     cb.keep(a.addRR(.rax, .rcx));
+    ///     cb.keep(a.inst(.mov, .{ ... }));
+    ///     try cb.finalize(); // EmitFailed if anything failed; cb.sticky has the first error
+    /// Every error is passed to `error_handler` (if set); only the first is kept.
+    pub fn keep(self: *CodeBuffer, result: anytype) void {
+        if (result) |_| {} else |e| {
+            @branchHint(.cold);
+            if (self.error_handler) |h| h.func(h.ctx, e, self.offset());
+            if (self.sticky == null) self.sticky = e;
+        }
     }
 
     // Unchecked writers: caller must have called ensure().
@@ -177,6 +200,7 @@ pub const CodeBuffer = struct {
     /// a displacement that does not fit its field returns `DisplacementOutOfRange`, and code
     /// over 2 GiB returns `CodeTooLarge`. Nothing is patched when an error is returned.
     pub fn finalize(self: *CodeBuffer) Error!void {
+        if (self.sticky != null) return error.EmitFailed;
         if (self.len > self.limit()) return error.CodeTooLarge;
         // Pass 1: check everything, so a failing finalize leaves the code untouched.
         for (self.fixups.items) |f| {

@@ -268,3 +268,7 @@ try a.inst(.lea, .{ gp.r64(.rcx), gp.rip(-7, .none) });
 - CPU features come from the database (`gp.requiredFeatures`). `Options.deny_features` rejects an instruction at compile time in every mode. `cpu_check = .target/.host` (with `validate`) checks the target or the host.
 - Skipped: VEX/XOP/APX encodings, segment/control/debug registers, string instructions with implicit memory, moffs, far pointers and relative branches (use `jmp`/`jcc`/`call` with labels). `ah`..`bh` are not encodable. Hooks are not called on the `inst` path.
 - An AsmJit DB bug is overridden: `shrd r/m, r, imm8` has a spurious 66 prefix.
+
+### Sticky errors and error handler
+
+Normal Zig style is `try a.addRR(...)`. For long generated sequences, `cb.keep(a.addRR(...))` records instead of returning. The first error is kept in `cb.sticky`, every error goes to `cb.error_handler` (`{ ctx, func(ctx, err, offset) }`), and `finalize` returns `EmitFailed` while a sticky error is set (`reset` clears it). The failing instruction emits nothing; later instructions are still emitted.

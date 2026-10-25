@@ -662,3 +662,35 @@ test "jit runtime: callee-saved registers and stack arguments" {
     const F = *const fn (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) callconv(.c) i64;
     try t.expectEqual(@as(i64, 1 + 900 + 10000), f.ptr(F)(1, 2, 3, 4, 5, 6, 7, 8, 900, 10000));
 }
+
+test "sticky error and error handler" {
+    if (!opts.x86_64) return error.SkipZigTest;
+    const x = @import("x86_64/assembler.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const H = struct {
+        n: u32 = 0,
+        last: ?anyerror = null,
+        fn on(ctx: ?*anyopaque, err: anyerror, off: u32) void {
+            const h: *@This() = @ptrCast(@alignCast(ctx.?));
+            h.n += 1;
+            h.last = err;
+            _ = off;
+        }
+    };
+    var h: H = .{};
+    cb.error_handler = .{ .ctx = &h, .func = H.on };
+    const a = x.AssemblerT(.{ .validate = true }).init(&cb);
+    cb.keep(a.movRR(.rax, .rcx));
+    cb.keep(a.lea(.rax, x.Mem{ .index = .rsp })); // InvalidOperand
+    cb.keep(a.inst(.add, .{ x.gp.r8(.rax), @as(i64, 300) })); // NoMatchingForm
+    cb.keep(a.ret());
+    try t.expectEqual(@as(u32, 2), h.n);
+    try t.expectEqual(@as(?anyerror, error.NoMatchingForm), h.last);
+    try t.expectEqual(@as(?anyerror, error.InvalidOperand), cb.sticky);
+    try t.expectError(error.EmitFailed, cb.finalize());
+    try t.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xC8, 0xC3 }, cb.code());
+    cb.reset();
+    try t.expectEqual(@as(?anyerror, null), cb.sticky);
+    try cb.finalize();
+}
