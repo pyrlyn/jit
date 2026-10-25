@@ -5,7 +5,9 @@ const zj = @import("zigjit");
 const x = zj.x86_64;
 /// Safety layer follows build options: `-Dvalidate` turns on operand validation, `-Dhooks`
 /// attaches a CountingHooks instance (the cheapest useful hook) to measure hook overhead.
-const bo = struct { const hooks = false; };
+const bo = struct {
+    const hooks = false;
+};
 const A = x.Assembler;
 const Gp = x.Gp;
 const Error = x.Error;
@@ -126,4 +128,3 @@ extern "c" fn clock_gettime_nsec_np(clock: c_int) u64;
 inline fn now() u64 {
     return clock_gettime_nsec_np(4); // CLOCK_UPTIME_RAW
 }
-

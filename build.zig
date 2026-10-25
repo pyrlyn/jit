@@ -10,10 +10,13 @@ pub fn build(b: *std.Build) void {
     const want_aarch64 = std.mem.indexOf(u8, targets, "aarch64") != null;
     opts.addOption(bool, "x86_64", want_x86_64);
     opts.addOption(bool, "aarch64", want_aarch64);
-    // Safety layer: on by default in Debug/ReleaseSafe, off in ReleaseFast/ReleaseSmall.
+    // Validation: on by default in Debug/ReleaseSafe, off in ReleaseFast/ReleaseSmall.
     const safe_default = optimize == .Debug or optimize == .ReleaseSafe;
     opts.addOption(bool, "validate", b.option(bool, "validate", "Validate operands before emission (default: on in Debug/ReleaseSafe)") orelse safe_default);
-    opts.addOption(bool, "hooks", b.option(bool, "hooks", "Default Assembler supports runtime emission hooks (default: on in Debug/ReleaseSafe)") orelse safe_default);
+    // Hooks stay available in every mode (Ivan: not disabled in release); -Dhooks=false opts out.
+    opts.addOption(bool, "hooks", b.option(bool, "hooks", "Default Assembler supports runtime emission hooks (default: on in all modes)") orelse true);
+    // Benchmark only: attach a comptime CountingHooks instead of the default CallbackHooks.
+    opts.addOption(bool, "bench_counting", b.option(bool, "bench-counting", "bench: use comptime CountingHooks (implies validate setting as given)") orelse false);
 
     const zigjit = b.addModule("zigjit", .{
         .root_source_file = b.path("src/zigjit.zig"),

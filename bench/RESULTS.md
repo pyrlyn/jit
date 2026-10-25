@@ -37,3 +37,20 @@ Off-mode is within run-to-run noise of the baseline (in a quieter run it was equ
 slightly faster: 1.76/1.09/1.33/1.81 vs 1.87/1.15/1.36/1.81). Validation costs ~0–25%
 (label-heavy scenarios pay for the label-id check and building `Ops`); a counting hook adds
 nothing measurable on top. All configurations stay 4–7× faster than AsmJit.
+
+## Hot-path inlining + hooks on by default (2026-10-26 00:18 Kyiv, ReleaseFast, load avg ~13)
+
+`before_*` = commit a4329b1, `after_*` = this change. 21 interleaved runs, median ns/instr.
+`off` = `-Dhooks=false`; `after_default` = default ReleaseFast build (hooks compiled in, none
+attached, attachment unknown at compile time); `+cb` = same binary with `ZJ_HOOK=1` (runtime
+counting callback via function pointer); `counting` = comptime `CountingHooks` attached.
+
+| scenario | asmjit | before_off | after_off | after_default | after_default+cb | before_counting | after_counting |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| straight | 8.18 | 2.05 | 2.10 | 2.07 | 4.24 | 2.02 | 2.08 |
+| calls | 8.80 | 1.33 | 1.25 | 2.26 | 3.83 | 1.62 | 1.55 |
+| loops | 12.66 | 1.62 | 1.67 | 2.20 | 4.27 | 1.81 | 1.82 |
+| mem | 9.79 | 2.18 | 1.20 | 2.04 | 3.97 | 2.05 | 1.14 |
+
+__text size: before_off 266,028 B, after_off 262,444 B, after_default 269,380 B,
+after_counting 262,736 B. Generated code is unchanged (6834/3330/4865/10112 bytes, identical to AsmJit).

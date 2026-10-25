@@ -14,7 +14,8 @@ cfgs = sys.argv[3].split(",") if len(sys.argv) > 3 else ["baseline", "off", "val
 data = {}
 for _ in range(runs):
     jobs = [("asmjit", [os.path.join(root, "bench/asmjit_bench"), iters, "/tmp"], {"ASMJIT_OPT_SIZE": "1"})]
-    jobs += [(c, [os.path.join(root, "bench/bins", c), iters], {}) for c in cfgs]
+    # "name+cb" runs bench/bins/name with ZJ_HOOK=1 (attach the runtime counting callback).
+    jobs += [(c, [os.path.join(root, "bench/bins", c.split("+")[0]), iters], {"ZJ_HOOK": "1"} if c.endswith("+cb") else {}) for c in cfgs]
     for name, cmd, env in jobs:
         p = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, **env})
         for ln in (p.stdout + p.stderr).splitlines():

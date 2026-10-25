@@ -67,7 +67,8 @@ pub const CodeBuffer = struct {
         if (self.data.len - self.len < n) return self.grow(n);
     }
 
-    fn grow(self: *CodeBuffer, n: usize) Error!void {
+    noinline fn grow(self: *CodeBuffer, n: usize) Error!void {
+        @branchHint(.cold);
         var cap = @max(self.data.len * 2, 4096);
         while (cap - self.len < n) cap *= 2;
         if (self.gpa.resize(self.data, cap)) {
@@ -105,13 +106,19 @@ pub const CodeBuffer = struct {
     }
 
     // ---- labels -------------------------------------------------------------
-    pub fn newLabel(self: *CodeBuffer) Error!Label {
+    /// Fast path inlined into the caller; growth is a cold out-of-line call.
+    pub inline fn newLabel(self: *CodeBuffer) Error!Label {
         const id: u32 = @intCast(self.labels.items.len);
-        try self.labels.append(self.gpa, unbound);
+        if (self.labels.items.len == self.labels.capacity) try self.growLabels();
+        self.labels.appendAssumeCapacity(unbound);
         return .{ .id = id };
     }
+    noinline fn growLabels(self: *CodeBuffer) Error!void {
+        @branchHint(.cold);
+        try self.labels.ensureUnusedCapacity(self.gpa, @max(self.labels.capacity, 64));
+    }
 
-    pub fn bind(self: *CodeBuffer, l: Label) Error!void {
+    pub inline fn bind(self: *CodeBuffer, l: Label) Error!void {
         const p = &self.labels.items[l.id];
         if (p.* != unbound) return error.LabelAlreadyBound;
         p.* = self.offset();
@@ -122,8 +129,13 @@ pub const CodeBuffer = struct {
         return if (o == unbound) null else o;
     }
 
-    pub fn addFixup(self: *CodeBuffer, f: Fixup) Error!void {
-        try self.fixups.append(self.gpa, f);
+    pub inline fn addFixup(self: *CodeBuffer, f: Fixup) Error!void {
+        if (self.fixups.items.len == self.fixups.capacity) try self.growFixups();
+        self.fixups.appendAssumeCapacity(f);
+    }
+    noinline fn growFixups(self: *CodeBuffer) Error!void {
+        @branchHint(.cold);
+        try self.fixups.ensureUnusedCapacity(self.gpa, @max(self.fixups.capacity, 64));
     }
 
     /// Resolves all label fixups. Call once after emission, before copying code out.

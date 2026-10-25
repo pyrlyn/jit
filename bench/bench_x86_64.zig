@@ -6,7 +6,16 @@ const x = zj.x86_64;
 /// Safety layer follows build options: `-Dvalidate` turns on operand validation, `-Dhooks`
 /// attaches a CountingHooks instance (the cheapest useful hook) to measure hook overhead.
 const bo = zj.build_options;
-const A = x.AssemblerT(.{ .validate = bo.validate, .Hooks = if (bo.hooks) x.CountingHooks else void });
+/// Configurations:
+/// - default build options: `x.Assembler` (hooks = runtime `CallbackHooks`, none attached unless
+///   env `ZJ_HOOK=1`, which attaches a counting callback through the function pointer);
+/// - `-Dbench-counting=true`: comptime `CountingHooks`, always attached (inlined hook).
+const A = if (bo.bench_counting) x.AssemblerT(.{ .validate = bo.validate, .Hooks = x.CountingHooks }) else x.Assembler;
+
+var cb_count: usize = 0;
+fn countCb(_: ?*anyopaque, _: x.Event) void {
+    cb_count += 1;
+}
 const Gp = x.Gp;
 const Error = x.Error;
 
@@ -17,6 +26,7 @@ const UNITS = 256;
 fn Scenarios(comptime Asm: type) type {
     return struct {
         pub fn straight(a: Asm) Error!u32 {
+            @setEvalBranchQuota(100_000);
             var n: u32 = 0;
             for (0..UNITS) |i| {
                 const d = R[i % 15];
@@ -38,6 +48,7 @@ fn Scenarios(comptime Asm: type) type {
         }
 
         pub fn calls(a: Asm) Error!u32 {
+            @setEvalBranchQuota(100_000);
             var n: u32 = 0;
             const f = try a.newLabel();
             for (0..UNITS) |i| {
@@ -55,6 +66,7 @@ fn Scenarios(comptime Asm: type) type {
         }
 
         pub fn loops(a: Asm) Error!u32 {
+            @setEvalBranchQuota(100_000);
             var n: u32 = 0;
             for (0..UNITS) |_| {
                 const top = try a.newLabel();
@@ -73,6 +85,7 @@ fn Scenarios(comptime Asm: type) type {
         }
 
         pub fn mem(a: Asm) Error!u32 {
+            @setEvalBranchQuota(100_000);
             var n: u32 = 0;
             for (0..UNITS) |iu| {
                 const i: i32 = @intCast(iu);
@@ -92,6 +105,7 @@ fn Scenarios(comptime Asm: type) type {
 const S = Scenarios(A);
 
 pub fn main(init: std.process.Init) !void {
+    @setEvalBranchQuota(100_000);
     const gpa = std.heap.c_allocator;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const iters: usize = if (args.len > 1) try std.fmt.parseInt(usize, args[1], 10) else 2000;
@@ -104,7 +118,10 @@ pub fn main(init: std.process.Init) !void {
         var cb = zj.CodeBuffer.init(gpa);
         defer cb.deinit();
         var counter: x.CountingHooks = .{};
-        const a = if (comptime bo.hooks) A.initHooks(&cb, &counter) else A.init(&cb);
+        var cbh: x.CallbackHooks = .{ .post_fn = countCb };
+        const attach_cb = std.c.getenv("ZJ_HOOK") != null;
+        const a = if (comptime bo.bench_counting) A.initHooks(&cb, &counter) else if (comptime A.Hooks == x.CallbackHooks) (if (attach_cb) A.initHooks(&cb, &cbh) else A.init(&cb)) else A.init(&cb);
+        cb_count = 0;
         var n: u32 = 0;
         var best: u64 = std.math.maxInt(u64);
         var total: u64 = 0;
@@ -121,7 +138,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("zigjit {s:<9} instrs={d} bytes={d} avg_ns_per_instr={d:.2} min_ns_per_instr={d:.2}\n", .{
             name, n, cb.code().len, @as(f64, @floatFromInt(total)) / @as(f64, @floatFromInt(iters)) / nf, @as(f64, @floatFromInt(best)) / nf,
         });
-        if (comptime bo.hooks) std.debug.assert(counter.instructions == n * iters);
+        if (comptime bo.bench_counting) std.debug.assert(counter.instructions == n * iters);
+        if (comptime A.Hooks == x.CallbackHooks) if (attach_cb) std.debug.assert(cb_count == n * iters);
         if (dump) |d| {
             var pbuf: [512]u8 = undefined;
             const p = try std.fmt.bufPrintZ(&pbuf, "{s}/zigjit_{s}.bin", .{ d, name });

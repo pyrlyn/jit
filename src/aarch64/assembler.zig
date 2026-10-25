@@ -135,10 +135,25 @@ pub fn AssemblerT(comptime opts: Options) type {
             }
         }
 
+        /// False when no layer can act on this call: both layers compiled out, or hooks
+        /// compiled in without an attached instance (one null check, no `Ops` built).
+        inline fn active(a: Self) bool {
+            if (comptime opts.validate) return true;
+            if (comptime !has_hooks) return false;
+            return a.hooks != null;
+        }
+
         inline fn emit(a: Self, comptime id: Inst, ops: Ops, comptime raw: anytype, args: anytype) Error!void {
             if (comptime opts.validate) try a.validate(id, ops);
             if (comptime !has_hooks) return @call(.always_inline, raw, .{a} ++ args);
-            const h = a.hooks orelse return @call(.always_inline, raw, .{a} ++ args);
+            if (a.hooks) |h| {
+                @branchHint(.unlikely);
+                return @call(.always_inline, emitHooked, .{ a, h, id, ops, raw, args });
+            }
+            return @call(.always_inline, raw, .{a} ++ args);
+        }
+
+        fn emitHooked(a: Self, h: *Hooks, comptime id: Inst, ops: Ops, comptime raw: anytype, args: anytype) Error!void {
             const start: u32 = @intCast(a.buf.len);
             if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = id, .ops = ops, .offset = start });
             try @call(.always_inline, raw, .{a} ++ args);
@@ -242,83 +257,83 @@ pub fn AssemblerT(comptime opts: Options) type {
         // ---- public emitters: validation + hooks around the raw encoders ----------------
         /// Emits a raw 32-bit instruction word (no operand checks beyond the hook layer).
         pub fn word(a: Self, w: u32) Error!void {
-            if (comptime !checked) return a.put(w);
+            if (!a.active()) return a.put(w);
             return a.emit(.word, .{ .imm = w }, put, .{w});
         }
         pub fn movz(a: Self, rd: X, imm16: u16, comptime shift: u6) Error!void {
-            if (comptime !checked) return a.rawMovz(rd, imm16, shift);
+            if (!a.active()) return a.rawMovz(rd, imm16, shift);
             return a.emit(.movz, .{ .rd = rd, .imm = imm16 }, rawMovz, .{ rd, imm16, shift });
         }
         pub fn movk(a: Self, rd: X, imm16: u16, comptime shift: u6) Error!void {
-            if (comptime !checked) return a.rawMovk(rd, imm16, shift);
+            if (!a.active()) return a.rawMovk(rd, imm16, shift);
             return a.emit(.movk, .{ .rd = rd, .imm = imm16 }, rawMovk, .{ rd, imm16, shift });
         }
         pub fn mov(a: Self, rd: X, rm: X) Error!void {
-            if (comptime !checked) return a.rawMov(rd, rm);
+            if (!a.active()) return a.rawMov(rd, rm);
             return a.emit(.mov, .{ .rd = rd, .rm = rm }, rawMov, .{ rd, rm });
         }
         pub fn add(a: Self, rd: X, rn: X, rm: X) Error!void {
-            if (comptime !checked) return a.rawAdd(rd, rn, rm);
+            if (!a.active()) return a.rawAdd(rd, rn, rm);
             return a.emit(.add, .{ .rd = rd, .rn = rn, .rm = rm }, rawAdd, .{ rd, rn, rm });
         }
         pub fn sub(a: Self, rd: X, rn: X, rm: X) Error!void {
-            if (comptime !checked) return a.rawSub(rd, rn, rm);
+            if (!a.active()) return a.rawSub(rd, rn, rm);
             return a.emit(.sub, .{ .rd = rd, .rn = rn, .rm = rm }, rawSub, .{ rd, rn, rm });
         }
         pub fn mul(a: Self, rd: X, rn: X, rm: X) Error!void {
-            if (comptime !checked) return a.rawMul(rd, rn, rm);
+            if (!a.active()) return a.rawMul(rd, rn, rm);
             return a.emit(.mul, .{ .rd = rd, .rn = rn, .rm = rm }, rawMul, .{ rd, rn, rm });
         }
         pub fn addImm(a: Self, rd: X, rn: X, imm12: u12) Error!void {
-            if (comptime !checked) return a.rawAddImm(rd, rn, imm12);
+            if (!a.active()) return a.rawAddImm(rd, rn, imm12);
             return a.emit(.add_imm, .{ .rd = rd, .rn = rn, .imm = imm12 }, rawAddImm, .{ rd, rn, imm12 });
         }
         pub fn subImm(a: Self, rd: X, rn: X, imm12: u12) Error!void {
-            if (comptime !checked) return a.rawSubImm(rd, rn, imm12);
+            if (!a.active()) return a.rawSubImm(rd, rn, imm12);
             return a.emit(.sub_imm, .{ .rd = rd, .rn = rn, .imm = imm12 }, rawSubImm, .{ rd, rn, imm12 });
         }
         pub fn cmp(a: Self, rn: X, rm: X) Error!void {
-            if (comptime !checked) return a.rawCmp(rn, rm);
+            if (!a.active()) return a.rawCmp(rn, rm);
             return a.emit(.cmp, .{ .rn = rn, .rm = rm }, rawCmp, .{ rn, rm });
         }
         pub fn cmpImm(a: Self, rn: X, imm12: u12) Error!void {
-            if (comptime !checked) return a.rawCmpImm(rn, imm12);
+            if (!a.active()) return a.rawCmpImm(rn, imm12);
             return a.emit(.cmp_imm, .{ .rn = rn, .imm = imm12 }, rawCmpImm, .{ rn, imm12 });
         }
         pub fn ldr(a: Self, rt: X, rn: X, off: u15) Error!void {
-            if (comptime !checked) return a.rawLdr(rt, rn, off);
+            if (!a.active()) return a.rawLdr(rt, rn, off);
             return a.emit(.ldr, .{ .rd = rt, .rn = rn, .imm = off }, rawLdr, .{ rt, rn, off });
         }
         pub fn str(a: Self, rt: X, rn: X, off: u15) Error!void {
-            if (comptime !checked) return a.rawStr(rt, rn, off);
+            if (!a.active()) return a.rawStr(rt, rn, off);
             return a.emit(.str, .{ .rd = rt, .rn = rn, .imm = off }, rawStr, .{ rt, rn, off });
         }
         pub fn ret(a: Self) Error!void {
-            if (comptime !checked) return a.rawRet();
+            if (!a.active()) return a.rawRet();
             return a.emit(.ret, .{}, rawRet, .{});
         }
         pub fn blr(a: Self, rn: X) Error!void {
-            if (comptime !checked) return a.rawBlr(rn);
+            if (!a.active()) return a.rawBlr(rn);
             return a.emit(.blr, .{ .rn = rn }, rawBlr, .{rn});
         }
         pub fn b(a: Self, l: Label) Error!void {
-            if (comptime !checked) return a.rawB(l);
+            if (!a.active()) return a.rawB(l);
             return a.emit(.b, .{ .label = l }, rawB, .{l});
         }
         pub fn bl(a: Self, l: Label) Error!void {
-            if (comptime !checked) return a.rawBl(l);
+            if (!a.active()) return a.rawBl(l);
             return a.emit(.bl, .{ .label = l }, rawBl, .{l});
         }
         pub fn bcond(a: Self, comptime c: Cond, l: Label) Error!void {
-            if (comptime !checked) return a.rawBcond(c, l);
+            if (!a.active()) return a.rawBcond(c, l);
             return a.emit(.bcond, .{ .cond = c, .label = l }, rawBcond, .{ c, l });
         }
         pub fn cbz(a: Self, rt: X, l: Label) Error!void {
-            if (comptime !checked) return a.rawCbz(rt, l);
+            if (!a.active()) return a.rawCbz(rt, l);
             return a.emit(.cbz, .{ .rd = rt, .label = l }, rawCbz, .{ rt, l });
         }
         pub fn cbnz(a: Self, rt: X, l: Label) Error!void {
-            if (comptime !checked) return a.rawCbnz(rt, l);
+            if (!a.active()) return a.rawCbnz(rt, l);
             return a.emit(.cbnz, .{ .rd = rt, .label = l }, rawCbnz, .{ rt, l });
         }
     };

@@ -273,3 +273,25 @@ test "LogHooks truncates instead of overflowing" {
     try t.expect(log.truncated);
     try t.expect(log.len <= 8);
 }
+
+test "default options: hooks on in every mode, validation only in Debug/ReleaseSafe" {
+    const builtin = @import("builtin");
+    // Holds for builds without explicit -Dvalidate/-Dhooks (the test step's defaults).
+    const safe = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+    if (opts.validate != safe or !opts.hooks) return error.SkipZigTest; // overridden on the command line
+    if (opts.x86_64) {
+        const x = @import("x86_64/assembler.zig");
+        try t.expect(x.default_options.Hooks == x.CallbackHooks);
+        try t.expectEqual(safe, x.default_options.validate);
+        // hooks compiled in but nothing attached: plain emission
+        var cb = CodeBuffer.init(t.allocator);
+        defer cb.deinit();
+        try x.Assembler.init(&cb).ret();
+        try t.expectEqualSlices(u8, &.{0xC3}, cb.code());
+    }
+    if (opts.aarch64) {
+        const m = @import("aarch64/assembler.zig");
+        try t.expect(m.default_options.Hooks == m.CallbackHooks);
+        try t.expectEqual(safe, m.default_options.validate);
+    }
+}

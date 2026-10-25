@@ -212,17 +212,32 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
 
         /// Full operand check for one instruction (only compiled when `opts.validate`).
-        pub fn validate(a: Self, id: Inst, ops: Ops) Error!void {
+        pub inline fn validate(a: Self, id: Inst, ops: Ops) Error!void {
             _ = id;
             if (ops.mem) |m| try validateMem(m);
             if (ops.label) |l| try a.checkLabel(l);
         }
 
         /// Validation + hooks around a raw encoder. With both layers off this is just the call.
+        /// False when no layer can act on this call: both layers compiled out, or hooks
+        /// compiled in without an attached instance (one null check, no `Ops` built).
+        inline fn active(a: Self) bool {
+            if (comptime opts.validate) return true;
+            if (comptime !has_hooks) return false;
+            return a.hooks != null;
+        }
+
         inline fn emit(a: Self, comptime id: Inst, ops: Ops, comptime raw: anytype, args: anytype) Error!void {
             if (comptime opts.validate) try a.validate(id, ops);
             if (comptime !has_hooks) return @call(.always_inline, raw, .{a} ++ args);
-            const h = a.hooks orelse return @call(.always_inline, raw, .{a} ++ args);
+            if (a.hooks) |h| {
+                @branchHint(.unlikely);
+                return @call(.always_inline, emitHooked, .{ a, h, id, ops, raw, args });
+            }
+            return @call(.always_inline, raw, .{a} ++ args);
+        }
+
+        fn emitHooked(a: Self, h: *Hooks, comptime id: Inst, ops: Ops, comptime raw: anytype, args: anytype) Error!void {
             const start: u32 = @intCast(a.buf.len);
             if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = id, .ops = ops, .offset = start });
             try @call(.always_inline, raw, .{a} ++ args);
@@ -259,26 +274,26 @@ pub fn AssemblerT(comptime opts: Options) type {
 
         // ---- mov --------------------------------------------------------------------
 
-        fn rawMovRR(a: Self, dst: Gp, src: Gp) Error!void {
+        inline fn rawMovRR(a: Self, dst: Gp, src: Gp) Error!void {
             return a.opRR(0x89, src, dst);
         }
-        fn rawMovRM(a: Self, dst: Gp, src: Mem) Error!void {
+        inline fn rawMovRM(a: Self, dst: Gp, src: Mem) Error!void {
             return a.opRM(0x8B, @intFromEnum(dst), src, null, 0);
         }
-        fn rawMovMR(a: Self, dst: Mem, src: Gp) Error!void {
+        inline fn rawMovMR(a: Self, dst: Mem, src: Gp) Error!void {
             return a.opRM(0x89, @intFromEnum(src), dst, null, 0);
         }
         /// mov qword [m], imm32 (sign-extended)
-        fn rawMovMI(a: Self, dst: Mem, imm: i32) Error!void {
+        inline fn rawMovMI(a: Self, dst: Mem, imm: i32) Error!void {
             return a.opRM(0xC7, 0, dst, {}, imm);
         }
-        fn rawLea(a: Self, dst: Gp, src: Mem) Error!void {
+        inline fn rawLea(a: Self, dst: Gp, src: Mem) Error!void {
             return a.opRM(0x8D, @intFromEnum(dst), src, null, 0);
         }
 
         /// Shortest encoding: u32 => `mov r32, imm32` (zero-extends), i32 => `mov r/m64, imm32`
         /// (sign-extends), otherwise `movabs r64, imm64`.
-        fn rawMovRI(a: Self, dst: Gp, imm: i64) Error!void {
+        inline fn rawMovRI(a: Self, dst: Gp, imm: i64) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
             if (imm >= 0 and imm <= std.math.maxInt(u32)) {
@@ -299,7 +314,7 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
 
         /// Always the 10-byte `movabs r64, imm64` (patchable constant slot).
-        fn rawMovabs(a: Self, dst: Gp, imm: u64) Error!void {
+        inline fn rawMovabs(a: Self, dst: Gp, imm: u64) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
             e.u8_(REX_W | dst.hi());
@@ -310,16 +325,16 @@ pub fn AssemblerT(comptime opts: Options) type {
 
         // ---- ALU ----------------------------------------------------------------------
 
-        fn rawAluRR(a: Self, comptime op: Alu, dst: Gp, src: Gp) Error!void {
+        inline fn rawAluRR(a: Self, comptime op: Alu, dst: Gp, src: Gp) Error!void {
             return a.opRR(@as(u8, @intFromEnum(op)) * 8 + 1, src, dst);
         }
-        fn rawAluRM(a: Self, comptime op: Alu, dst: Gp, src: Mem) Error!void {
+        inline fn rawAluRM(a: Self, comptime op: Alu, dst: Gp, src: Mem) Error!void {
             return a.opRM(@as(u8, @intFromEnum(op)) * 8 + 3, @intFromEnum(dst), src, null, 0);
         }
-        fn rawAluMR(a: Self, comptime op: Alu, dst: Mem, src: Gp) Error!void {
+        inline fn rawAluMR(a: Self, comptime op: Alu, dst: Mem, src: Gp) Error!void {
             return a.opRM(@as(u8, @intFromEnum(op)) * 8 + 1, @intFromEnum(src), dst, null, 0);
         }
-        fn rawAluRI(a: Self, comptime op: Alu, dst: Gp, imm: i32) Error!void {
+        inline fn rawAluRI(a: Self, comptime op: Alu, dst: Gp, imm: i32) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
             e.rexRR(true, 0, dst);
@@ -360,11 +375,11 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.aluRR(.xor, d, s);
         }
 
-        fn rawTestRR(a: Self, d: Gp, s: Gp) Error!void {
+        inline fn rawTestRR(a: Self, d: Gp, s: Gp) Error!void {
             return a.opRR(0x85, s, d);
         }
 
-        fn rawImulRR(a: Self, dst: Gp, src: Gp) Error!void {
+        inline fn rawImulRR(a: Self, dst: Gp, src: Gp) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
             e.rexRR(true, @intFromEnum(dst), src);
@@ -373,7 +388,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             e.modrmRR(@intFromEnum(dst), src);
             a.commit(&e);
         }
-        fn rawImulRM(a: Self, dst: Gp, src: Mem) Error!void {
+        inline fn rawImulRM(a: Self, dst: Gp, src: Mem) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
             e.rexRM(true, @intFromEnum(dst), src);
@@ -382,7 +397,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             e.modrmM(@intFromEnum(dst), src);
             a.commit(&e);
         }
-        fn rawImulRRI(a: Self, dst: Gp, src: Gp, imm: i32) Error!void {
+        inline fn rawImulRRI(a: Self, dst: Gp, src: Gp, imm: i32) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
             e.rexRR(true, @intFromEnum(dst), src);
@@ -402,10 +417,10 @@ pub fn AssemblerT(comptime opts: Options) type {
             e.u8_(op + r.lo());
             a.commit(&e);
         }
-        fn rawPush(a: Self, r: Gp) Error!void {
+        inline fn rawPush(a: Self, r: Gp) Error!void {
             return a.opPlusR(0x50, r);
         }
-        fn rawPop(a: Self, r: Gp) Error!void {
+        inline fn rawPop(a: Self, r: Gp) Error!void {
             return a.opPlusR(0x58, r);
         }
 
@@ -413,10 +428,10 @@ pub fn AssemblerT(comptime opts: Options) type {
             try a.buf.ensure(1);
             a.buf.put8(b);
         }
-        fn rawRet(a: Self) Error!void {
+        inline fn rawRet(a: Self) Error!void {
             return a.byte(0xC3);
         }
-        fn rawNop(a: Self) Error!void {
+        inline fn rawNop(a: Self) Error!void {
             return a.byte(0x90);
         }
 
@@ -429,10 +444,10 @@ pub fn AssemblerT(comptime opts: Options) type {
             e.modrmRR(digit, r);
             a.commit(&e);
         }
-        fn rawCallR(a: Self, r: Gp) Error!void {
+        inline fn rawCallR(a: Self, r: Gp) Error!void {
             return a.ffR(2, r);
         }
-        fn rawJmpR(a: Self, r: Gp) Error!void {
+        inline fn rawJmpR(a: Self, r: Gp) Error!void {
             return a.ffR(4, r);
         }
 
@@ -460,118 +475,118 @@ pub fn AssemblerT(comptime opts: Options) type {
             a.commit(&e);
         }
 
-        fn rawJmp(a: Self, l: Label) Error!void {
+        inline fn rawJmp(a: Self, l: Label) Error!void {
             return a.branch(&.{0xEB}, &.{0xE9}, l);
         }
-        fn rawCall(a: Self, l: Label) Error!void {
+        inline fn rawCall(a: Self, l: Label) Error!void {
             return a.branch(&.{}, &.{0xE8}, l);
         }
-        fn rawJcc(a: Self, comptime c: Cond, l: Label) Error!void {
+        inline fn rawJcc(a: Self, comptime c: Cond, l: Label) Error!void {
             const cc: u8 = @intFromEnum(c);
             return a.branch(&.{0x70 + cc}, &.{ 0x0F, 0x80 + cc }, l);
         }
 
         /// Calls an absolute address: `mov r11, imm; call r11` (r11 is caller-saved scratch in SysV).
-        pub fn callAbs(a: Self, addr: usize) Error!void {
+        pub inline fn callAbs(a: Self, addr: usize) Error!void {
             try a.movRI(.r11, @bitCast(@as(u64, addr)));
             try a.callR(.r11);
         }
 
         // ---- public emitters: validation + hooks around the raw encoders ----------------
-        pub fn movRR(a: Self, dst: Gp, src: Gp) Error!void {
-            if (comptime !checked) return a.rawMovRR(dst, src);
+        pub inline fn movRR(a: Self, dst: Gp, src: Gp) Error!void {
+            if (!a.active()) return a.rawMovRR(dst, src);
             return a.emit(.mov_rr, .{ .r0 = dst, .r1 = src }, rawMovRR, .{ dst, src });
         }
-        pub fn movRM(a: Self, dst: Gp, src: Mem) Error!void {
-            if (comptime !checked) return a.rawMovRM(dst, src);
+        pub inline fn movRM(a: Self, dst: Gp, src: Mem) Error!void {
+            if (!a.active()) return a.rawMovRM(dst, src);
             return a.emit(.mov_rm, .{ .r0 = dst, .mem = src }, rawMovRM, .{ dst, src });
         }
-        pub fn movMR(a: Self, dst: Mem, src: Gp) Error!void {
-            if (comptime !checked) return a.rawMovMR(dst, src);
+        pub inline fn movMR(a: Self, dst: Mem, src: Gp) Error!void {
+            if (!a.active()) return a.rawMovMR(dst, src);
             return a.emit(.mov_mr, .{ .mem = dst, .r0 = src }, rawMovMR, .{ dst, src });
         }
-        pub fn movMI(a: Self, dst: Mem, imm: i32) Error!void {
-            if (comptime !checked) return a.rawMovMI(dst, imm);
+        pub inline fn movMI(a: Self, dst: Mem, imm: i32) Error!void {
+            if (!a.active()) return a.rawMovMI(dst, imm);
             return a.emit(.mov_mi, .{ .mem = dst, .imm = imm }, rawMovMI, .{ dst, imm });
         }
-        pub fn lea(a: Self, dst: Gp, src: Mem) Error!void {
-            if (comptime !checked) return a.rawLea(dst, src);
+        pub inline fn lea(a: Self, dst: Gp, src: Mem) Error!void {
+            if (!a.active()) return a.rawLea(dst, src);
             return a.emit(.lea, .{ .r0 = dst, .mem = src }, rawLea, .{ dst, src });
         }
-        pub fn movRI(a: Self, dst: Gp, imm: i64) Error!void {
-            if (comptime !checked) return a.rawMovRI(dst, imm);
+        pub inline fn movRI(a: Self, dst: Gp, imm: i64) Error!void {
+            if (!a.active()) return a.rawMovRI(dst, imm);
             return a.emit(.mov_ri, .{ .r0 = dst, .imm = imm }, rawMovRI, .{ dst, imm });
         }
-        pub fn movabs(a: Self, dst: Gp, imm: u64) Error!void {
-            if (comptime !checked) return a.rawMovabs(dst, imm);
+        pub inline fn movabs(a: Self, dst: Gp, imm: u64) Error!void {
+            if (!a.active()) return a.rawMovabs(dst, imm);
             return a.emit(.movabs, .{ .r0 = dst, .imm = @bitCast(imm) }, rawMovabs, .{ dst, imm });
         }
         pub fn aluRR(a: Self, comptime op: Alu, dst: Gp, src: Gp) Error!void {
-            if (comptime !checked) return a.rawAluRR(op, dst, src);
+            if (!a.active()) return a.rawAluRR(op, dst, src);
             return a.emit(.alu_rr, .{ .alu = op, .r0 = dst, .r1 = src }, rawAluRR, .{ op, dst, src });
         }
-        pub fn aluRM(a: Self, comptime op: Alu, dst: Gp, src: Mem) Error!void {
-            if (comptime !checked) return a.rawAluRM(op, dst, src);
+        pub inline fn aluRM(a: Self, comptime op: Alu, dst: Gp, src: Mem) Error!void {
+            if (!a.active()) return a.rawAluRM(op, dst, src);
             return a.emit(.alu_rm, .{ .alu = op, .r0 = dst, .mem = src }, rawAluRM, .{ op, dst, src });
         }
-        pub fn aluMR(a: Self, comptime op: Alu, dst: Mem, src: Gp) Error!void {
-            if (comptime !checked) return a.rawAluMR(op, dst, src);
+        pub inline fn aluMR(a: Self, comptime op: Alu, dst: Mem, src: Gp) Error!void {
+            if (!a.active()) return a.rawAluMR(op, dst, src);
             return a.emit(.alu_mr, .{ .alu = op, .mem = dst, .r0 = src }, rawAluMR, .{ op, dst, src });
         }
         pub fn aluRI(a: Self, comptime op: Alu, dst: Gp, imm: i32) Error!void {
-            if (comptime !checked) return a.rawAluRI(op, dst, imm);
+            if (!a.active()) return a.rawAluRI(op, dst, imm);
             return a.emit(.alu_ri, .{ .alu = op, .r0 = dst, .imm = imm }, rawAluRI, .{ op, dst, imm });
         }
-        pub fn testRR(a: Self, d: Gp, s: Gp) Error!void {
-            if (comptime !checked) return a.rawTestRR(d, s);
+        pub inline fn testRR(a: Self, d: Gp, s: Gp) Error!void {
+            if (!a.active()) return a.rawTestRR(d, s);
             return a.emit(.test_rr, .{ .r0 = d, .r1 = s }, rawTestRR, .{ d, s });
         }
-        pub fn imulRR(a: Self, dst: Gp, src: Gp) Error!void {
-            if (comptime !checked) return a.rawImulRR(dst, src);
+        pub inline fn imulRR(a: Self, dst: Gp, src: Gp) Error!void {
+            if (!a.active()) return a.rawImulRR(dst, src);
             return a.emit(.imul_rr, .{ .r0 = dst, .r1 = src }, rawImulRR, .{ dst, src });
         }
-        pub fn imulRM(a: Self, dst: Gp, src: Mem) Error!void {
-            if (comptime !checked) return a.rawImulRM(dst, src);
+        pub inline fn imulRM(a: Self, dst: Gp, src: Mem) Error!void {
+            if (!a.active()) return a.rawImulRM(dst, src);
             return a.emit(.imul_rm, .{ .r0 = dst, .mem = src }, rawImulRM, .{ dst, src });
         }
-        pub fn imulRRI(a: Self, dst: Gp, src: Gp, imm: i32) Error!void {
-            if (comptime !checked) return a.rawImulRRI(dst, src, imm);
+        pub inline fn imulRRI(a: Self, dst: Gp, src: Gp, imm: i32) Error!void {
+            if (!a.active()) return a.rawImulRRI(dst, src, imm);
             return a.emit(.imul_rri, .{ .r0 = dst, .r1 = src, .imm = imm }, rawImulRRI, .{ dst, src, imm });
         }
         pub fn push(a: Self, r: Gp) Error!void {
-            if (comptime !checked) return a.rawPush(r);
+            if (!a.active()) return a.rawPush(r);
             return a.emit(.push, .{ .r0 = r }, rawPush, .{r});
         }
         pub fn pop(a: Self, r: Gp) Error!void {
-            if (comptime !checked) return a.rawPop(r);
+            if (!a.active()) return a.rawPop(r);
             return a.emit(.pop, .{ .r0 = r }, rawPop, .{r});
         }
         pub fn ret(a: Self) Error!void {
-            if (comptime !checked) return a.rawRet();
+            if (!a.active()) return a.rawRet();
             return a.emit(.ret, .{}, rawRet, .{});
         }
         pub fn nop(a: Self) Error!void {
-            if (comptime !checked) return a.rawNop();
+            if (!a.active()) return a.rawNop();
             return a.emit(.nop, .{}, rawNop, .{});
         }
         pub fn callR(a: Self, r: Gp) Error!void {
-            if (comptime !checked) return a.rawCallR(r);
+            if (!a.active()) return a.rawCallR(r);
             return a.emit(.call_r, .{ .r0 = r }, rawCallR, .{r});
         }
         pub fn jmpR(a: Self, r: Gp) Error!void {
-            if (comptime !checked) return a.rawJmpR(r);
+            if (!a.active()) return a.rawJmpR(r);
             return a.emit(.jmp_r, .{ .r0 = r }, rawJmpR, .{r});
         }
         pub fn jmp(a: Self, l: Label) Error!void {
-            if (comptime !checked) return a.rawJmp(l);
+            if (!a.active()) return a.rawJmp(l);
             return a.emit(.jmp, .{ .label = l }, rawJmp, .{l});
         }
         pub fn call(a: Self, l: Label) Error!void {
-            if (comptime !checked) return a.rawCall(l);
+            if (!a.active()) return a.rawCall(l);
             return a.emit(.call, .{ .label = l }, rawCall, .{l});
         }
         pub fn jcc(a: Self, comptime c: Cond, l: Label) Error!void {
-            if (comptime !checked) return a.rawJcc(c, l);
+            if (!a.active()) return a.rawJcc(c, l);
             return a.emit(.jcc, .{ .cond = c, .label = l }, rawJcc, .{ c, l });
         }
     };

@@ -153,12 +153,19 @@ Composite helpers report their parts: `callAbs` = `mov_ri` + `call_r`, `movImm` 
 | Build | `validate` default | `hooks` default |
 |---|---|---|
 | `Debug`, `ReleaseSafe` | on | on |
-| `ReleaseFast`, `ReleaseSmall` | off | off |
+| `ReleaseFast`, `ReleaseSmall` | off | **on** |
 
 Override with `-Dvalidate=true|false` and `-Dhooks=true|false`. They set
 `default_options` of the default `Assembler` (`hooks` means "supports a `CallbackHooks`
 instance"). `AssemblerT(.{...})` ignores the build flags, so code that needs a fixed
 configuration can choose it explicitly.
+
+Hooks stay compiled in for release builds so a hook can always be attached; `-Dhooks=false`
+is the explicit opt-out. With hooks compiled in but no instance attached, each instruction
+does one null check. That is free when the compiler can see that nothing is attached
+(e.g. `init(&cb)` in the same function), and costs up to ~0.6–1 ns/instr in label- and
+memory-heavy code when it cannot (see bench/RESULTS.md). Use `-Dhooks=false` or
+`AssemblerT(.{})` for the fastest path.
 
 When a layer is off it disappears at compile time: no checks, no branches, no extra field
 (`@sizeOf(AssemblerT(.{})) == @sizeOf(*CodeBuffer)`), identical bytes.
@@ -203,9 +210,11 @@ Tests:
 cmake -S ../asmjit-loc -B bench/asmjit-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DASMJIT_STATIC=ON && ninja -C bench/asmjit-build
 c++ -O2 -std=c++20 -DASMJIT_STATIC -I ../asmjit-loc bench/asmjit_bench.cpp bench/asmjit-build/libasmjit.a -o bench/asmjit_bench
 
-zig build -Doptimize=ReleaseFast && bench/run.sh 9 5000                          # layers off
+zig build -Doptimize=ReleaseFast -Dhooks=false && bench/run.sh 9 5000             # layers off
 zig build -Doptimize=ReleaseFast -Dvalidate=true && bench/run.sh 9 5000          # validation
-zig build -Doptimize=ReleaseFast -Dvalidate=true -Dhooks=true && bench/run.sh 9 5000  # + counting hook
+zig build -Doptimize=ReleaseFast && bench/run.sh 9 5000                          # default: hooks compiled in, none attached
+ZJ_HOOK=1 bench/run.sh 9 5000                                                   # + runtime counting callback
+zig build -Doptimize=ReleaseFast -Dbench-counting=true && bench/run.sh 9 5000    # comptime CountingHooks
 ```
 
 Four scenarios (straight-line ALU/mov, calls, label loops, memory operands), ~1.3–1.6k
