@@ -22,6 +22,7 @@ test {
     _ = @import("tests.zig");
     _ = @import("enc_tests.zig");
     _ = @import("gp_tests.zig");
+    _ = @import("simd_tests.zig");
     if (opts.gp_fuzz) _ = @import("gp_fuzz.zig");
     if (opts.x86_64) _ = x86_64;
     if (opts.aarch64) _ = aarch64;

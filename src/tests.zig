@@ -573,7 +573,8 @@ test "x86_64 gp: 8/16/32-bit operands, RIP-relative label, errors" {
     try cb.finalize();
     try t.expectEqualSlices(u8, &.{
         0x40, 0x8A, 0x77, 0x01, 0x66, 0x41, 0xB9, 0x34, 0x12, 0x83, 0x00, 0xFF,
-        0x48, 0x8B, 0x05, 0x07, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x0D, 0xF9, 0xFF, 0xFF, 0xFF,
+        0x48, 0x8B, 0x05, 0x07, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x0D, 0xF9, 0xFF,
+        0xFF, 0xFF,
     }, cb.code()[0..26]);
     // errors
     try t.expectError(error.NoMatchingForm, a.inst(.mov, .{ gp.r32(.rax), gp.r64(.rcx) }));
@@ -760,4 +761,55 @@ test "x86_64 Logger: listing with offsets, bytes and operands (also for inst)" {
         \\
     , log.text());
     try t.expect(!log.truncated);
+}
+
+fn runVec4(cb: *CodeBuffer, a: [4]u32, b: [4]u32) ![4]u32 {
+    const rt = @import("core/jit_runtime.zig");
+    const f = try rt.add(cb);
+    defer f.release();
+    var out: [4]u32 = undefined;
+    f.ptr(*const fn (*const [4]u32, *const [4]u32, *[4]u32) callconv(.c) void)(&a, &b, &out);
+    return out;
+}
+
+test "x86_64 SIMD: SSE2 paddd and AVX2 vpaddd/vpmulld execute (AVX2 gated on the host)" {
+    const builtin = @import("builtin");
+    if (builtin.cpu.arch != .x86_64) return error.SkipZigTest;
+    const x = @import("x86_64/assembler.zig");
+    const s = @import("x86_64/simd.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    try s.sse(&cb, s.ops.movdqu, s.xmm(0), s.m(x.ptr(.rdi, 0)));
+    try s.sse(&cb, s.ops.movdqu, s.xmm(9), s.m(x.ptr(.rsi, 0)));
+    try s.sse(&cb, s.ops.paddd, s.xmm(0), s.r(s.xmm(9)));
+    try s.sse(&cb, s.ops.movdqu_st, s.xmm(0), s.m(x.ptr(.rdx, 0)));
+    try cb.emitBytes(&.{0xc3});
+    try t.expectEqual([4]u32{ 11, 22, 33, 0 }, try runVec4(&cb, .{ 1, 2, 3, 0xffffffff }, .{ 10, 20, 30, 1 }));
+
+    const have = x.cpu.host() orelse return;
+    if (!have.contains(.AVX2)) return; // e.g. Rosetta 2: no AVX
+    cb.reset();
+    try s.vex(&cb, s.ops.movdqu, s.xmm(1), null, s.m(x.ptr(.rdi, 0)));
+    try s.vex(&cb, s.ops.movdqu, s.xmm(12), null, s.m(x.ptr(.rsi, 0)));
+    try s.vex(&cb, s.ops.pmulld, s.xmm(1), s.xmm(1), s.r(s.xmm(12)));
+    try s.vex(&cb, s.ops.paddd, s.xmm(1), s.xmm(1), s.r(s.xmm(12)));
+    try s.vex(&cb, s.ops.movdqu_st, s.xmm(1), null, s.m(x.ptr(.rdx, 0)));
+    try s.vzeroupper(&cb);
+    try cb.emitBytes(&.{0xc3});
+    try t.expectEqual([4]u32{ 4, 9, 16, 5 }, try runVec4(&cb, .{ 1, 2, 3, 0 }, .{ 2, 3, 4, 5 }));
+}
+
+test "aarch64 NEON: add.4s / mul.4s execute" {
+    const builtin = @import("builtin");
+    if (builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const n = @import("aarch64/neon.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    try n.ldrQ(&cb, 0, .x0, 0);
+    try n.ldrQ(&cb, 17, .x1, 0);
+    try n.mul(&cb, .s4, 2, 0, 17);
+    try n.add(&cb, .s4, 0, 2, 17);
+    try n.strQ(&cb, 0, .x2, 0);
+    try cb.emitBytes(std.mem.asBytes(&@as(u32, 0xd65f03c0)));
+    try t.expectEqual([4]u32{ 4, 9, 16, 5 }, try runVec4(&cb, .{ 1, 2, 3, 0 }, .{ 2, 3, 4, 5 }));
 }
