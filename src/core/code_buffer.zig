@@ -25,7 +25,7 @@ pub const Fixup = struct {
     kind: FixupKind,
 };
 
-pub const Error = error{ OutOfMemory, UnboundLabel, LabelAlreadyBound, DisplacementOutOfRange, InvalidLabel, CodeTooLarge };
+pub const Error = error{ OutOfMemory, UnboundLabel, LabelAlreadyBound, DisplacementOutOfRange, InvalidLabel, CodeTooLarge, TooManyLabels };
 
 /// Code is limited to 2 GiB so every rel32 / label offset fits in an i32 / u32.
 pub const max_code_size: usize = std.math.maxInt(i32);
@@ -38,6 +38,13 @@ pub const CodeBuffer = struct {
     len: usize = 0,
     labels: std.ArrayList(u32) = .empty,
     fixups: std.ArrayList(Fixup) = .empty,
+    /// Limits (set after `init`): code size in bytes (<= `max_code_size`) and label count.
+    max_size: usize = max_code_size,
+    max_labels: u32 = std.math.maxInt(u32),
+
+    inline fn limit(self: *const CodeBuffer) usize {
+        return @min(self.max_size, max_code_size);
+    }
 
     pub fn init(gpa: Allocator) CodeBuffer {
         return .{ .gpa = gpa };
@@ -72,10 +79,10 @@ pub const CodeBuffer = struct {
 
     noinline fn grow(self: *CodeBuffer, n: usize) Error!void {
         @branchHint(.cold);
-        if (self.len + n > max_code_size) return error.CodeTooLarge;
+        if (self.len + n > self.limit()) return error.CodeTooLarge;
         var cap = @max(self.data.len * 2, 4096);
         while (cap - self.len < n) cap *= 2;
-        cap = @min(cap, max_code_size + 16); // +16: room for the 16-byte instruction store
+        cap = @min(cap, self.limit() + 16); // +16: room for the 16-byte instruction store
         if (self.gpa.resize(self.data, cap)) {
             self.data = self.data.ptr[0..cap];
             return;
@@ -114,6 +121,7 @@ pub const CodeBuffer = struct {
     /// Fast path inlined into the caller; growth is a cold out-of-line call.
     pub inline fn newLabel(self: *CodeBuffer) Error!Label {
         const id: u32 = @intCast(self.labels.items.len);
+        if (id >= self.max_labels) return error.TooManyLabels;
         if (self.labels.items.len == self.labels.capacity) try self.growLabels();
         self.labels.appendAssumeCapacity(unbound);
         return .{ .id = id };
@@ -169,7 +177,7 @@ pub const CodeBuffer = struct {
     /// a displacement that does not fit its field returns `DisplacementOutOfRange`, and code
     /// over 2 GiB returns `CodeTooLarge`. Nothing is patched when an error is returned.
     pub fn finalize(self: *CodeBuffer) Error!void {
-        if (self.len > max_code_size) return error.CodeTooLarge;
+        if (self.len > self.limit()) return error.CodeTooLarge;
         // Pass 1: check everything, so a failing finalize leaves the code untouched.
         for (self.fixups.items) |f| {
             const target = self.labels.items[f.label];

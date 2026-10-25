@@ -245,3 +245,7 @@ Results: [bench/RESULTS.md](bench/RESULTS.md).
 - `jit_runtime.add` fills the unused tail of the executable mapping with traps, so a stray jump past the code faults instead of running garbage.
 - x86-64 `CallConv.sysv` / `.win64` / `.host`: argument, return and callee-saved registers, Win64 shadow space. `prolog(saved, locals)` / `epilog(saved, adj)` build an rbp frame keeping rsp 16-byte aligned.
 - AArch64 `prolog(locals)` / `epilog(n)`: `stp x29, x30` frame plus up to 4080 bytes of locals (AAPCS64).
+
+### Buffer limits
+
+`CodeBuffer.max_size` (bytes, capped at 2 GiB) and `CodeBuffer.max_labels` can be lowered after `init`. Exceeding them returns `CodeTooLarge` (from growth, or at the latest from `finalize`) and `TooManyLabels` (from `newLabel`).

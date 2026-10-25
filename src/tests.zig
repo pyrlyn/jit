@@ -526,3 +526,19 @@ test "jit runtime: prolog/epilog function runs; tail is trap-filled" {
     const trap: u8 = if (builtin.cpu.arch == .x86_64) 0xCC else 0;
     for (f.mem[cb.code().len..]) |b| try t.expectEqual(trap, b);
 }
+
+test "code buffer limits: max_size and max_labels" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    cb.max_size = 64;
+    cb.max_labels = 2;
+    _ = try cb.newLabel();
+    _ = try cb.newLabel();
+    try t.expectError(error.TooManyLabels, cb.newLabel());
+    var big: [100]u8 = @splat(0x90);
+    try t.expectError(error.CodeTooLarge, cb.emitBytes(&big));
+    try cb.emitBytes(big[0..64]);
+    // Writes that fit the existing capacity are caught at finalize.
+    try cb.emitBytes(big[0..1]);
+    try t.expectError(error.CodeTooLarge, cb.finalize());
+}
