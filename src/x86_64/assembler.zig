@@ -177,6 +177,37 @@ pub const Assembler = AssemblerT(default_options);
 
 /// Checks a memory operand: rsp cannot be an index (its SIB slot means "no index"),
 /// and a scale without an index is meaningless.
+/// Calling conventions: integer argument/return registers and callee-saved registers.
+pub const CallConv = struct {
+    args: []const Gp,
+    ret: Gp = .rax,
+    callee_saved: []const Gp,
+    /// Bytes the caller reserves above the return address (Win64 home space).
+    shadow: u32 = 0,
+
+    pub const sysv: CallConv = .{ .args = &.{ .rdi, .rsi, .rdx, .rcx, .r8, .r9 }, .callee_saved = &.{ .rbx, .rbp, .r12, .r13, .r14, .r15 } };
+    pub const win64: CallConv = .{ .args = &.{ .rcx, .rdx, .r8, .r9 }, .callee_saved = &.{ .rbx, .rbp, .rdi, .rsi, .r12, .r13, .r14, .r15 }, .shadow = 32 };
+    pub const host: CallConv = if (@import("builtin").os.tag == .windows) win64 else sysv;
+};
+
+/// Recommended NOP sequences of length 1..9 (Intel SDM, Vol. 2B "NOP").
+const nops = [9][9]u8{
+    .{ 0x90, 0, 0, 0, 0, 0, 0, 0, 0 },
+    .{ 0x66, 0x90, 0, 0, 0, 0, 0, 0, 0 },
+    .{ 0x0F, 0x1F, 0x00, 0, 0, 0, 0, 0, 0 },
+    .{ 0x0F, 0x1F, 0x40, 0x00, 0, 0, 0, 0, 0 },
+    .{ 0x0F, 0x1F, 0x44, 0x00, 0x00, 0, 0, 0, 0 },
+    .{ 0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00, 0, 0, 0 },
+    .{ 0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00, 0, 0 },
+    .{ 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0 },
+    .{ 0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00 },
+};
+
+fn padding(off: u32, boundary: u32) u32 {
+    std.debug.assert(std.math.isPowerOfTwo(boundary));
+    return (boundary - (off & (boundary - 1))) & (boundary - 1);
+}
+
 pub fn validateMem(m: Mem) Error!void {
     if (m.index) |i| {
         if (i == .rsp) return error.InvalidOperand;
@@ -661,6 +692,51 @@ pub fn AssemblerT(comptime opts: Options) type {
         pub fn nop(a: Self) Error!void {
             if (!a.active()) return a.rawNop();
             return a.emit(.nop, .{}, rawNop, .{});
+        }
+        /// `int3` (0xCC): trap.
+        pub fn int3(a: Self) Error!void {
+            try a.buf.ensure(1);
+            a.buf.put8(0xCC);
+        }
+        /// Pads with the recommended multi-byte NOPs up to a multiple of `boundary` (power of two).
+        pub fn alignNop(a: Self, boundary: u32) Error!void {
+            var pad = padding(a.buf.offset(), boundary);
+            try a.buf.ensure(pad);
+            while (pad > 0) {
+                const n = @min(pad, nops.len);
+                for (nops[n - 1][0..n]) |b| a.buf.put8(b);
+                pad -= n;
+            }
+        }
+        /// Pads with `int3` up to a multiple of `boundary` (power of two), e.g. between functions.
+        pub fn alignTrap(a: Self, boundary: u32) Error!void {
+            const pad = padding(a.buf.offset(), boundary);
+            try a.buf.ensure(pad);
+            for (0..pad) |_| a.buf.put8(0xCC);
+        }
+        /// Frame prolog: `push rbp; mov rbp, rsp; push <saved>...; sub rsp, n`, where `n` is
+        /// `locals` rounded so that rsp stays 16-byte aligned (both SysV and Win64).
+        /// Returns the stack adjustment to pass to `epilog`.
+        pub fn prolog(a: Self, saved: []const Gp, locals: u32) Error!i32 {
+            try a.push(.rbp);
+            try a.movRR(.rbp, .rsp);
+            for (saved) |r| try a.push(r);
+            const used: u32 = @intCast(saved.len * 8);
+            const adj = std.mem.alignForward(u32, used + locals, 16) - used;
+            if (adj > std.math.maxInt(i32)) return error.InvalidOperand;
+            if (adj != 0) try a.subRI(.rsp, @intCast(adj));
+            return @intCast(adj);
+        }
+        /// Frame epilog matching `prolog(saved, ...)`: `add rsp, adj; pop <saved reversed>; pop rbp; ret`.
+        pub fn epilog(a: Self, saved: []const Gp, adj: i32) Error!void {
+            if (adj != 0) try a.addRI(.rsp, adj);
+            var i = saved.len;
+            while (i > 0) {
+                i -= 1;
+                try a.pop(saved[i]);
+            }
+            try a.pop(.rbp);
+            try a.ret();
         }
         pub fn callR(a: Self, r: Gp) Error!void {
             if (!a.active()) return a.rawCallR(r);

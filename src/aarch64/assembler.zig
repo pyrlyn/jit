@@ -290,6 +290,41 @@ pub fn AssemblerT(comptime opts: Options) type {
 
         // ---- public emitters: validation + hooks around the raw encoders ----------------
         /// Emits a raw 32-bit instruction word (no operand checks beyond the hook layer).
+        /// `udf #imm16`: permanently undefined (trap).
+        pub fn udf(a: Self, imm16: u16) Error!void {
+            return a.word(imm16);
+        }
+        /// Pads with `nop` up to a multiple of `boundary` bytes (power of two, >= 4).
+        pub fn alignNop(a: Self, boundary: u32) Error!void {
+            return a.alignWith(boundary, 0xD503201F);
+        }
+        /// Pads with `udf #0` up to a multiple of `boundary` bytes (power of two, >= 4).
+        pub fn alignTrap(a: Self, boundary: u32) Error!void {
+            return a.alignWith(boundary, 0);
+        }
+        fn alignWith(a: Self, boundary: u32, w: u32) Error!void {
+            std.debug.assert(std.math.isPowerOfTwo(boundary) and boundary >= 4);
+            const off = a.buf.offset();
+            const pad = (boundary - (off & (boundary - 1))) & (boundary - 1);
+            try a.buf.ensure(pad);
+            for (0..pad / 4) |_| a.buf.put32(w);
+        }
+        /// AAPCS64 frame prolog: `stp x29, x30, [sp, #-16]!; mov x29, sp; sub sp, sp, n`
+        /// (`n` = `locals` rounded up to 16, at most 4095 rounded down). Returns `n` for `epilog`.
+        pub fn prolog(a: Self, locals: u32) Error!u12 {
+            const n = std.mem.alignForward(u32, locals, 16);
+            if (n > 4080) return error.InvalidOperand;
+            try a.word(0xA9BF7BFD); // stp x29, x30, [sp, #-16]!
+            try a.word(0x910003FD); // mov x29, sp
+            if (n != 0) try a.subImm(@enumFromInt(31), @enumFromInt(31), @intCast(n));
+            return @intCast(n);
+        }
+        /// Frame epilog matching `prolog`: `add sp, sp, n; ldp x29, x30, [sp], #16; ret`.
+        pub fn epilog(a: Self, n: u12) Error!void {
+            if (n != 0) try a.addImm(@enumFromInt(31), @enumFromInt(31), n);
+            try a.word(0xA8C17BFD); // ldp x29, x30, [sp], #16
+            try a.ret();
+        }
         pub fn word(a: Self, w: u32) Error!void {
             if (!a.active()) return a.put(w);
             return a.emit(.word, .{ .imm = w }, put, .{w});

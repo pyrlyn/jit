@@ -433,3 +433,96 @@ test "aarch64 finalize and branches: imm19 range forward/backward, labels (no va
     try t.expectError(error.InvalidLabel, a.cbnz(.x1, .{ .id = 5 }));
     try cb.finalize();
 }
+
+// ---- align, trap fill, prolog/epilog ------------------------------------------------------
+
+test "x86_64 alignNop/alignTrap/int3 and prolog/epilog" {
+    if (!opts.x86_64) return error.SkipZigTest;
+    const x = @import("x86_64/assembler.zig");
+    inline for (.{ x.AssemblerT(.{}), x.AssemblerT(.{ .validate = true }) }) |A| {
+        var cb = CodeBuffer.init(t.allocator);
+        defer cb.deinit();
+        const a = A.init(&cb);
+        try a.int3();
+        try a.alignNop(16); // 15 bytes: 9 + 6
+        try t.expectEqual(@as(usize, 16), cb.code().len);
+        try t.expectEqualSlices(u8, &.{ 0x66, 0x0F, 0x1F, 0x84, 0, 0, 0, 0, 0, 0x66, 0x0F, 0x1F, 0x44, 0, 0 }, cb.code()[1..16]);
+        try a.alignNop(16); // already aligned: nothing
+        try t.expectEqual(@as(usize, 16), cb.code().len);
+        try a.nop();
+        try a.alignTrap(8);
+        try t.expectEqualSlices(u8, &.{ 0x90, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }, cb.code()[16..24]);
+
+        cb.reset();
+        const saved = [_]x.Gp{ .rbx, .r12, .r13 };
+        const adj = try a.prolog(&saved, 20);
+        try t.expectEqual(@as(i32, 24), adj); // 24 saved + 24 = 48 >= 24 + 20
+        try a.epilog(&saved, adj);
+        try t.expectEqualSlices(u8, &.{
+            0x55, 0x48, 0x89, 0xE5, 0x53, 0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x18,
+            0x48, 0x83, 0xC4, 0x18, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D, 0xC3,
+        }, cb.code());
+    }
+    try t.expectEqualSlices(x.Gp, &.{ .rdi, .rsi, .rdx, .rcx, .r8, .r9 }, x.CallConv.sysv.args);
+    try t.expectEqual(@as(u32, 32), x.CallConv.win64.shadow);
+}
+
+test "aarch64 alignNop/alignTrap/udf and prolog/epilog" {
+    const x = @import("aarch64/assembler.zig");
+    inline for (.{ x.AssemblerT(.{}), x.AssemblerT(.{ .validate = true }) }) |A| {
+        var cb = CodeBuffer.init(t.allocator);
+        defer cb.deinit();
+        const a = A.init(&cb);
+        try a.udf(7);
+        try a.alignNop(16);
+        try a.alignTrap(32);
+        const w = std.mem.bytesAsSlice(u32, cb.code());
+        try t.expectEqual(@as(usize, 8), w.len);
+        try t.expectEqual(@as(u32, 7), w[0]);
+        try t.expectEqual(@as(u32, 0xD503201F), w[1]);
+        try t.expectEqual(@as(u32, 0xD503201F), w[3]);
+        try t.expectEqual(@as(u32, 0), w[4]);
+
+        cb.reset();
+        const n = try a.prolog(20);
+        try t.expectEqual(@as(u12, 32), n);
+        try a.epilog(n);
+        const p = std.mem.bytesAsSlice(u32, cb.code());
+        try t.expectEqualSlices(u32, &.{ 0xA9BF7BFD, 0x910003FD, 0xD10083FF, 0x910083FF, 0xA8C17BFD, 0xD65F03C0 }, @alignCast(p));
+        try t.expectError(error.InvalidOperand, a.prolog(5000));
+    }
+}
+
+test "jit runtime: prolog/epilog function runs; tail is trap-filled" {
+    const builtin = @import("builtin");
+    const rt = @import("core/jit_runtime.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            const x = @import("x86_64/assembler.zig");
+            const a = x.Assembler.init(&cb);
+            const cc = x.CallConv.host;
+            const saved = [_]x.Gp{.rbx};
+            const adj = try a.prolog(&saved, 8);
+            try a.movRR(.rbx, cc.args[0]);
+            try a.addRR(.rbx, cc.args[1]);
+            try a.movRR(cc.ret, .rbx);
+            try a.epilog(&saved, adj);
+        },
+        .aarch64 => {
+            const x = @import("aarch64/assembler.zig");
+            const a = x.Assembler.init(&cb);
+            const n = try a.prolog(16);
+            try a.add(.x0, .x0, .x1);
+            try a.epilog(n);
+        },
+        else => return error.SkipZigTest,
+    }
+    try cb.finalize();
+    const f = try rt.add(&cb);
+    defer f.release();
+    try t.expectEqual(@as(i64, 42), f.ptr(*const fn (i64, i64) callconv(.c) i64)(40, 2));
+    const trap: u8 = if (builtin.cpu.arch == .x86_64) 0xCC else 0;
+    for (f.mem[cb.code().len..]) |b| try t.expectEqual(trap, b);
+}

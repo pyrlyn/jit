@@ -49,10 +49,12 @@ pub fn add(cb: *const CodeBuffer) Error!Function {
     if (use_map_jit) {
         pthread_jit_write_protect_np(0); // this thread: writable
         @memcpy(mem[0..code.len], code);
+        fillTrap(mem[code.len..]);
         pthread_jit_write_protect_np(1); // this thread: executable
         sys_icache_invalidate(mem.ptr, code.len);
     } else {
         @memcpy(mem[0..code.len], code);
+        fillTrap(mem[code.len..]);
         if (mprotect(mem.ptr, size, PROT_READ | PROT_EXEC) != 0) {
             _ = munmap(mem.ptr, size);
             return error.ProtectFailed;
@@ -60,4 +62,9 @@ pub fn add(cb: *const CodeBuffer) Error!Function {
         if (builtin.cpu.arch == .aarch64) __clear_cache(mem.ptr, mem.ptr + code.len);
     }
     return .{ .mem = mem };
+}
+
+/// Fills unused executable memory with traps: `int3` (0xCC) on x86-64, `udf #0` (zero words) on AArch64.
+pub fn fillTrap(mem: []u8) void {
+    @memset(mem, if (builtin.cpu.arch == .x86_64) 0xCC else 0x00);
 }

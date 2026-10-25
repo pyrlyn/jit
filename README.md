@@ -238,3 +238,10 @@ Results: [bench/RESULTS.md](bench/RESULTS.md).
 - `cpu_check = .target` with `target_features = &.{"BMI2", ...}` rejects instructions needing other features at compile time; `.host` checks against detected host features (CPUID / sysctl) at runtime (`error.UnsupportedCpuFeature`).
 - Always on (all modes): `finalize` fails with `UnboundLabel` (list them with `unresolvedLabels`), `DisplacementOutOfRange` (rel8/rel32, AArch64 imm19/imm26) or `CodeTooLarge` (> 2 GiB) and leaves the code untouched; binding a label twice gives `LabelAlreadyBound`, an unknown label id gives `InvalidLabel`.
 - Two AsmJit DB bugs are overridden in the generator (`cbz Xn`, `ret Xn` patterns).
+
+### Alignment, traps, calling conventions, frames
+
+- `alignNop(n)` pads with recommended multi-byte NOPs (x86-64) / `nop` words (AArch64); `alignTrap(n)` pads with `int3` / `udf #0`. `int3()` and `udf(imm16)` emit a single trap.
+- `jit_runtime.add` fills the unused tail of the executable mapping with traps, so a stray jump past the code faults instead of running garbage.
+- x86-64 `CallConv.sysv` / `.win64` / `.host`: argument, return and callee-saved registers, Win64 shadow space. `prolog(saved, locals)` / `epilog(saved, adj)` build an rbp frame keeping rsp 16-byte aligned.
+- AArch64 `prolog(locals)` / `epilog(n)`: `stp x29, x30` frame plus up to 4080 bytes of locals (AAPCS64).
