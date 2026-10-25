@@ -126,3 +126,10 @@ Measured on the benchmark, not by rule:
 - The bench timing loop has no calls into emit functions (checked with `objdump -d`); the
   remaining calls are `grow*` (cold), timing and printing.
 - With hooks compiled in, the hooked branch is `@branchHint(.unlikely)`.
+
+## ISA database validation and always-on checks
+
+- `scripts/gen_isa_tables.py` reads `ref/asmjit/db/isa_x86.json` / `isa_aarch64.json` and generates `src/x86_64/isa.zig` and `src/aarch64/isa.zig`: per implemented instruction, the allowed forms (x86: opcode, /digit, immediate size, REX.W; AArch64: mask/value, register-31 meaning, immediate width/scale) and the required CPU features. `A64_OP_OVERRIDE` corrects two DB bugs (`cbz Xn`, `ret Xn`).
+- With `validate`, `encode()` matches the emitted bytes against the forms; on mismatch the bytes are rolled back and `error.EncodingMismatch` is returned.
+- `Options.cpu_check`: `.none` (default), `.target` (`target_features` resolved at comptime; an instruction needing a missing feature is a compile error), `.host` (`cpu.host()` via CPUID+XGETBV on x86-64, `sysctlbyname hw.optional.arm.FEAT_*` on macOS arm64; `error.UnsupportedCpuFeature`).
+- `CodeBuffer.finalize` always runs a check pass before patching: unbound referenced labels (`UnboundLabel`, list via `unresolvedLabels`), rel8/rel32/imm19/imm26 range (`DisplacementOutOfRange`), size > `maxInt(i32)` (`CodeTooLarge`, also from `grow`). On error nothing is patched. `bind` rejects unknown ids (`InvalidLabel`) and double binding (`LabelAlreadyBound`); branches always check label validity.

@@ -54,3 +54,16 @@ counting callback via function pointer); `counting` = comptime `CountingHooks` a
 
 __text size: before_off 266,028 B, after_off 262,444 B, after_default 269,380 B,
 after_counting 262,736 B. Generated code is unchanged (6834/3330/4865/10112 bytes, identical to AsmJit).
+
+## After ISA-db validation, finalize and label checks (30eb76e)
+
+ReleaseFast, 15 interleaved runs, median ns/instr. Machine load average ~60 (very noisy; absolute numbers ~1.8x higher than earlier runs). `after_*` = ed5c4ee, `safety_*` = 30eb76e.
+
+| scenario | asmjit | after_off | safety_off | after_default | safety_default | safety_default+cb | after_counting | safety_counting |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| straight | 15.19 | 3.78 | 3.85 | 3.31 | 3.34 | 7.20 | 3.84 | 3.80 |
+| calls | 15.56 | 4.20 | 4.29 | 3.62 | 3.30 | 7.30 | 2.53 | 3.34 |
+| loops | 20.86 | 3.98 | 4.47 | 3.66 | 3.01 | 7.16 | 3.48 | 3.90 |
+| mem | 16.34 | 2.78 | 2.88 | 3.38 | 3.39 | 6.31 | 2.79 | 2.29 |
+
+Differences are within run-to-run noise at this load; no systematic regression. The new always-on checks run in `finalize`/`bind` (outside the emit loop); the ISA-db byte check is only compiled in with `validate`.
