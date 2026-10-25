@@ -150,7 +150,7 @@ const Enc = struct {
 };
 
 /// Instruction id seen by validation and hooks (one per public emitter).
-pub const Inst = enum { mov_rr, mov_rm, mov_mr, mov_mi, lea, mov_ri, movabs, alu_rr, alu_rm, alu_mr, alu_ri, test_rr, imul_rr, imul_rm, imul_rri, push, pop, ret, nop, call_r, jmp_r, jmp, call, jcc };
+pub const Inst = enum { mov_rr, mov_rm, mov_mr, mov_mi, lea, mov_ri, movabs, alu_rr, alu_rm, alu_mr, alu_ri, test_rr, imul_rr, imul_rm, imul_rri, push, pop, ret, nop, call_r, jmp_r, jmp, call, jcc, gp };
 
 /// Operands of one instruction, as passed to validation and hooks. Unused fields are null.
 /// `r0` is the first register operand in Intel order (destination when it is a register).
@@ -162,12 +162,77 @@ pub const Ops = struct {
     label: ?Label = null,
     alu: ?Alu = null,
     cond: ?Cond = null,
+    /// `.gp` (the generated `inst` path): the mnemonic; operands are not decoded into `Ops`.
+    mn: ?[]const u8 = null,
 };
 pub const PreEvent = safety.PreEvent(Inst, Ops);
 pub const Event = safety.Event(Inst, Ops);
 pub const CountingHooks = safety.CountingHooks;
 pub const LogHooks = safety.LogHooks;
 pub const CallbackHooks = safety.CallbackHooks(Event);
+
+/// Logger hook: an Intel-syntax text listing with offsets and bytes, e.g.
+/// `0000  48 89 c8              mov rax, rcx`. Use as `Options.Hooks = Logger(cap)` or forward
+/// to it from a `CallbackHooks` callback. Text is truncated (flag set) when `cap` is exceeded.
+pub fn Logger(comptime cap: usize) type {
+    return struct {
+        const Self = @This();
+        buf: [cap]u8 = undefined,
+        len: usize = 0,
+        truncated: bool = false,
+        pub fn post(self: *Self, ev: Event) void {
+            self.print("{x:0>4} ", .{ev.offset});
+            for (ev.bytes) |b| self.print(" {x:0>2}", .{b});
+            var n = ev.bytes.len * 3;
+            while (n < 22) : (n += 1) self.print(" ", .{});
+            self.print(" {s}", .{mnemonic(ev.id, ev.ops)});
+            var first = true;
+            if (ev.ops.r0) |r| self.operand(&first, "{s}", .{@tagName(r)});
+            if (ev.ops.mem) |m| {
+                self.operand(&first, "[", .{});
+                if (m.base) |b| self.print("{s}", .{@tagName(b)});
+                if (m.index) |i| self.print("{s}{s}*{d}", .{ if (m.base != null) "+" else "", @tagName(i), @as(u8, 1) << @intFromEnum(m.scale) });
+                if (m.disp != 0 or (m.base == null and m.index == null)) self.print("{s}{d}", .{ if (m.disp >= 0 and (m.base != null or m.index != null)) "+" else "", m.disp });
+                self.print("]", .{});
+            }
+            if (ev.ops.r1) |r| self.operand(&first, "{s}", .{@tagName(r)});
+            if (ev.ops.imm) |v| self.operand(&first, "{d}", .{v});
+            if (ev.ops.label) |l| self.operand(&first, "L{d}", .{l.id});
+            self.print("\n", .{});
+        }
+        fn operand(self: *Self, first: *bool, comptime fmt: []const u8, args: anytype) void {
+            self.print("{s}", .{if (first.*) " " else ", "});
+            first.* = false;
+            self.print(fmt, args);
+        }
+        fn print(self: *Self, comptime fmt: []const u8, args: anytype) void {
+            const out = std.fmt.bufPrint(self.buf[self.len..], fmt, args) catch {
+                self.truncated = true;
+                return;
+            };
+            self.len += out.len;
+        }
+        pub fn text(self: *const Self) []const u8 {
+            return self.buf[0..self.len];
+        }
+    };
+}
+
+fn mnemonic(id: Inst, ops: Ops) []const u8 {
+    return switch (id) {
+        .mov_rr, .mov_rm, .mov_mr, .mov_mi, .mov_ri => "mov",
+        .alu_rr, .alu_rm, .alu_mr, .alu_ri => @tagName(ops.alu.?),
+        .test_rr => "test",
+        .imul_rr, .imul_rm, .imul_rri => "imul",
+        .call_r => "call",
+        .jmp_r => "jmp",
+        .jcc => switch (ops.cond.?) {
+            inline else => |c| "j" ++ @tagName(c),
+        },
+        .gp => ops.mn orelse "?",
+        else => @tagName(id),
+    };
+}
 
 /// Options from `-Dvalidate` / `-Dhooks` (hooks => runtime `CallbackHooks`).
 pub const default_options: Options = .{
@@ -347,7 +412,7 @@ pub fn AssemblerT(comptime opts: Options) type {
         /// sized memory (`gp.byte/word/dword/qword`), RIP-relative (`gp.rip`, `gp.ripLabel`) and
         /// immediates. Example: `a.inst(.movzx, .{ gp.r32(.rax), gp.byte(ptr(.rdi, 0)) })`.
         /// CPU checks: deny list and `.target` at compile time, `.host` at runtime (validate).
-        /// Hooks are not invoked for this generic path.
+        /// Hooks see it as `Inst.gp` with `Ops.mn` set (operands are not decoded into `Ops`).
         pub fn inst(a: Self, comptime mn: gp.Mnemonic, args: anytype) (Error || gp.Error)!void {
             const need = comptime gp.requiredFeatures(mn);
             comptime checkDeny(need, @tagName(mn));
@@ -359,7 +424,13 @@ pub fn AssemblerT(comptime opts: Options) type {
                 },
                 .host => try checkFeatureSet(need, cpu.host() orelse return error.UnsupportedCpuFeature),
             };
-            return gp.emit(a.buf, mn, args);
+            if (comptime !has_hooks) return gp.emit(a.buf, mn, args);
+            const h = a.hooks orelse return gp.emit(a.buf, mn, args);
+            const ops: Ops = .{ .mn = @tagName(mn) };
+            const start: u32 = @intCast(a.buf.len);
+            if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = .gp, .ops = ops, .offset = start });
+            try gp.emit(a.buf, mn, args);
+            if (comptime @hasDecl(Hooks, "post")) h.post(.{ .id = .gp, .ops = ops, .offset = start, .bytes = a.buf.data[start..a.buf.len] });
         }
 
         /// Raw encoder + (validate mode) check of the emitted bytes against the AsmJit forms.

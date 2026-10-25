@@ -266,9 +266,24 @@ try a.inst(.lea, .{ gp.r64(.rcx), gp.rip(-7, .none) });
 - Form selection: the shortest matching encoding, ties to MR, matching LLVM.
 - `scripts/gen_gp_tests.py` writes `src/gp_tests.zig`: 3126 cases (every form with low/high/REX-only registers, SIB, RBP-like, RIP memory, immediates) checked byte-for-byte against LLVM.
 - CPU features come from the database (`gp.requiredFeatures`). `Options.deny_features` rejects an instruction at compile time in every mode. `cpu_check = .target/.host` (with `validate`) checks the target or the host.
-- Skipped: VEX/XOP/APX encodings, segment/control/debug registers, string instructions with implicit memory, moffs, far pointers and relative branches (use `jmp`/`jcc`/`call` with labels). `ah`..`bh` are not encodable. Hooks are not called on the `inst` path.
+- Skipped: VEX/XOP/APX encodings, segment/control/debug registers, string instructions with implicit memory, moffs, far pointers and relative branches (use `jmp`/`jcc`/`call` with labels). `ah`..`bh` are not encodable. Hooks are called on the `inst` path as `Inst.gp` with `Ops.mn` (operands not decoded).
 - An AsmJit DB bug is overridden: `shrd r/m, r, imm8` has a spurious 66 prefix.
 - Differential fuzzing: `python3 scripts/fuzz_gp.py [cases=5000] [seed] [--target=x86_64-macos]` builds random forms (all registers, SIB/no-base/RIP memory, edge immediates), gets the bytes from LLVM, writes them to `src/gp_fuzz.zig`, runs `zig build test -Dgp-fuzz=true` and restores the placeholder. It found and fixed: `push 128..255` (6A sign-extends), `xchg eax, eax` (90 is `nop`, no zero-extension), and the 16-bit imm8 tie-break. Accepted, semantically identical deviations: `and r64, u32` drops REX.W (AsmJit), `xchg rax, rax` = `90`, `int 3` = `CD 03` (use `int3()` for `CC`).
+
+### Logger (text listing)
+
+`x86_64.Logger(cap)` is a hook that writes an Intel-syntax listing with offsets and bytes:
+
+```
+0000  48 89 c8              mov rax, rcx
+0003  48 83 c0 01           add rax, 1
+0007  0f b6 07              movzx
+```
+
+- Enable: `AssemblerT(.{ .Hooks = x.Logger(4096) }).initHooks(&cb, &log)`, then `log.text()`. With the default `CallbackHooks`, forward events from your callback to a `Logger` instance.
+- Disable: don't attach it (cost: one null check per instruction) or build with `-Dhooks=false` for the default assembler.
+- Test: `x86_64 Logger: listing ...` in `src/tests.zig`.
+- Limitations: fixed-size buffer (sets `truncated`); register names are 64-bit for the hand-written emitters; the generated `inst` path logs the mnemonic and bytes only; AArch64 keeps the generic `LogHooks` (id + bytes).
 
 ### Dual mapping (RW/RX views)
 

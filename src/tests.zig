@@ -303,6 +303,7 @@ test "x86_64 isa: every instruction has AsmJit forms; matchForm accepts/rejects"
     const x = @import("x86_64/assembler.zig");
     inline for (@typeInfo(x.Inst).@"enum".fields) |f| {
         const id: x.Inst = @enumFromInt(f.value);
+        if (id == .gp) continue; // generated GP path: its own tables (gp_table.zig)
         const ops: x.Ops = .{ .alu = .add, .cond = .e };
         try t.expect(x.formsFor(id, ops).len > 0);
         try t.expect(x.requiredFeatures(id).count() == 0); // all current forms are baseline x86-64
@@ -738,4 +739,25 @@ test "jit_runtime: dual mapping runs code and patches through the RW view" {
     if (rt.underRosetta()) return; // Rosetta does not observe writes through the alias
     if (x86) f.write(1, &.{42}) else f.write(0, std.mem.asBytes(&@as(u32, 0x52800540)));
     try t.expectEqual(@as(u32, 42), f.ptr(F)());
+}
+
+test "x86_64 Logger: listing with offsets, bytes and operands (also for inst)" {
+    if (!opts.x86_64) return error.SkipZigTest;
+    const x = @import("x86_64/assembler.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    var log: x.Logger(1024) = .{};
+    const a = x.AssemblerT(.{ .Hooks = x.Logger(1024) }).initHooks(&cb, &log);
+    try a.movRR(.rax, .rcx);
+    try a.addRI(.rax, 1);
+    try a.inst(.movzx, .{ x.gp.r32(.rax), x.gp.byte(x.ptr(.rdi, 0)) });
+    try a.ret();
+    try t.expectEqualStrings(
+        \\0000  48 89 c8              mov rax, rcx
+        \\0003  48 83 c0 01           add rax, 1
+        \\0007  0f b6 07              movzx
+        \\000a  c3                    ret
+        \\
+    , log.text());
+    try t.expect(!log.truncated);
 }
