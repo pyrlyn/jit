@@ -1,0 +1,18 @@
+# build output
+zig-out/
+.zig-cache/
+# local reference clone of AsmJit
+/ref/
+# AsmJit build trees and benchmark outputs
+bench/asmjit-build/
+bench/build-asmjit/
+bench/out/
+bench/bins/
+bench/asmjit_bench
+*.log
+# binaries
+*.o
+*.a
+*.dylib
+*.so
+*.exe
