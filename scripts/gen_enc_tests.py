@@ -157,11 +157,16 @@ def main():
            "//! LLVM assembler (clang -c + objdump), one case per instruction form and operand class.",
            'const std = @import("std");', 'const opts = @import("zigjit_options");',
            'const CodeBuffer = @import("core/code_buffer.zig").CodeBuffer;', "",
-           "fn check(comptime A: type, expected: []const u8, comptime f: anytype, args: anytype, asm_text: []const u8) !void {",
-           "    var cb = CodeBuffer.init(std.testing.allocator);", "    defer cb.deinit();",
-           "    try @call(.auto, f, .{A.init(&cb)} ++ args);",
-           "    std.testing.expectEqualSlices(u8, expected, cb.code()) catch |e| {",
-           '        std.debug.print("encoding mismatch: {s}\\n", .{asm_text});', "        return e;", "    };", "}", ""]
+           "/// Runs one case twice: plain assembler, and with validation (operand checks + the emitted",
+           "/// bytes checked against the AsmJit database forms in isa.zig).",
+           "fn check(comptime A: type, expected: []const u8, comptime name: []const u8, args: anytype, asm_text: []const u8) !void {",
+           "    inline for (.{ A.Plain, A.Checked }) |T| {",
+           "        var cb = CodeBuffer.init(std.testing.allocator);", "        defer cb.deinit();",
+           "        @call(.auto, @field(T, name), .{T.init(&cb)} ++ args) catch |e| {",
+           '            std.debug.print("{s}: {s}\\n", .{ @errorName(e), asm_text });', "            return e;", "        };",
+           "        std.testing.expectEqualSlices(u8, expected, cb.code()) catch |e| {",
+           '            std.debug.print("encoding mismatch: {s}\\n", .{asm_text});', "            return e;", "        };",
+           "    }", "}", ""]
     for name, target, cases, intel, mod, decls in (
             ("x86_64", "x86_64-apple-macos", x86_cases(), True, "x86_64/assembler.zig",
              ["Gp", "Alu", "Mem", "ptr", "ptrIdx"]),
@@ -173,11 +178,14 @@ def main():
         out.append(f'    const m = @import("{mod}");')
         for d in decls:
             out.append(f"    const {d} = m.{d};")
-        out.append("    const A = m.AssemblerT(.{});")
+        out.append("    const A = struct {")
+        out.append("        const Plain = m.AssemblerT(.{});")
+        out.append("        const Checked = m.AssemblerT(.{ .validate = true });")
+        out.append("    };")
         for (call, a), b in zip(cases, bs):
             fn, args = call.split(", ", 1)
             hexs = ", ".join(f"0x{x:02X}" for x in b)
-            out.append(f'    try check(A, &.{{ {hexs} }}, A.{fn}, {args}, "{a}");')
+            out.append(f'    try check(A, &.{{ {hexs} }}, "{fn}", {args}, "{a}");')
         out.append("}")
         out.append("")
     with open(os.path.join(root, "src", "enc_tests.zig"), "w") as f:

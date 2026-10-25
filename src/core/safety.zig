@@ -15,7 +15,24 @@ pub const Options = struct {
     validate: bool = false,
     /// Hook type (struct with optional `pre`/`post`), or `void` for no hooks.
     Hooks: type = void,
+    /// CPU-feature check for emitted instructions (needs `validate`):
+    /// - `.none`: no check;
+    /// - `.target`: required features must be in `target_features` (checked at compile time);
+    /// - `.host`: required features must be present on the running CPU (CPUID / sysctl).
+    cpu_check: CpuCheck = .none,
+    /// Feature names from AsmJit's database (`isa.Feature`), e.g. `&.{ "SSE4_2", "AVX2" }`.
+    target_features: []const []const u8 = &.{},
 };
+
+pub const CpuCheck = enum { none, target, host };
+
+/// Converts feature names to a backend's `Features` set at compile time.
+pub fn featureSet(comptime Feature: type, comptime names: []const []const u8) std.EnumSet(Feature) {
+    @setEvalBranchQuota(100_000);
+    var set: std.EnumSet(Feature) = .initEmpty();
+    for (names) |n| set.insert(std.meta.stringToEnum(Feature, n) orelse @compileError("unknown CPU feature: " ++ n));
+    return set;
+}
 
 /// Event passed to `pre` hooks.
 pub fn PreEvent(comptime Inst: type, comptime Ops: type) type {

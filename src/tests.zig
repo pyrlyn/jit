@@ -295,3 +295,141 @@ test "default options: hooks on in every mode, validation only in Debug/ReleaseS
         try t.expectEqual(safe, m.default_options.validate);
     }
 }
+
+// ---- ISA database (AsmJit db) driven validation ------------------------------------------
+
+test "x86_64 isa: every instruction has AsmJit forms; matchForm accepts/rejects" {
+    if (!opts.x86_64) return error.SkipZigTest;
+    const x = @import("x86_64/assembler.zig");
+    inline for (@typeInfo(x.Inst).@"enum".fields) |f| {
+        const id: x.Inst = @enumFromInt(f.value);
+        const ops: x.Ops = .{ .alu = .add, .cond = .e };
+        try t.expect(x.formsFor(id, ops).len > 0);
+        try t.expect(x.requiredFeatures(id).count() == 0); // all current forms are baseline x86-64
+    }
+    const push = x.isa.table.push[0];
+    try t.expect(x.matchForm(push, &.{0x53})); // push rbx
+    try t.expect(x.matchForm(push, &.{ 0x41, 0x57 })); // push r15
+    try t.expect(!x.matchForm(push, &.{0x5B})); // pop rbx
+    const add_i8 = x.isa.table.alu_ri[0][0]; // add r/m64, imms8 (83 /0 ib)
+    try t.expect(x.matchForm(add_i8, &.{ 0x48, 0x83, 0xC0, 0x01 }));
+    try t.expect(!x.matchForm(add_i8, &.{ 0x48, 0x83, 0xE8, 0x01 })); // /5 = sub
+    try t.expect(!x.matchForm(x.isa.table.jmp[1], &.{ 0xE9, 0, 0 })); // rel32 too short
+    try t.expectEqualStrings("add x:rv/mv, imms8", add_i8.asmjit);
+}
+
+test "x86_64 cpu features: set check, target option, host detection" {
+    if (!opts.x86_64) return error.SkipZigTest;
+    const x = @import("x86_64/assembler.zig");
+    const builtin = @import("builtin");
+    const need = x.isa.featureSet(&.{ .AVX2, .BMI2 });
+    try t.expectError(error.UnsupportedCpuFeature, x.checkFeatureSet(need, x.isa.featureSet(&.{.AVX2})));
+    try x.checkFeatureSet(need, x.isa.featureSet(&.{ .AVX2, .BMI2, .SSE2 }));
+
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    // Comptime target check: baseline forms need nothing, so this compiles and emits.
+    const At = x.AssemblerT(.{ .validate = true, .cpu_check = .target, .target_features = &.{"SSE2"} });
+    try At.init(&cb).movRR(.rax, .rcx);
+    try t.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xC8 }, cb.code());
+
+    const Ah = x.AssemblerT(.{ .validate = true, .cpu_check = .host });
+    if (builtin.cpu.arch == .x86_64) {
+        const h = x.cpu.host().?;
+        try t.expect(h.contains(.SSE2)); // baseline x86-64 (also under Rosetta)
+        try Ah.init(&cb).ret();
+    } else {
+        try t.expect(x.cpu.host() == null);
+        try t.expectError(error.UnsupportedCpuFeature, Ah.init(&cb).ret());
+    }
+}
+
+test "aarch64 isa: forms match the encoder, DB register-31 rules, host features" {
+    if (!opts.aarch64) return error.SkipZigTest;
+    const m = @import("aarch64/assembler.zig");
+    const builtin = @import("builtin");
+    try t.expect(m.isa.table.add_imm.rd_sp and m.isa.table.add_imm.rn_sp);
+    try t.expect(!m.isa.table.add.rd_sp and !m.isa.table.add.rn_sp);
+    try t.expect(m.isa.table.ldr.rn_sp and !m.isa.table.ldr.rd_sp);
+    try t.expectEqual(@as(u8, 12), m.isa.table.ldr.imm_bits);
+    try t.expectEqual(@as(u8, 8), m.isa.table.ldr.imm_scale);
+    try t.expectEqual(@as(u8, 19), m.isa.table.cbz.imm_bits);
+    try t.expectEqual(@as(u32, 0xB4000000), m.isa.table.cbz.value); // DB fix-up (see generator)
+    try t.expectEqual(@as(u32, 0xD65F0000), m.isa.table.ret.value); // DB fix-up
+    if (builtin.cpu.arch == .aarch64 and builtin.os.tag == .macos) {
+        try t.expect(m.cpu.host().?.contains(.ASIMD));
+        var cb = CodeBuffer.init(t.allocator);
+        defer cb.deinit();
+        try m.AssemblerT(.{ .validate = true, .cpu_check = .host }).init(&cb).ret();
+    } else try t.expect(m.cpu.host() == null);
+    try t.expectError(error.UnsupportedCpuFeature, m.checkFeatureSet(m.isa.featureSet(&.{.SVE2}), m.isa.featureSet(&.{.ASIMD})));
+}
+
+// ---- finalize: offset overflow checks (always on) ------------------------------------------
+
+test "finalize: out-of-range fixups are errors and leave the code untouched" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const l = try cb.newLabel();
+    try cb.emitBytes(&.{ 0xEB, 0x00 }); // jmp rel8 with a fixup to a far label
+    try cb.addFixup(.{ .at = 1, .base = 2, .label = l.id, .kind = .rel8 });
+    try cb.emitBytes(&([_]u8{0x90} ** 200));
+    try cb.bind(l);
+    try t.expectError(error.DisplacementOutOfRange, cb.finalize());
+    try t.expectEqual(@as(u8, 0x00), cb.code()[1]); // not patched
+    // Code size limit (2 GiB): checked before any allocation.
+    try t.expectError(error.CodeTooLarge, cb.ensure(@import("core/code_buffer.zig").max_code_size));
+}
+
+test "x86_64 finalize: forward branch to an unbound label; label errors" {
+    if (!opts.x86_64) return error.SkipZigTest;
+    const x = @import("x86_64/assembler.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = x.AssemblerT(.{}).init(&cb); // no validate: these checks are always on
+    const l0 = try a.newLabel();
+    const l1 = try a.newLabel();
+    const l2 = try a.newLabel();
+    try a.jmp(l1);
+    try a.jcc(.e, l2);
+    try a.call(l1);
+    try a.bind(l0);
+    try t.expectError(error.LabelAlreadyBound, a.bind(l0));
+    try t.expectError(error.InvalidLabel, a.bind(.{ .id = 99 }));
+    try t.expectError(error.InvalidLabel, a.jmp(.{ .id = 99 }));
+    try t.expectError(error.UnboundLabel, cb.finalize());
+    var ids: [8]u32 = undefined;
+    try t.expectEqualSlices(u32, &.{ l1.id, l2.id }, cb.unresolvedLabels(&ids));
+    try a.bind(l1);
+    try a.bind(l2);
+    try cb.finalize();
+}
+
+test "aarch64 finalize and branches: imm19 range forward/backward, labels (no validate)" {
+    if (!opts.aarch64) return error.SkipZigTest;
+    const m = @import("aarch64/assembler.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = m.AssemblerT(.{}).init(&cb);
+    const top = try a.newLabel();
+    try a.bind(top);
+    const fwd = try a.newLabel();
+    try a.cbz(.x0, fwd);
+    for (0..(1 << 18)) |_| try a.word(0xD503201F);
+    try a.bind(fwd);
+    try t.expectError(error.DisplacementOutOfRange, cb.finalize()); // +2^18 words: imm19 overflow
+    try t.expectEqual(@as(u32, 0xB4000000), std.mem.readInt(u32, cb.code()[0..4], .little)); // untouched
+    // backward: rejected at emit time even without validation (never truncated)
+    try t.expectError(error.DisplacementOutOfRange, a.bcond(.eq, top));
+    try a.b(top); // imm26 still fits
+    cb.reset();
+    const l = try a.newLabel();
+    try a.b(l);
+    try t.expectError(error.UnboundLabel, cb.finalize());
+    var ids: [4]u32 = undefined;
+    try t.expectEqualSlices(u32, &.{l.id}, cb.unresolvedLabels(&ids));
+    try a.bind(l);
+    try t.expectError(error.LabelAlreadyBound, a.bind(l));
+    try t.expectError(error.InvalidLabel, a.cbnz(.x1, .{ .id = 5 }));
+    try cb.finalize();
+}

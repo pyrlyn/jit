@@ -25,7 +25,10 @@ pub const Fixup = struct {
     kind: FixupKind,
 };
 
-pub const Error = error{ OutOfMemory, UnboundLabel, LabelAlreadyBound, DisplacementOutOfRange };
+pub const Error = error{ OutOfMemory, UnboundLabel, LabelAlreadyBound, DisplacementOutOfRange, InvalidLabel, CodeTooLarge };
+
+/// Code is limited to 2 GiB so every rel32 / label offset fits in an i32 / u32.
+pub const max_code_size: usize = std.math.maxInt(i32);
 
 const unbound: u32 = std.math.maxInt(u32);
 
@@ -69,8 +72,10 @@ pub const CodeBuffer = struct {
 
     noinline fn grow(self: *CodeBuffer, n: usize) Error!void {
         @branchHint(.cold);
+        if (self.len + n > max_code_size) return error.CodeTooLarge;
         var cap = @max(self.data.len * 2, 4096);
         while (cap - self.len < n) cap *= 2;
+        cap = @min(cap, max_code_size + 16); // +16: room for the 16-byte instruction store
         if (self.gpa.resize(self.data, cap)) {
             self.data = self.data.ptr[0..cap];
             return;
@@ -118,7 +123,9 @@ pub const CodeBuffer = struct {
         try self.labels.ensureUnusedCapacity(self.gpa, @max(self.labels.capacity, 64));
     }
 
+    /// Errors: `InvalidLabel` (not created by this buffer), `LabelAlreadyBound` (bound twice).
     pub inline fn bind(self: *CodeBuffer, l: Label) Error!void {
+        if (l.id >= self.labels.items.len) return error.InvalidLabel;
         const p = &self.labels.items[l.id];
         if (p.* != unbound) return error.LabelAlreadyBound;
         p.* = self.offset();
@@ -138,8 +145,44 @@ pub const CodeBuffer = struct {
         try self.fixups.ensureUnusedCapacity(self.gpa, @max(self.fixups.capacity, 64));
     }
 
+    /// True if `l` was created by this buffer.
+    pub inline fn isValidLabel(self: *const CodeBuffer, l: Label) bool {
+        return l.id < self.labels.items.len;
+    }
+
+    /// Labels that are referenced by a pending fixup but not bound (deduplicated, in order of
+    /// first use). Writes up to `out.len` ids; use after `finalize` returned `UnboundLabel`.
+    pub fn unresolvedLabels(self: *const CodeBuffer, out: []u32) []u32 {
+        var n: usize = 0;
+        outer: for (self.fixups.items) |f| {
+            if (self.labels.items[f.label] != unbound) continue;
+            for (out[0..n]) |id| if (id == f.label) continue :outer;
+            if (n == out.len) break;
+            out[n] = f.label;
+            n += 1;
+        }
+        return out[0..n];
+    }
+
     /// Resolves all label fixups. Call once after emission, before copying code out.
+    /// Checks are always on: an unbound label returns `UnboundLabel` (see `unresolvedLabels`),
+    /// a displacement that does not fit its field returns `DisplacementOutOfRange`, and code
+    /// over 2 GiB returns `CodeTooLarge`. Nothing is patched when an error is returned.
     pub fn finalize(self: *CodeBuffer) Error!void {
+        if (self.len > max_code_size) return error.CodeTooLarge;
+        // Pass 1: check everything, so a failing finalize leaves the code untouched.
+        for (self.fixups.items) |f| {
+            const target = self.labels.items[f.label];
+            if (target == unbound) return error.UnboundLabel;
+            const disp: i64 = @as(i64, target) - @as(i64, f.base);
+            const ok = switch (f.kind) {
+                .rel8 => std.math.cast(i8, disp) != null,
+                .rel32 => std.math.cast(i32, disp) != null,
+                .a64_imm26 => @mod(disp, 4) == 0 and @divExact(disp, 4) >= -(1 << 25) and @divExact(disp, 4) < (1 << 25),
+                .a64_imm19 => @mod(disp, 4) == 0 and @divExact(disp, 4) >= -(1 << 18) and @divExact(disp, 4) < (1 << 18),
+            };
+            if (!ok) return error.DisplacementOutOfRange;
+        }
         for (self.fixups.items) |f| {
             const target = self.labels.items[f.label];
             if (target == unbound) return error.UnboundLabel;

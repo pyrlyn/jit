@@ -9,7 +9,11 @@ const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const CodeBuffer = core.CodeBuffer;
 pub const Label = core.Label;
-pub const Error = core.Error || error{ InvalidOperand, InvalidLabel };
+pub const Error = core.Error || error{ InvalidOperand, InvalidLabel, UnsupportedCpuFeature, EncodingMismatch };
+/// Generated from AsmJit's `db/isa_x86.json` (scripts/gen_isa_tables.py).
+pub const isa = @import("isa.zig");
+/// Host CPU feature detection.
+pub const cpu = @import("cpu.zig");
 const safety = @import("../core/safety.zig");
 const build_opts = @import("zigjit_options");
 pub const Options = safety.Options;
@@ -179,6 +183,68 @@ pub fn validateMem(m: Mem) Error!void {
     } else if (m.scale != .x1) return error.InvalidOperand;
 }
 
+/// AsmJit forms for one emitted instruction (ALU ops and conditions select a sub-table).
+pub fn formsFor(comptime id: Inst, ops: Ops) []const isa.Form {
+    return switch (id) {
+        .alu_rr, .alu_rm, .alu_mr, .alu_ri => @field(isa.table, @tagName(id))[@intFromEnum(ops.alu.?)],
+        .jcc => isa.table.jcc[@intFromEnum(ops.cond.?)],
+        else => &@field(isa.table, @tagName(id)),
+    };
+}
+
+/// Union of the CPU features required by any form of `id` (comptime).
+pub fn requiredFeatures(comptime id: Inst) isa.Features {
+    const set = comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var list: []const isa.Feature = &.{};
+        const t = @field(isa.table, @tagName(id));
+        switch (@typeInfo(@TypeOf(t)).array.child) {
+            isa.Form => for (t) |f| {
+                list = list ++ f.features;
+            },
+            else => for (t) |fs| for (fs) |f| {
+                list = list ++ f.features;
+            },
+        }
+        break :blk isa.featureSet(list);
+    };
+    return set;
+}
+
+/// Checks `need` against `have`; `error.UnsupportedCpuFeature` if anything is missing.
+pub fn checkFeatureSet(need: isa.Features, have: isa.Features) Error!void {
+    if (!need.subsetOf(have)) return error.UnsupportedCpuFeature;
+}
+
+fn immSize(k: isa.Imm) usize {
+    return switch (k) {
+        .none => 0,
+        .imm8, .rel8 => 1,
+        .imm32, .rel32 => 4,
+        .imm64 => 8,
+    };
+}
+
+/// True if `bytes` is an encoding of form `f`: opcode bytes (after REX), `+r` register
+/// in the low 3 bits, ModRM `/digit`, and the immediate size for forms without ModRM.
+pub fn matchForm(f: isa.Form, bytes: []const u8) bool {
+    var i: usize = 0;
+    while (i < bytes.len and bytes[i] & 0xF0 == 0x40) i += 1; // REX
+    if (bytes.len < i + f.opcode.len) return false;
+    for (f.opcode, 0..) |want, j| {
+        const got = bytes[i + j];
+        const last = j + 1 == f.opcode.len;
+        if (if (last and f.plus == .reg) got & 0xF8 != want else got != want) return false;
+    }
+    i += f.opcode.len;
+    if (f.modrm) {
+        if (i >= bytes.len) return false;
+        if (f.digit) |d| if ((bytes[i] >> 3) & 7 != d) return false;
+        return bytes.len >= i + 1 + immSize(f.imm);
+    }
+    return bytes.len == i + immSize(f.imm);
+}
+
 pub fn AssemblerT(comptime opts: Options) type {
     return struct {
         const Self = @This();
@@ -211,11 +277,37 @@ pub fn AssemblerT(comptime opts: Options) type {
             if (l.id >= a.buf.labels.items.len) return error.InvalidLabel;
         }
 
-        /// Full operand check for one instruction (only compiled when `opts.validate`).
-        pub inline fn validate(a: Self, id: Inst, ops: Ops) Error!void {
-            _ = id;
+        /// Operand check before encoding (only compiled when `opts.validate`).
+        pub inline fn validate(a: Self, comptime id: Inst, ops: Ops) Error!void {
             if (ops.mem) |m| try validateMem(m);
             if (ops.label) |l| try a.checkLabel(l);
+            try checkCpu(id);
+        }
+
+        /// CPU features required by `id` (from the AsmJit database) vs the configured target.
+        inline fn checkCpu(comptime id: Inst) Error!void {
+            switch (opts.cpu_check) {
+                .none => {},
+                .target => comptime {
+                    const have = safety.featureSet(isa.Feature, opts.target_features);
+                    if (!requiredFeatures(id).subsetOf(have)) @compileError("instruction " ++ @tagName(id) ++ " needs CPU features missing from target_features");
+                },
+                .host => try checkFeatureSet(requiredFeatures(id), cpu.host() orelse return error.UnsupportedCpuFeature),
+            }
+        }
+
+        /// Raw encoder + (validate mode) check of the emitted bytes against the AsmJit forms.
+        /// On mismatch the instruction is removed and `EncodingMismatch` returned.
+        inline fn encode(a: Self, comptime id: Inst, ops: Ops, comptime raw: anytype, args: anytype) Error!void {
+            if (comptime !opts.validate) return @call(.always_inline, raw, .{a} ++ args);
+            const start = a.buf.len;
+            try @call(.always_inline, raw, .{a} ++ args);
+            const bytes = a.buf.data[start..a.buf.len];
+            for (formsFor(id, ops)) |f| {
+                if (matchForm(f, bytes)) return;
+            }
+            a.buf.len = start;
+            return error.EncodingMismatch;
         }
 
         /// Validation + hooks around a raw encoder. With both layers off this is just the call.
@@ -229,18 +321,18 @@ pub fn AssemblerT(comptime opts: Options) type {
 
         inline fn emit(a: Self, comptime id: Inst, ops: Ops, comptime raw: anytype, args: anytype) Error!void {
             if (comptime opts.validate) try a.validate(id, ops);
-            if (comptime !has_hooks) return @call(.always_inline, raw, .{a} ++ args);
+            if (comptime !has_hooks) return a.encode(id, ops, raw, args);
             if (a.hooks) |h| {
                 @branchHint(.unlikely);
                 return @call(.always_inline, emitHooked, .{ a, h, id, ops, raw, args });
             }
-            return @call(.always_inline, raw, .{a} ++ args);
+            return a.encode(id, ops, raw, args);
         }
 
         fn emitHooked(a: Self, h: *Hooks, comptime id: Inst, ops: Ops, comptime raw: anytype, args: anytype) Error!void {
             const start: u32 = @intCast(a.buf.len);
             if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = id, .ops = ops, .offset = start });
-            try @call(.always_inline, raw, .{a} ++ args);
+            try a.encode(id, ops, raw, args);
             if (comptime @hasDecl(Hooks, "post")) h.post(.{ .id = id, .ops = ops, .offset = start, .bytes = a.buf.data[start..a.buf.len] });
         }
 
@@ -454,6 +546,7 @@ pub fn AssemblerT(comptime opts: Options) type {
         /// Branch to a label. Bound (backward) labels get rel8 when it fits; unbound (forward)
         /// labels get rel32 + a fixup resolved in `CodeBuffer.finalize` — AsmJit's policy.
         inline fn branch(a: Self, comptime short_op: []const u8, comptime long_op: []const u8, l: Label) Error!void {
+            if (!a.buf.isValidLabel(l)) return error.InvalidLabel; // always on: avoids an out-of-bounds read
             try a.buf.ensure(max_inst);
             const start: i64 = a.buf.offset();
             var e: Enc = .{};

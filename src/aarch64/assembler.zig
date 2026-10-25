@@ -5,7 +5,11 @@ const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const CodeBuffer = core.CodeBuffer;
 pub const Label = core.Label;
-pub const Error = core.Error || error{ InvalidImmediate, InvalidOperand, InvalidLabel };
+pub const Error = core.Error || error{ InvalidImmediate, InvalidOperand, InvalidLabel, UnsupportedCpuFeature, EncodingMismatch };
+/// Generated from AsmJit's `db/isa_aarch64.json` (scripts/gen_isa_tables.py).
+pub const isa = @import("isa.zig");
+/// Host CPU feature detection.
+pub const cpu = @import("cpu.zig");
 const safety = @import("../core/safety.zig");
 const build_opts = @import("zigjit_options");
 pub const Options = safety.Options;
@@ -78,17 +82,25 @@ pub const default_options: Options = .{
 };
 pub const Assembler = AssemblerT(default_options);
 
-/// Register 31 means XZR or SP depending on the instruction. This layer accepts it only where
-/// the meaning is unambiguous and useful: SP in add/sub/cmp-immediate and as ldr/str base,
-/// XZR as the source of `mov` and in `word`. Everywhere else it is rejected.
-fn sp31Allowed(id: Inst, comptime field: []const u8) bool {
-    return switch (id) {
-        .word => true,
-        .add_imm, .sub_imm, .cmp_imm => true,
-        .ldr, .str => comptime std.mem.eql(u8, field, "rn"),
-        .mov => comptime std.mem.eql(u8, field, "rm"),
-        else => false,
-    };
+/// AsmJit form for an instruction id (`word` has none).
+pub fn formFor(comptime id: Inst) ?isa.Form {
+    return if (id == .word) null else @field(isa.table, @tagName(id));
+}
+
+/// Register 31 means SP or XZR depending on the instruction. Allowed where AsmJit's database
+/// marks the field `Xd|SP` / `Xn|SP` (SP), plus XZR as the source of `mov` and in `word`.
+/// Everywhere else 31 would silently mean XZR, which is almost always a bug: rejected.
+fn reg31Allowed(comptime id: Inst, comptime field: []const u8) bool {
+    if (id == .word) return true;
+    if (id == .mov and comptime std.mem.eql(u8, field, "rm")) return true;
+    const f = formFor(id).?;
+    if (comptime std.mem.eql(u8, field, "rd")) return f.rd_sp;
+    if (comptime std.mem.eql(u8, field, "rn")) return f.rn_sp;
+    return false;
+}
+
+pub fn checkFeatureSet(need: isa.Features, have: isa.Features) Error!void {
+    if (!need.subsetOf(have)) return error.UnsupportedCpuFeature;
 }
 
 pub fn AssemblerT(comptime opts: Options) type {
@@ -114,24 +126,42 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.buf.newLabel();
         }
         pub inline fn bind(a: Self, l: Label) Error!void {
-            if (comptime opts.validate) if (l.id >= a.buf.labels.items.len) return error.InvalidLabel;
-            return a.buf.bind(l);
+            return a.buf.bind(l); // InvalidLabel / LabelAlreadyBound are always checked
         }
 
-        /// Full operand check (only compiled when `opts.validate`).
-        pub fn validate(a: Self, id: Inst, ops: Ops) Error!void {
+        /// Operand check before encoding (only compiled when `opts.validate`), driven by the
+        /// AsmJit form: register-31 meaning, immediate width/scale, CPU features.
+        pub inline fn validate(a: Self, comptime id: Inst, ops: Ops) Error!void {
             inline for (.{ "rd", "rn", "rm" }) |f| {
-                if (@field(ops, f)) |r| if (r == .zr_sp and !sp31Allowed(id, f)) return error.InvalidOperand;
+                if (@field(ops, f)) |r| if (r == .zr_sp and !reg31Allowed(id, f)) return error.InvalidOperand;
             }
-            if (ops.label) |l| {
-                if (l.id >= a.buf.labels.items.len) return error.InvalidLabel;
-                // Backward (bound) branches are encoded immediately: check the range here.
-                if (a.buf.labelOffset(l)) |t| {
-                    const words = @divExact(@as(i64, t) - @as(i64, @intCast(a.buf.len)), 4);
-                    const bits: u6 = if (id == .b or id == .bl) 26 else 19;
-                    const lim = @as(i64, 1) << (bits - 1);
-                    if (words < -lim or words >= lim) return error.DisplacementOutOfRange;
+            if (ops.label) |l| if (!a.buf.isValidLabel(l)) return error.InvalidLabel;
+            if (comptime formFor(id)) |form| {
+                if (ops.imm) |v| if (form.imm_bits != 0 and ops.label == null and id != .movz and id != .movk) {
+                    if (@mod(v, form.imm_scale) != 0) return error.InvalidImmediate;
+                    if (@divFloor(v, form.imm_scale) >= (@as(i64, 1) << @intCast(form.imm_bits))) return error.InvalidImmediate;
+                };
+                switch (opts.cpu_check) {
+                    .none => {},
+                    .target => comptime {
+                        if (!isa.featureSet(form.features).subsetOf(safety.featureSet(isa.Feature, opts.target_features)))
+                            @compileError("instruction " ++ @tagName(id) ++ " needs CPU features missing from target_features");
+                    },
+                    .host => try checkFeatureSet(comptime isa.featureSet(form.features), cpu.host() orelse return error.UnsupportedCpuFeature),
                 }
+            }
+        }
+
+        /// Raw encoder + (validate mode) check that the word matches the form's fixed bits.
+        inline fn encode(a: Self, comptime id: Inst, comptime raw: anytype, args: anytype) Error!void {
+            if (comptime !opts.validate or formFor(id) == null) return @call(.always_inline, raw, .{a} ++ args);
+            const form = comptime formFor(id).?;
+            const start = a.buf.len;
+            try @call(.always_inline, raw, .{a} ++ args);
+            const w = std.mem.readInt(u32, a.buf.data[start..][0..4], .little);
+            if (w & form.mask != form.value) {
+                a.buf.len = start;
+                return error.EncodingMismatch;
             }
         }
 
@@ -145,18 +175,18 @@ pub fn AssemblerT(comptime opts: Options) type {
 
         inline fn emit(a: Self, comptime id: Inst, ops: Ops, comptime raw: anytype, args: anytype) Error!void {
             if (comptime opts.validate) try a.validate(id, ops);
-            if (comptime !has_hooks) return @call(.always_inline, raw, .{a} ++ args);
+            if (comptime !has_hooks) return a.encode(id, raw, args);
             if (a.hooks) |h| {
                 @branchHint(.unlikely);
                 return @call(.always_inline, emitHooked, .{ a, h, id, ops, raw, args });
             }
-            return @call(.always_inline, raw, .{a} ++ args);
+            return a.encode(id, raw, args);
         }
 
         fn emitHooked(a: Self, h: *Hooks, comptime id: Inst, ops: Ops, comptime raw: anytype, args: anytype) Error!void {
             const start: u32 = @intCast(a.buf.len);
             if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = id, .ops = ops, .offset = start });
-            try @call(.always_inline, raw, .{a} ++ args);
+            try a.encode(id, raw, args);
             if (comptime @hasDecl(Hooks, "post")) h.post(.{ .id = id, .ops = ops, .offset = start, .bytes = a.buf.data[start..a.buf.len] });
         }
 
@@ -227,10 +257,14 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
 
         inline fn branch(a: Self, base_word: u32, comptime kind: core.FixupKind, l: Label) Error!void {
+            if (!a.buf.isValidLabel(l)) return error.InvalidLabel; // always on
             try a.buf.ensure(4);
             const at = a.buf.offset();
             if (a.buf.labelOffset(l)) |t| {
                 const words: i64 = @divExact(@as(i64, t) - at, 4);
+                // Always on: a backward branch out of range is an error, never truncated.
+                const lim: i64 = if (kind == .a64_imm26) 1 << 25 else 1 << 18;
+                if (words < -lim or words >= lim) return error.DisplacementOutOfRange;
                 const bits: u32 = @truncate(@as(u64, @bitCast(words)));
                 a.buf.put32(base_word | if (kind == .a64_imm26) bits & 0x03FF_FFFF else (bits & 0x7FFFF) << 5);
                 return;
