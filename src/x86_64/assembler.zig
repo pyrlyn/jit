@@ -14,6 +14,8 @@ pub const Error = core.Error || error{ InvalidOperand, InvalidLabel, Unsupported
 pub const isa = @import("isa.zig");
 /// Host CPU feature detection.
 pub const cpu = @import("cpu.zig");
+/// Table-driven encoder for all generated GP forms (see `AssemblerT.inst`).
+pub const gp = @import("gp.zig");
 const safety = @import("../core/safety.zig");
 const build_opts = @import("zigjit_options");
 pub const Options = safety.Options;
@@ -317,6 +319,7 @@ pub fn AssemblerT(comptime opts: Options) type {
 
         /// CPU features required by `id` (from the AsmJit database) vs the configured target.
         inline fn checkCpu(comptime id: Inst) Error!void {
+            comptime checkDeny(requiredFeatures(id), @tagName(id));
             switch (opts.cpu_check) {
                 .none => {},
                 .target => comptime {
@@ -325,6 +328,32 @@ pub fn AssemblerT(comptime opts: Options) type {
                 },
                 .host => try checkFeatureSet(requiredFeatures(id), cpu.host() orelse return error.UnsupportedCpuFeature),
             }
+        }
+
+        fn checkDeny(comptime need: isa.Features, comptime name: []const u8) void {
+            comptime {
+                const deny = safety.featureSet(isa.Feature, opts.deny_features);
+                if (need.intersectWith(deny).count() != 0) @compileError("instruction " ++ name ++ " needs a CPU feature in deny_features");
+            }
+        }
+
+        /// Any GP instruction form generated from AsmJit's database: 8/16/32/64-bit registers,
+        /// sized memory (`gp.byte/word/dword/qword`), RIP-relative (`gp.rip`, `gp.ripLabel`) and
+        /// immediates. Example: `a.inst(.movzx, .{ gp.r32(.rax), gp.byte(ptr(.rdi, 0)) })`.
+        /// CPU checks: deny list and `.target` at compile time, `.host` at runtime (validate).
+        /// Hooks are not invoked for this generic path.
+        pub fn inst(a: Self, comptime mn: gp.Mnemonic, args: anytype) (Error || gp.Error)!void {
+            const need = comptime gp.requiredFeatures(mn);
+            comptime checkDeny(need, @tagName(mn));
+            if (comptime opts.validate) switch (opts.cpu_check) {
+                .none => {},
+                .target => comptime {
+                    if (!need.subsetOf(safety.featureSet(isa.Feature, opts.target_features)))
+                        @compileError("instruction " ++ @tagName(mn) ++ " needs CPU features missing from target_features");
+                },
+                .host => try checkFeatureSet(need, cpu.host() orelse return error.UnsupportedCpuFeature),
+            };
+            return gp.emit(a.buf, mn, args);
         }
 
         /// Raw encoder + (validate mode) check of the emitted bytes against the AsmJit forms.

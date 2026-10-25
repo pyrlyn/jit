@@ -249,3 +249,21 @@ Results: [bench/RESULTS.md](bench/RESULTS.md).
 ### Buffer limits
 
 `CodeBuffer.max_size` (bytes, capped at 2 GiB) and `CodeBuffer.max_labels` can be lowered after `init`. Exceeding them returns `CodeTooLarge` (from growth, or at the latest from `finalize`) and `TooManyLabels` (from `newLabel`).
+
+### Generated GP instruction set (x86-64)
+
+`scripts/gen_gp_tables.py` turns every legacy-encoded GP form in AsmJit's database into `src/x86_64/gp_table.zig` (1037 forms, 187 mnemonics: ALU, shifts/rotates, mul/div, bit ops, movzx/movsx, cmov/set, xchg, bswap, popcnt/lzcnt/tzcnt, crc32, movbe, ...). Use it through `Assembler.inst`:
+
+```zig
+const gp = x.gp;
+try a.inst(.movzx, .{ gp.r32(.rax), gp.byte(x.ptr(.rdi, 0)) });  // 8/16/32/64-bit registers and sized memory
+try a.inst(.add, .{ gp.r16(.r9), @as(i64, 0x1234) });
+try a.inst(.mov, .{ gp.r64(.rax), gp.ripLabel(table, .q) });     // RIP-relative, resolved at finalize
+try a.inst(.lea, .{ gp.r64(.rcx), gp.rip(-7, .none) });
+```
+
+- Form selection: the shortest matching encoding, ties to MR, matching LLVM.
+- `scripts/gen_gp_tests.py` writes `src/gp_tests.zig`: 3126 cases (every form with low/high/REX-only registers, SIB, RBP-like, RIP memory, immediates) checked byte-for-byte against LLVM.
+- CPU features come from the database (`gp.requiredFeatures`). `Options.deny_features` rejects an instruction at compile time in every mode. `cpu_check = .target/.host` (with `validate`) checks the target or the host.
+- Skipped: VEX/XOP/APX encodings, segment/control/debug registers, string instructions with implicit memory, moffs, far pointers and relative branches (use `jmp`/`jcc`/`call` with labels). `ah`..`bh` are not encodable. Hooks are not called on the `inst` path.
+- An AsmJit DB bug is overridden: `shrd r/m, r, imm8` has a spurious 66 prefix.

@@ -21,6 +21,7 @@ test {
     _ = @import("core/code_buffer.zig");
     _ = @import("tests.zig");
     _ = @import("enc_tests.zig");
+    _ = @import("gp_tests.zig");
     if (opts.x86_64) _ = x86_64;
     if (opts.aarch64) _ = aarch64;
 }

@@ -542,3 +542,72 @@ test "code buffer limits: max_size and max_labels" {
     try cb.emitBytes(big[0..1]);
     try t.expectError(error.CodeTooLarge, cb.finalize());
 }
+
+// ---- generated GP encoder: sizes, RIP-relative, features -----------------------------------
+
+test "x86_64 gp: 8/16/32-bit operands, RIP-relative label, errors" {
+    if (!opts.x86_64) return error.SkipZigTest;
+    const x = @import("x86_64/assembler.zig");
+    const gp = x.gp;
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = x.AssemblerT(.{ .validate = true }).init(&cb);
+    const data = try a.newLabel();
+    try a.inst(.mov, .{ gp.r8(.rsi), gp.byte(x.ptr(.rdi, 1)) }); // 40 8A 77 01
+    try a.inst(.mov, .{ gp.r16(.r9), @as(i64, 0x1234) }); // 66 41 B9 34 12
+    try a.inst(.add, .{ gp.dword(x.ptr(.rax, 0)), @as(i64, 0xFFFFFFFF) }); // 83 00 FF
+    try a.inst(.mov, .{ gp.r64(.rax), gp.ripLabel(data, .q) }); // 48 8B 05 <rel32>
+    try a.inst(.lea, .{ gp.r64(.rcx), gp.rip(-7, .none) }); // 48 8D 0D F9 FF FF FF
+    try a.bind(data);
+    try cb.emitBytes(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    try cb.finalize();
+    try t.expectEqualSlices(u8, &.{
+        0x40, 0x8A, 0x77, 0x01, 0x66, 0x41, 0xB9, 0x34, 0x12, 0x83, 0x00, 0xFF,
+        0x48, 0x8B, 0x05, 0x07, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x0D, 0xF9, 0xFF, 0xFF, 0xFF,
+    }, cb.code()[0..26]);
+    // errors
+    try t.expectError(error.NoMatchingForm, a.inst(.mov, .{ gp.r32(.rax), gp.r64(.rcx) }));
+    try t.expectError(error.NoMatchingForm, a.inst(.add, .{ gp.r8(.rax), @as(i64, 300) }));
+    try t.expectError(error.InvalidOperand, a.inst(.mov, .{ gp.r64(.rax), gp.Mem{ .rip = true, .base = .rbx, .size = .q } }));
+    try t.expectError(error.InvalidLabel, a.inst(.mov, .{ gp.r64(.rax), gp.ripLabel(.{ .id = 99 }, .q) }));
+    const len = cb.code().len;
+    try t.expectEqual(len, cb.code().len); // failed emits leave nothing behind
+}
+
+test "x86_64 gp: CPU features from the database" {
+    if (!opts.x86_64) return error.SkipZigTest;
+    const gp = @import("x86_64/assembler.zig").gp;
+    try t.expect(gp.requiredFeatures(.lzcnt).contains(.LZCNT));
+    try t.expect(gp.requiredFeatures(.popcnt).contains(.POPCNT));
+    try t.expectEqual(@as(usize, 0), gp.requiredFeatures(.add).count());
+    // A target that has LZCNT accepts it at compile time; deny/target misses are compile errors.
+    const x = @import("x86_64/assembler.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = x.AssemblerT(.{ .validate = true, .cpu_check = .target, .target_features = &.{"LZCNT"}, .deny_features = &.{"RTM"} }).init(&cb);
+    try a.inst(.lzcnt, .{ x.gp.r32(.rax), x.gp.r32(.rcx) });
+    try t.expectEqualSlices(u8, &.{ 0xF3, 0x0F, 0xBD, 0xC1 }, cb.code());
+}
+
+test "jit runtime: generated GP encoder (movzx, RIP-relative constant) runs" {
+    const builtin = @import("builtin");
+    if (builtin.cpu.arch != .x86_64 or !opts.x86_64) return error.SkipZigTest;
+    const x = @import("x86_64/assembler.zig");
+    const gp = x.gp;
+    const rt = @import("core/jit_runtime.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = x.Assembler.init(&cb);
+    const k = try a.newLabel();
+    const arg = x.CallConv.host.args[0];
+    try a.inst(.movzx, .{ gp.r32(.rax), gp.r8(arg) }); // zero-extend low byte of arg
+    try a.inst(.add, .{ gp.r64(.rax), gp.ripLabel(k, .q) });
+    try a.ret();
+    try a.alignTrap(8);
+    try a.bind(k);
+    try cb.emitBytes(&std.mem.toBytes(@as(u64, 1000)));
+    try cb.finalize();
+    const f = try rt.add(&cb);
+    defer f.release();
+    try t.expectEqual(@as(u64, 1000 + 0x34), f.ptr(*const fn (u64) callconv(.c) u64)(0x1234));
+}

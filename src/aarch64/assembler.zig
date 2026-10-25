@@ -141,6 +141,8 @@ pub fn AssemblerT(comptime opts: Options) type {
                     if (@mod(v, form.imm_scale) != 0) return error.InvalidImmediate;
                     if (@divFloor(v, form.imm_scale) >= (@as(i64, 1) << @intCast(form.imm_bits))) return error.InvalidImmediate;
                 };
+                comptime if (isa.featureSet(form.features).intersectWith(safety.featureSet(isa.Feature, opts.deny_features)).count() != 0)
+                    @compileError("instruction " ++ @tagName(id) ++ " needs a CPU feature in deny_features");
                 switch (opts.cpu_check) {
                     .none => {},
                     .target => comptime {

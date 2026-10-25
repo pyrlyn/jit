@@ -133,3 +133,10 @@ Measured on the benchmark, not by rule:
 - With `validate`, `encode()` matches the emitted bytes against the forms; on mismatch the bytes are rolled back and `error.EncodingMismatch` is returned.
 - `Options.cpu_check`: `.none` (default), `.target` (`target_features` resolved at comptime; an instruction needing a missing feature is a compile error), `.host` (`cpu.host()` via CPUID+XGETBV on x86-64, `sysctlbyname hw.optional.arm.FEAT_*` on macOS arm64; `error.UnsupportedCpuFeature`).
 - `CodeBuffer.finalize` always runs a check pass before patching: unbound referenced labels (`UnboundLabel`, list via `unresolvedLabels`), rel8/rel32/imm19/imm26 range (`DisplacementOutOfRange`), size > `maxInt(i32)` (`CodeTooLarge`, also from `grow`). On error nothing is patched. `bind` rejects unknown ids (`InvalidLabel`) and double binding (`LabelAlreadyBound`); branches always check label validity.
+
+## Generated GP encoder (`src/x86_64/gp.zig`)
+
+- The table holds forms with operand kinds (`r8..r64`, `m8..m64`, `m`, immediate kinds `i8/s8/u8/i16/u16/i32/s32/u32/i64`, fixed `al/ax/eax/rax/cl/dx/1`). Each form also has prefixes, REX.W, opcode bytes, `+r`, ModRM `/r` or `/digit`, immediate size, which operands go to ModRM.reg/rm/opcode, and CPU features.
+- `gp.emit` matches every form of the comptime-known mnemonic, encodes each match into a 16-byte scratch and keeps the shortest. Immediates are normalized to the operand size, so `0xFFFFFFFF` on a 32-bit operand can use the imm8 form. 8-bit `spl/bpl/sil/dil` get an empty REX.
+- RIP-relative is ModRM mod=00 rm=101 + disp32. With a label, a `rel32` fixup is added with `base` = end of instruction, so a trailing immediate is handled correctly.
+- This path is separate from the hand-written hot-path emitters (whose bytes and benchmarks are unchanged). It is meant for coverage; the hot path stays specialized.

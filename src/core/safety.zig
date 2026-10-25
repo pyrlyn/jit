@@ -22,6 +22,9 @@ pub const Options = struct {
     cpu_check: CpuCheck = .none,
     /// Feature names from AsmJit's database (`isa.Feature`), e.g. `&.{ "SSE4_2", "AVX2" }`.
     target_features: []const []const u8 = &.{},
+    /// Deny list (any mode, checked at compile time): an instruction that needs one of these
+    /// features is a compile error, e.g. `&.{ "AVX512_F", "RTM" }`.
+    deny_features: []const []const u8 = &.{},
 };
 
 pub const CpuCheck = enum { none, target, host };
