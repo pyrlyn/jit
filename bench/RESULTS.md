@@ -80,3 +80,17 @@ Differences are within run-to-run noise at this load; no systematic regression. 
 | mem | 16.03 | 2.89 | 2.89 | 3.41 | 3.37 |
 
 Layers-off is unchanged. `loops`/default is +0.3 ns (newLabel limit compare); within noise at this load, to be rechecked on an idle machine.
+
+## 2026-10-26, after GP fuzz fixes, dual mapping, Logger, SIMD (815e9af)
+
+ReleaseFast, `bench/run.sh 7 5000`, median ns/instr, back-to-back on the same loaded Mac (load ~28–37).
+Baseline = 3a0ac27 bench binary run in between. Output bytes identical to AsmJit in every scenario.
+
+| Scenario | AsmJit | ZigJIT 3a0ac27 | ZigJIT 815e9af |
+|---|--:|--:|--:|
+| straight | 10.63 | 2.57 | 2.36 |
+| calls | 11.41 | 2.57 | 2.21 |
+| loops | 15.72 | 2.44 | 2.11 |
+| mem | 12.16 | 2.66 | 2.28 |
+
+Min ns/instr is identical between the two ZigJIT builds (1.76–2.03): no regression.
