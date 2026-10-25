@@ -712,3 +712,30 @@ test "x86_64 gp: regressions found by scripts/fuzz_gp.py" {
         try t.expectEqualSlices(u8, c[0], cb.code());
     }
 }
+
+test "jit_runtime: dual mapping runs code and patches through the RW view" {
+    const rt = @import("core/jit_runtime.zig");
+    if (!rt.dual_mapping_supported) return error.SkipZigTest;
+    const builtin = @import("builtin");
+    // mov eax, imm32 ; ret   /   movz w0, #imm ; ret
+    const x86 = builtin.cpu.arch == .x86_64;
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    if (x86) {
+        try cb.emitBytes(&.{ 0xb8, 7, 0, 0, 0, 0xc3 });
+    } else {
+        try cb.emitBytes(std.mem.sliceAsBytes(&[_]u32{ 0x528000e0, 0xd65f03c0 }));
+    }
+    const f = rt.addDual(&cb) catch |e| {
+        std.debug.print("dual mapping unavailable here: {s}\n", .{@errorName(e)});
+        return error.SkipZigTest;
+    };
+    defer f.release();
+    try t.expect(f.rx.ptr != f.rw.ptr);
+    const F = *const fn () callconv(.c) u32;
+    try t.expectEqual(@as(u32, 7), f.ptr(F)());
+    try t.expectEqual(@as(u8, if (x86) 0xcc else 0), f.rw[f.rw.len - 1]); // trap-filled tail
+    if (rt.underRosetta()) return; // Rosetta does not observe writes through the alias
+    if (x86) f.write(1, &.{42}) else f.write(0, std.mem.asBytes(&@as(u32, 0x52800540)));
+    try t.expectEqual(@as(u32, 42), f.ptr(F)());
+}
