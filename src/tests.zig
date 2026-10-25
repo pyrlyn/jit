@@ -484,12 +484,21 @@ test "aarch64 alignNop/alignTrap/udf and prolog/epilog" {
         try t.expectEqual(@as(u32, 0), w[4]);
 
         cb.reset();
-        const n = try a.prolog(20);
+        const n = try a.prolog(&.{}, 20);
         try t.expectEqual(@as(u12, 32), n);
-        try a.epilog(n);
+        try a.epilog(&.{}, n);
         const p = std.mem.bytesAsSlice(u32, cb.code());
         try t.expectEqualSlices(u32, &.{ 0xA9BF7BFD, 0x910003FD, 0xD10083FF, 0x910083FF, 0xA8C17BFD, 0xD65F03C0 }, @alignCast(p));
-        try t.expectError(error.InvalidOperand, a.prolog(5000));
+        try t.expectError(error.InvalidOperand, a.prolog(&.{}, 5000));
+        try t.expectError(error.InvalidOperand, a.prolog(&.{.x29}, 0));
+        cb.reset();
+        const sv = [_]x.X{ .x19, .x20, .x21 };
+        const m = try a.prolog(&sv, 0);
+        try a.epilog(&sv, m);
+        try t.expectEqualSlices(u32, &.{
+            0xA9BF7BFD, 0x910003FD, 0xA9BF53F3, 0xF81F0FF5, // stp x19, x20, [sp,#-16]!; str x21, [sp,#-16]!
+            0xF84107F5, 0xA8C153F3, 0xA8C17BFD, 0xD65F03C0, // ldr x21, [sp],#16; ldp x19, x20, [sp],#16
+        }, @alignCast(std.mem.bytesAsSlice(u32, cb.code())));
     }
 }
 
@@ -513,9 +522,9 @@ test "jit runtime: prolog/epilog function runs; tail is trap-filled" {
         .aarch64 => {
             const x = @import("aarch64/assembler.zig");
             const a = x.Assembler.init(&cb);
-            const n = try a.prolog(16);
+            const n = try a.prolog(&.{}, 16);
             try a.add(.x0, .x0, .x1);
-            try a.epilog(n);
+            try a.epilog(&.{}, n);
         },
         else => return error.SkipZigTest,
     }
@@ -610,4 +619,46 @@ test "jit runtime: generated GP encoder (movzx, RIP-relative constant) runs" {
     const f = try rt.add(&cb);
     defer f.release();
     try t.expectEqual(@as(u64, 1000 + 0x34), f.ptr(*const fn (u64) callconv(.c) u64)(0x1234));
+}
+
+test "jit runtime: callee-saved registers and stack arguments" {
+    const builtin = @import("builtin");
+    const rt = @import("core/jit_runtime.zig");
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    // f(a0..a9) = a0 + a8 + a9, using a callee-saved register as the accumulator.
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            const x = @import("x86_64/assembler.zig");
+            const a = x.Assembler.init(&cb);
+            const cc = x.CallConv.host;
+            const sv = [_]x.Gp{ .rbx, .r12 };
+            const adj = try a.prolog(&sv, 0);
+            try a.movRR(.rbx, cc.args[0]);
+            try a.movRM(.r12, cc.stackArg(8));
+            try a.addRR(.rbx, .r12);
+            try a.movRM(.r12, cc.stackArg(9));
+            try a.addRR(.rbx, .r12);
+            try a.movRR(cc.ret, .rbx);
+            try a.epilog(&sv, adj);
+        },
+        .aarch64 => {
+            const x = @import("aarch64/assembler.zig");
+            const a = x.Assembler.init(&cb);
+            const sv = [_]x.X{ .x19, .x20, .x21 };
+            const n = try a.prolog(&sv, 32);
+            try a.mov(.x19, .x0);
+            try a.ldr(.x20, .x29, x.CallConv.stackArgOffset(8));
+            try a.add(.x19, .x19, .x20);
+            try a.ldr(.x21, .x29, x.CallConv.stackArgOffset(9));
+            try a.add(.x0, .x19, .x21);
+            try a.epilog(&sv, n);
+        },
+        else => return error.SkipZigTest,
+    }
+    try cb.finalize();
+    const f = try rt.add(&cb);
+    defer f.release();
+    const F = *const fn (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) callconv(.c) i64;
+    try t.expectEqual(@as(i64, 1 + 900 + 10000), f.ptr(F)(1, 2, 3, 4, 5, 6, 7, 8, 900, 10000));
 }

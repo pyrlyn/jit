@@ -83,6 +83,19 @@ pub const default_options: Options = .{
 pub const Assembler = AssemblerT(default_options);
 
 /// AsmJit form for an instruction id (`word` has none).
+/// AAPCS64 (Apple arm64 is the same for integer args up to 8 registers; Apple packs stack
+/// arguments by size, this helper assumes 8-byte slots).
+pub const CallConv = struct {
+    pub const args = [_]X{ .x0, .x1, .x2, .x3, .x4, .x5, .x6, .x7 };
+    pub const ret: X = .x0;
+    pub const callee_saved = [_]X{ .x19, .x20, .x21, .x22, .x23, .x24, .x25, .x26, .x27, .x28 };
+    /// Offset from x29 (after `prolog`) of integer argument `i` (`i >= args.len`).
+    pub fn stackArgOffset(i: usize) u15 {
+        std.debug.assert(i >= args.len);
+        return @intCast(16 + 8 * (i - args.len));
+    }
+};
+
 pub fn formFor(comptime id: Inst) ?isa.Form {
     return if (id == .word) null else @field(isa.table, @tagName(id));
 }
@@ -311,19 +324,38 @@ pub fn AssemblerT(comptime opts: Options) type {
             try a.buf.ensure(pad);
             for (0..pad / 4) |_| a.buf.put32(w);
         }
-        /// AAPCS64 frame prolog: `stp x29, x30, [sp, #-16]!; mov x29, sp; sub sp, sp, n`
-        /// (`n` = `locals` rounded up to 16, at most 4095 rounded down). Returns `n` for `epilog`.
-        pub fn prolog(a: Self, locals: u32) Error!u12 {
+        /// AAPCS64 frame prolog: `stp x29, x30, [sp, #-16]!; mov x29, sp`, then the callee-saved
+        /// registers in `saved` pushed in pairs (`stp`, or `str` for an odd last one, 16 bytes each
+        /// slot), then `sub sp, sp, n` (`n` = `locals` rounded up to 16, at most 4080).
+        /// Returns `n` for `epilog`.
+        pub fn prolog(a: Self, saved: []const X, locals: u32) Error!u12 {
             const n = std.mem.alignForward(u32, locals, 16);
             if (n > 4080) return error.InvalidOperand;
+            for (saved) |r| if (@intFromEnum(r) >= 29) return error.InvalidOperand;
             try a.word(0xA9BF7BFD); // stp x29, x30, [sp, #-16]!
             try a.word(0x910003FD); // mov x29, sp
+            var i: usize = 0;
+            while (i < saved.len) : (i += 2) {
+                const r0: u32 = @intFromEnum(saved[i]);
+                if (i + 1 < saved.len) {
+                    try a.word(0xA9BF03E0 | @as(u32, @intFromEnum(saved[i + 1])) << 10 | r0); // stp r0, r1, [sp, #-16]!
+                } else try a.word(0xF81F0FE0 | r0); // str r0, [sp, #-16]!
+            }
             if (n != 0) try a.subImm(@enumFromInt(31), @enumFromInt(31), @intCast(n));
             return @intCast(n);
         }
-        /// Frame epilog matching `prolog`: `add sp, sp, n; ldp x29, x30, [sp], #16; ret`.
-        pub fn epilog(a: Self, n: u12) Error!void {
+        /// Frame epilog matching `prolog(saved, ...)`: `add sp, sp, n`, restore `saved` in reverse,
+        /// `ldp x29, x30, [sp], #16; ret`.
+        pub fn epilog(a: Self, saved: []const X, n: u12) Error!void {
             if (n != 0) try a.addImm(@enumFromInt(31), @enumFromInt(31), n);
+            var i: usize = (saved.len + 1) / 2 * 2;
+            while (i > 0) {
+                i -= 2;
+                const r0: u32 = @intFromEnum(saved[i]);
+                if (i + 1 < saved.len) {
+                    try a.word(0xA8C103E0 | @as(u32, @intFromEnum(saved[i + 1])) << 10 | r0); // ldp r0, r1, [sp], #16
+                } else try a.word(0xF84107E0 | r0); // ldr r0, [sp], #16
+            }
             try a.word(0xA8C17BFD); // ldp x29, x30, [sp], #16
             try a.ret();
         }

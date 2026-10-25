@@ -189,6 +189,12 @@ pub const CallConv = struct {
 
     pub const sysv: CallConv = .{ .args = &.{ .rdi, .rsi, .rdx, .rcx, .r8, .r9 }, .callee_saved = &.{ .rbx, .rbp, .r12, .r13, .r14, .r15 } };
     pub const win64: CallConv = .{ .args = &.{ .rcx, .rdx, .r8, .r9 }, .callee_saved = &.{ .rbx, .rbp, .rdi, .rsi, .r12, .r13, .r14, .r15 }, .shadow = 32 };
+    /// [rbp + off] of integer argument `i` (`i >= args.len`) after `prolog`: return address,
+    /// saved rbp, then the shadow space (Win64), then 8-byte stack slots. Same formula for SysV and Win64.
+    pub fn stackArg(cc: CallConv, i: usize) Mem {
+        std.debug.assert(i >= cc.args.len);
+        return .{ .base = .rbp, .disp = @intCast(16 + cc.shadow + 8 * (i - cc.args.len)) };
+    }
     pub const host: CallConv = if (@import("builtin").os.tag == .windows) win64 else sysv;
 };
 

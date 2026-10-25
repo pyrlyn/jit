@@ -244,7 +244,8 @@ Results: [bench/RESULTS.md](bench/RESULTS.md).
 - `alignNop(n)` pads with recommended multi-byte NOPs (x86-64) / `nop` words (AArch64); `alignTrap(n)` pads with `int3` / `udf #0`. `int3()` and `udf(imm16)` emit a single trap.
 - `jit_runtime.add` fills the unused tail of the executable mapping with traps, so a stray jump past the code faults instead of running garbage.
 - x86-64 `CallConv.sysv` / `.win64` / `.host`: argument, return and callee-saved registers, Win64 shadow space. `prolog(saved, locals)` / `epilog(saved, adj)` build an rbp frame keeping rsp 16-byte aligned.
-- AArch64 `prolog(locals)` / `epilog(n)`: `stp x29, x30` frame plus up to 4080 bytes of locals (AAPCS64).
+- x86-64 `cc.stackArg(i)`: `[rbp + 16 + shadow + 8*(i - nregs)]` for stack-passed integer arguments (SysV and Win64).
+- AArch64 `prolog(saved, locals)` / `epilog(saved, n)`: `stp x29, x30` frame, callee-saved registers (`CallConv.callee_saved`, x19..x28) pushed in `stp` pairs, up to 4080 bytes of locals. `CallConv.args` (x0..x7) and `CallConv.stackArgOffset(i)` (offset from x29, 8-byte slots; Apple's packing of sub-8-byte stack args is not modeled).
 
 ### Buffer limits
 
