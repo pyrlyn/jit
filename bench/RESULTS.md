@@ -67,3 +67,16 @@ ReleaseFast, 15 interleaved runs, median ns/instr. Machine load average ~60 (ver
 | mem | 16.34 | 2.78 | 2.88 | 3.38 | 3.39 | 6.31 | 2.79 | 2.29 |
 
 Differences are within run-to-run noise at this load; no systematic regression. The new always-on checks run in `finalize`/`bind` (outside the emit loop); the ISA-db byte check is only compiled in with `validate`.
+
+## After align/trap/prolog helpers and buffer limits (553b046)
+
+15 interleaved runs, load ~43, median ns/instr. `safety_*` = 30eb76e, `q_*` = 553b046.
+
+| scenario | asmjit | safety_off | q_off | safety_default | q_default |
+|---|--:|--:|--:|--:|--:|
+| straight | 14.51 | 3.85 | 3.83 | 3.29 | 3.30 |
+| calls | 15.45 | 4.43 | 4.45 | 3.38 | 3.31 |
+| loops | 20.97 | 4.52 | 4.52 | 3.03 | 3.34 |
+| mem | 16.03 | 2.89 | 2.89 | 3.41 | 3.37 |
+
+Layers-off is unchanged. `loops`/default is +0.3 ns (newLabel limit compare); within noise at this load, to be rechecked on an idle machine.
