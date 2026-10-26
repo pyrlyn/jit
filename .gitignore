@@ -16,3 +16,5 @@ bench/asmjit_bench
 *.dylib
 *.so
 *.exe
+scripts/.gp_forms.json
+scripts/__pycache__/
