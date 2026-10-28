@@ -106,6 +106,7 @@ def parse_enc(enc, osz, uses_v):
 # AsmJit DB bugs: encodings corrected against the Intel SDM / LLVM.
 ENC_OVERRIDE = {
     "shrd x:rv/mv, rv, imm8": "mr : 0F AC /r ib",  # DB has a spurious 66 prefix
+    "lea w:r16, m": "rm : 66 8D /r",  # DB has 67 (address size) instead of the 16-bit operand size
 }
 # Mnemonics whose reg,reg form LLVM encodes as RM (reg field = first operand).
 PREFER_RM = {"xchg"}

@@ -55,7 +55,13 @@ pub fn requiredFeatures(comptime mn: Mnemonic) isa.Features {
 
 pub const Size = enum(u8) { none = 0, b = 1, w = 2, d = 4, q = 8 };
 
-pub const Reg = struct { id: Gp, size: Size };
+/// `high`: AH/CH/DH/BH (id must be rax..rbx, size .b); cannot be used with a REX prefix.
+pub const Reg = struct { id: Gp, size: Size, high: bool = false };
+
+/// Register number in ModRM/opcode encoding (AH..BH are 4..7 without REX).
+fn num(r: Reg) u8 {
+    return if (r.high) @as(u8, @intFromEnum(r.id)) + 4 else @intFromEnum(r.id);
+}
 
 /// Sized memory operand. `rip`: [rip + disp] or [rip + label] (base/index must be null).
 pub const Mem = struct {
@@ -72,6 +78,10 @@ pub const Op = union(enum) { reg: Reg, mem: Mem, imm: i64 };
 
 pub inline fn r8(g: Gp) Reg {
     return .{ .id = g, .size = .b };
+}
+/// High 8-bit register: `r8hi(.rax)` = AH, `.rcx` = CH, `.rdx` = DH, `.rbx` = BH.
+pub inline fn r8hi(g: Gp) Reg {
+    return .{ .id = g, .size = .b, .high = true };
 }
 pub inline fn r16(g: Gp) Reg {
     return .{ .id = g, .size = .w };
@@ -162,14 +172,16 @@ fn matchKind(f: Form, k: Kind, o: Op) bool {
     switch (o) {
         .reg => |r| return switch (k) {
             .r8, .r16, .r32, .r64 => regSize(k) == r.size,
-            .al, .ax, .eax, .rax => r.id == .rax and regSize(k) == r.size,
-            .cl => r.id == .rcx and r.size == .b,
+            .al, .ax, .eax, .rax => r.id == .rax and !r.high and regSize(k) == r.size,
+            .cl => r.id == .rcx and !r.high and r.size == .b,
             .dx => r.id == .rdx and r.size == .w,
             else => false,
         },
         .mem => |m| return switch (k) {
             .m => true,
-            .m8, .m16, .m32, .m64 => m.size == regSize(k),
+            // Unsized memory (AsmJit `ptr(...)`) takes the size the form needs; the shortest
+            // encoding wins among sizes, so e.g. `ptwrite [m]` picks m32 like AsmJit.
+            .m8, .m16, .m32, .m64 => m.size == .none or m.size == regSize(k),
             else => false,
         },
         .imm => |v| {
@@ -237,8 +249,12 @@ fn rhi(g: Gp) u8 {
 pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
     var rex: u8 = if (f.rexw) 0x48 else 0;
     var need_rex = false;
+    var has_high = false;
     for (ops) |o| switch (o) {
-        .reg => |r| if (r.size == .b and @intFromEnum(r.id) >= 4 and @intFromEnum(r.id) < 8) {
+        .reg => |r| if (r.high) {
+            if (@intFromEnum(r.id) >= 4 or r.size != .b) return error.InvalidOperand;
+            has_high = true;
+        } else if (r.size == .b and @intFromEnum(r.id) >= 4 and @intFromEnum(r.id) < 8) {
             need_rex = true;
         },
         .mem => |m| try checkMem(m),
@@ -246,16 +262,16 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
     };
     var reg_field: u8 = f.digit orelse 0;
     if (f.reg) |i| {
-        const r = ops[i].reg.id;
-        reg_field = rlo(r);
-        rex |= rhi(r) << 2;
+        const r = num(ops[i].reg);
+        reg_field = r & 7;
+        rex |= (r >> 3) << 2;
     }
-    var rm_reg: ?Gp = null;
+    var rm_reg: ?u8 = null;
     var rm_mem: ?Mem = null;
     if (f.rm) |i| switch (ops[i]) {
         .reg => |r| {
-            rm_reg = r.id;
-            rex |= rhi(r.id);
+            rm_reg = num(r);
+            rex |= num(r) >> 3;
         },
         .mem => |m| {
             rm_mem = m;
@@ -266,10 +282,12 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
     };
     var plus: u8 = 0;
     if (f.opreg) |i| {
-        const r = ops[i].reg.id;
-        plus = rlo(r);
-        rex |= rhi(r);
+        const r = num(ops[i].reg);
+        plus = r & 7;
+        rex |= r >> 3;
     }
+    // AH..BH are only addressable without REX.
+    if (has_high and (rex != 0 or need_rex)) return error.InvalidOperand;
     for (f.pre) |p| out.u8_(p);
     if (rex != 0 or need_rex) out.u8_(0x40 | rex);
     for (f.op, 0..) |b, k| out.u8_(if (k == f.op.len - 1) b + plus else b);
@@ -277,7 +295,7 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
     if (f.modrm) {
         const r = (reg_field & 7) << 3;
         if (rm_reg) |g| {
-            out.u8_(0xC0 | r | rlo(g));
+            out.u8_(0xC0 | r | (g & 7));
         } else if (rm_mem) |m| {
             if (m.rip) {
                 out.u8_(r | 5);
@@ -312,6 +330,71 @@ pub fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype) Error!void {
 }
 
 pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void {
+    return emitExact(buf, forms, ops) catch |e| switch (e) {
+        error.NoMatchingForm => emitAliased(buf, forms, ops) orelse e,
+        else => e,
+    };
+}
+
+fn isImplicit(o: Op) bool {
+    return switch (o) {
+        .reg => |r| if (r.high) r.id == .rax else (r.id == .rax or r.id == .rcx or r.id == .rdx or r.id == .rbx),
+        // `[rax]` / `[rdi]` style implicit memory (clzero, monitor).
+        .mem => |m| m.base != null and m.index == null and m.disp == 0 and !m.rip,
+        .imm => false,
+    };
+}
+
+fn withSize(ops: []const Op, s: Size, out: []Op) []const Op {
+    for (ops, 0..) |o, i| out[i] = switch (o) {
+        .mem => |m| if (m.size == .none) blk: {
+            var x = m;
+            x.size = s;
+            break :blk .{ .mem = x };
+        } else o,
+        else => o,
+    };
+    return out[0..ops.len];
+}
+
+/// AsmJit spellings that ZigJIT's table writes differently:
+/// - explicit implicit operands: `mul(rdx, rax, rcx)`, `div(ax, cl)`, `cqo(rdx, rax)`,
+///   `rdmsr(edx, eax, ecx)`, `xsaves(m, edx, eax)`, `monitor(ptr(rax), ecx, edx)`;
+///   the implicit `dx:ax` pair / `ax` also fixes the size of an unsized memory operand;
+/// - `imul(r, imm)` -> `imul(r, r, imm)`.
+fn emitAliased(buf: *CodeBuffer, forms: []const Form, ops: []const Op) ?Error!void {
+    var tmp: [8]Op = undefined;
+    if (ops.len > tmp.len) return null;
+    if (ops.len == 2 and ops[0] == .reg and ops[1] == .imm) {
+        const three = [_]Op{ ops[0], ops[0], ops[1] };
+        if (emitExact(buf, forms, &three)) |_| return {} else |_| {}
+    }
+    // dx:ax pair (mul/div/imul one-operand forms): size comes from the pair.
+    if (ops.len == 3 and ops[0] == .reg and ops[1] == .reg and ops[0].reg.id == .rdx and
+        ops[1].reg.id == .rax and ops[0].reg.size == ops[1].reg.size)
+        if (emitExact(buf, forms, withSize(ops[2..], ops[0].reg.size, &tmp))) |_| return {} else |_| {};
+    // ax = al * r/m8.
+    if (ops.len == 2 and ops[0] == .reg and ops[0].reg.id == .rax and ops[0].reg.size == .w)
+        if (emitExact(buf, forms, withSize(ops[1..], .b, &tmp))) |_| return {} else |_| {};
+    // Otherwise drop implicit operands from either end.
+    var lo: usize = 0;
+    while (lo <= ops.len) : (lo += 1) {
+        var hi: usize = ops.len;
+        while (hi >= lo) : (hi -= 1) {
+            if (lo != 0 or hi != ops.len) {
+                var ok = true;
+                for (ops[0..lo]) |o| ok = ok and isImplicit(o);
+                for (ops[hi..]) |o| ok = ok and isImplicit(o);
+                if (ok) if (emitExact(buf, forms, ops[lo..hi])) |_| return {} else |_| {};
+            }
+            if (hi == lo) break;
+        }
+        if (lo < ops.len and !isImplicit(ops[lo])) break;
+    }
+    return null;
+}
+
+fn emitExact(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void {
     var best: ?Buf = null;
     var best_rip: ?u8 = null;
     var best_imm: u8 = 0;
@@ -326,7 +409,12 @@ pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!voi
             best_imm = f.imm;
         }
     }
-    const b = best orelse return error.NoMatchingForm;
+    var b = best orelse return error.NoMatchingForm;
+    // `xchg rax, rax` (REX.W 90) is a no-op; AsmJit and LLVM emit plain `90`.
+    if (b.n == 2 and b.b[0] == 0x48 and b.b[1] == 0x90) {
+        b.b[0] = 0x90;
+        b.n = 1;
+    }
     try buf.ensure(16);
     const start = buf.offset();
     for (b.b[0..b.n]) |x| buf.put8(x);
