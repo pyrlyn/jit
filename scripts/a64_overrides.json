@@ -1,6 +1,8 @@
 {
  "bfmlalb Vx.4S, Vn.8H, Vm.H[#idx] | 00001111|11|idx[1:0]|Rm:4|1111|idx[2]|1|Rn|Rx": "00000400",
  "bfmlalt Vx.4S, Vn.8H, Vm.H[#idx] | 01001111|11|idx[1:0]|Rm:4|1111|idx[2]|1|Rn|Rx": "00000400",
+ "bic Zdn.t, Pg/M, Zdn.t, Zm.t | 00000100|sz|011010000|Pg:3|Zm|Zdn": "00010000",
+ "bics Pd.B, Pg/Z, Pn.B, Pm.B | 00100101|01|10|Pm|01|Pg|0|Pn|1|Pd": "00200000",
  "bif Dx.8B, Vn.8B, Vm.8B | 00101111|11|1|Rm|00011|1|Rn|Rx": "01000000",
  "bif Vx.16B, Vn.16B, Vm.16B | 01101111|11|1|Rm|00011|1|Rn|Rx": "01000000",
  "bit Dx.8B, Vn.8B, Vm.8B | 00101111|10|1|Rm|00011|1|Rn|Rx": "01000000",
@@ -32,6 +34,8 @@
  "fcmla Vd.8H, Vn.8H, Vm.H[#idx], #rotate | 01101111|01|idx[0]|Rm|1|imm:2|1|idx[1]|0|Rn|Rd": "00008000",
  "fmla Vx.4S, Vn.4S, Vm.S[#idx] | 01001111|11|idx[0]|Rm|0001|idx[1]|0|Rn|Rx": "00400000",
  "fmls Vx.4S, Vn.4S, Vm.S[#idx] | 01001111|11|idx[0]|Rm|0101|idx[1]|0|Rn|Rx": "00400000",
+ "fmov Zd.t, #zero | 00100101|sz|111000110|00000000|Zd": "00010E00",
+ "fmov Zd.t, Pg/M, #zero | 00000101|sz|01|Pg|010|00000000|Zd": "00008E00",
  "fmul Vd.4S, Vn.4S, Vm.S[#idx] | 01001111|11|idx[0]|Rm|1001|idx[1]|0|Rn|Rd": "00400000",
  "fsqrt Dd, Dn | 00011110|11|10000|11100|00|Rn|Rd": "00800000",
  "fsqrt Sd, Sn | 00011110|10|10000|11100|00|Rn|Rd": "00800000",
@@ -46,7 +50,10 @@
  "ldtrsb Wd, [Xn|SP, #offS] | 00111000|100|offS:9|10|Rn|Rd": "00400000",
  "ldtrsh Wd, [Xn|SP, #offS] | 01111000|100|offS:9|10|Rn|Rd": "00400000",
  "ldursb Wd, [Xn|SP, #offS] | 00111000|100|offS:9|00|Rn|Rd": "00400000",
+ "ldursb Xd, [Xn|SP, #offS] | 00111000|110|offS:9|00|Rn|Rd": "00400000",
  "ldursh Wd, [Xn|SP, #offS] | 01111000|100|offS:9|00|Rn|Rd": "00400000",
+ "ldursh Xd, [Xn|SP, #offS] | 01111000|110|offS:9|00|Rn|Rd": "00400000",
+ "orr Pd.B, Pg/Z, Pn.B, Pm.B | 00100100|10|00|Pm|01|Pg|0|Pn|0|Pd": "01000000",
  "ret Xn | 11010100|010|11111|0|00000|Rn|00000": "02000000",
  "ror Xd, Xn, #n | 10010011|111|Rn|n:6|Rn|Rd": "00200000",
  "sqdmlal Vx.2D, Vn.2S, Vm.S[#idx] | 00011111|10|idx[0]  |Rm  |0011|idx[1]|0|Rn|Rx": "10000000",
@@ -82,6 +89,8 @@
  "st4 4x{Vs.S}+[#idx], [Xn|SP, #off=16]@ | 0|idx:1|001101|100|11111|101|idx:1|00|Rn|Rs": "00200000",
  "st4 4x{Vs.S}+[#idx], [Xn|SP, Xm]@ | 0|idx:1|001101|100|Rm   |101|idx:1|00|Rn|Rs": "00200000",
  "subps Xd, Xn|SP, Xm|SP | 10011010|110|Rm|0|00000|Rn|Rd": "20000000",
+ "uqdecp Xdn, Pm.t | 00100101|sz|1010111000100|Pm|Rdn": "00000400",
+ "uqincp Xdn, Pm.t | 00100101|sz|1010011000100|Pm|Rdn": "00000400",
  "uqshrn Vd.ta, Vn.tb, #n | 00001111|0|immh:4|immb:3|10010|1|Rn|Rd": "20000000",
  "uqshrn2 Vx.ta, Vn.tb, #n | 01001111|0|immh:4|immb:3|10010|1|Rn|Rx": "20000000"
 }
