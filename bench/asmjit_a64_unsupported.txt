@@ -1,0 +1,40 @@
+total 3992, passing 3731, known failures 241, unsupported 20
+    11 mnemonic
+     9 operand
+
+top unsupported details:
+     2 operand:Predicate::SysReg::kAFSR0_EL1
+     2 operand:Predicate::SysReg::kNZCV
+     2 mnemonic:fcvtxn
+     2 mnemonic:sm3tt1a
+     2 mnemonic:sm3tt1b
+     2 mnemonic:sm3tt2a
+     2 mnemonic:sm3tt2b
+     1 operand:Predicate::AT::kS1E0R
+     1 operand:Predicate::BTI::kJC
+     1 operand:Predicate::DC::kZVA
+     1 operand:Predicate::IC::kIVAU
+     1 operand:Predicate::TLBI::kVALE1
+     1 mnemonic:fcvtxn2
+
+cases:
+operand:Predicate::AT::kS1E0R: 4F7808D5 at(Predicate::AT::kS1E0R, x15)
+operand:Predicate::BTI::kJC: DF2403D5 bti(Predicate::BTI::kJC)
+operand:Predicate::DC::kZVA: 2F740BD5 dc(Predicate::DC::kZVA, x15)
+operand:Predicate::IC::kIVAU: 2F750BD5 ic(Predicate::IC::kIVAU, x15)
+operand:Predicate::SysReg::kAFSR0_EL1: 015138D5 mrs(x1, Predicate::SysReg::kAFSR0_EL1)
+operand:Predicate::SysReg::kNZCV: 01423BD5 mrs(x1, Predicate::SysReg::kNZCV)
+operand:Predicate::SysReg::kAFSR0_EL1: 015118D5 msr(Predicate::SysReg::kAFSR0_EL1, x1)
+operand:Predicate::SysReg::kNZCV: 01421BD5 msr(Predicate::SysReg::kNZCV, x1)
+operand:Predicate::TLBI::kVALE1: AF8708D5 tlbi(Predicate::TLBI::kVALE1, x15)
+mnemonic:fcvtxn: 2168617E fcvtxn(s1, d1)
+mnemonic:fcvtxn: 4168612E fcvtxn(v1.s2(), v2.d2())
+mnemonic:fcvtxn2: 4168616E fcvtxn2(v1.s4(), v2.d2())
+mnemonic:sm3tt1a: 418044CE sm3tt1a(v1.s4(), v2.s4(), v4.s(0))
+mnemonic:sm3tt1a: 41B044CE sm3tt1a(v1.s4(), v2.s4(), v4.s(3))
+mnemonic:sm3tt1b: 418444CE sm3tt1b(v1.s4(), v2.s4(), v4.s(0))
+mnemonic:sm3tt1b: 41B444CE sm3tt1b(v1.s4(), v2.s4(), v4.s(3))
+mnemonic:sm3tt2a: 418844CE sm3tt2a(v1.s4(), v2.s4(), v4.s(0))
+mnemonic:sm3tt2a: 41B844CE sm3tt2a(v1.s4(), v2.s4(), v4.s(3))
+mnemonic:sm3tt2b: 418C44CE sm3tt2b(v1.s4(), v2.s4(), v4.s(0))
+mnemonic:sm3tt2b: 41BC44CE sm3tt2b(v1.s4(), v2.s4(), v4.s(3))
