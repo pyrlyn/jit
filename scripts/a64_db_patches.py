@@ -55,6 +55,18 @@ def patch(db):
             elif mn.startswith("sm3tt"): _sub(i, inst=(r"Vm\.4\[#idx\]", "Vm.S[#idx]"))
         if g["category"] == "ASIMD" or any(d["inst"].startswith("fcvtn ") for d in g["data"]):
             pass
+    for g in db["instructions"]:
+        if not g["category"].startswith("SVE"): continue
+        for i in g["data"]:
+            i["inst"] = i["inst"].replace("#idxmm", "#imm")
+            if i["inst"].startswith("while") and "|000X" in i["op"]:
+                i["op"] = i["op"].replace("|000X", "|000|sf:1|")  # sf: X (1) or W (0) operands
+            # Prefer DUP (imm8) over DUPM for `mov Zd.t, #imm` (as LLVM and AsmJit do).
+        mv = [x for x in g["data"] if x["inst"] == "mov Zd.t, #imm, {lsl #n}"]
+        if mv:
+            g["data"] = [x for x in g["data"] if x not in mv]
+            k = next(j for j, x in enumerate(g["data"]) if x["inst"] == "mov Zd.t, #imm")
+            g["data"][k:k] = mv
     # CMN/CMP: prefer the shifted-register form over the extended one (as AsmJit does) unless SP is used.
     for g in db["instructions"]:
         d = g["data"]

@@ -1,0 +1,63 @@
+SVE/SME forms: 746; LLVM-verified cases: 2044 (passing 2044, known failures 0)
+forms with no case accepted by LLVM: 60 (DB-only/odd syntax; listed below)
+
+   1 add Zdn.t, Zdn.t, #imm, {lsl #n}
+   2 brkas Pd.B, Pg/M, Pn.B
+   2 brkbs Pd.B, Pg/M, Pn.B
+   6 clasta Bdn, Pg, Bdn, Zm.t
+   6 clasta Ddn, Pg, Ddn, Zm.t
+   6 clasta Hdn, Pg, Hdn, Zm.t
+   6 clasta Sdn, Pg, Sdn, Zm.t
+   6 clastb Bdn, Pg, Bdn, Zm.t
+   6 clastb Ddn, Pg, Ddn, Zm.t
+   6 clastb Hdn, Pg, Hdn, Zm.t
+   6 clastb Sdn, Pg, Sdn, Zm.t
+   1 cpy Zd.t, Pg/MZ, #imm, {lsl #n}
+   1 dup Zd.t, #imm, {lsl #n}
+   6 dup Zd.t, Xn|SP
+   6 eorv Bd, Pg, Zn.t
+   6 eorv Dd, Pg, Zn.t
+   6 eorv Hd, Pg, Zn.t
+   6 eorv Sd, Pg, Zn.t
+   6 fcmeq Pd.t, Pg/Z, Zn.t, #zero
+   6 fcmge Pd.t, Pg/Z, Zn.t, #zero
+   6 fcmgt Pd.t, Pg/Z, Zn.t, #zero
+   6 fcmle Pd.t, Pg/Z, Zn.t, #zero
+   6 fcmlt Pd.t, Pg/Z, Zn.t, #zero
+   6 fcmne Pd.t, Pg/Z, Zn.t, #zero
+   3 fmax Zdn.t, Pg/M, Zdn.t, #immF
+   3 fmaxnm Zdn.t, Pg/M, Zdn.t, #immF
+   3 fmin Zdn.t, Pg/M, Zdn.t, #immF
+   3 fminnm Zdn.t, Pg/M, Zdn.t, #immF
+   4 fmmla Zda.S, Zn.S, Zm.S
+   3 fmul Zdn.t, Pg/M, Zdn.t, #immF
+   1 mov Zd.t, #imm, {lsl #n}
+   6 mov Zd.t, Xn|SP
+  18 saddwb Zd.ta, Zn.t, Zm.tb
+  18 saddwt Zd.ta, Zn.t, Zm.tb
+   6 shrnb Zd.t, Zn.t, #imm
+   6 shrnt Zd.t, Zn.t, #imm
+   1 sqadd Zdn.t, Zdn.t, #imm, {lsl #n}
+   2 sqdech Zdn.D, {#pattern}, {mul #imm}
+   2 sqdecw Zdn.D, {#pattern}, {mul #imm}
+   2 sqdmullb Zd.D, Zn.D, Zm.D[#idx]
+   2 sqdmullb Zd.S, Zn.S, Zm.S[#idx]
+   2 sqdmullt Zd.D, Zn.D, Zm.D[#idx]
+   2 sqdmullt Zd.S, Zn.S, Zm.S[#idx]
+   2 sqinch Zdn.D, {#pattern}, {mul #imm}
+   2 sqincw Zdn.D, {#pattern}, {mul #imm}
+   1 sqsub Zdn.t, Zdn.t, #imm, {lsl #n}
+   8 sshllb Zd.t, Zn.t, #imm
+   8 sshllt Zd.t, Zn.t, #imm
+  18 ssubwb Zd.ta, Zn.t, Zm.tb
+  18 ssubwt Zd.ta, Zn.t, Zm.tb
+   1 sub Zdn.t, Zdn.t, #imm, {lsl #n}
+   1 subr Zdn.t, Zdn.t, #imm, {lsl #n}
+   1 uqadd Zdn.t, Zdn.t, #imm, {lsl #n}
+   2 uqdech Zdn.D, {#pattern}, {mul #imm}
+   2 uqdecw Zdn.D, {#pattern}, {mul #imm}
+   2 uqinch Zdn.D, {#pattern}, {mul #imm}
+   2 uqincw Zdn.D, {#pattern}, {mul #imm}
+   1 uqsub Zdn.t, Zdn.t, #imm, {lsl #n}
+   8 ushllb Zd.t, Zn.t, #imm
+   8 ushllt Zd.t, Zn.t, #imm

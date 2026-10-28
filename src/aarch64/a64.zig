@@ -20,7 +20,7 @@ pub const Error = core.Error || error{NoMatchingForm};
 pub const Arr = enum(u8) { none, a8b, a16b, a4h, a8h, a2s, a4s, a1d, a2d, a1q, a4b, a2h, a2b, a1s };
 pub const Et = enum(u3) { none, b, h, s, d, q };
 
-pub const K = enum(u8) { w, x, wsp, xsp, rext, sb, sh, ss, sd, sq, vt, vta, vtb, vfix, velem, vlist, vlistelem, glist, immfix, rel, cond, fimm, imm, shift, mem, memlit };
+pub const K = enum(u8) { w, x, wsp, xsp, rext, sb, sh, ss, sd, sq, vt, vta, vtb, vfix, velem, vlist, vlistelem, glist, immfix, rel, cond, fimm, imm, shift, mem, memlit, zt, zta, ztb, zfix, zelem, zelemt, pg, pgm, pgz, pgmz, pt, pfix, sany };
 pub const Sh = enum(u8) { none, shift3, shift4, lsl, extend, msl, lslmsl };
 pub const Mode = enum(u8) { off, post, pre, any, offpre };
 pub const MK = enum(u8) { none, base, imm, fixed, fixedsz, postreg, reg };
@@ -51,6 +51,10 @@ pub const Form = struct {
     t: []const Arr = &.{},
     ta: []const Arr = &.{},
     tb: []const Arr = &.{},
+    /// SVE element-size lists (index = `size` field value; `.none` = not allowed).
+    zt: []const Et = &.{},
+    zta: []const Et = &.{},
+    ztb: []const Et = &.{},
     imm: ImmFn = .none,
     args: []const i8 = &.{},
     /// Alias with an inverted condition (cset/csetm/cinc/cinv/cneg = csinc/csinv/csneg !cond).
@@ -69,7 +73,30 @@ pub const Shift = struct { op: ShiftOp, n: u8 };
 pub const MemMode = enum(u2) { off, pre, post };
 /// [base, #off] / [base, index{, ext #n}] / pre-index `[base, #off]!` / post-index `[base], #off|index`.
 pub const Mem = struct { base: Gp, index: ?Gp = null, ext: ?Shift = null, off: i64 = 0, mode: MemMode = .off };
-pub const Op = union(enum) { r: Gp, v: V, imm: i64, fimm: f64, shift: Shift, mem: Mem, cond: u4, rel: i64 };
+/// SVE vector register Z0..Z31 with element type (`et`), optionally indexed (`Zm.S[idx]`).
+pub const Z = struct { id: u5, et: Et, idx: ?u4 = null };
+/// Predicate qualifier: none (`P1`), merging (`P1/M`) or zeroing (`P1/Z`).
+pub const PQ = enum(u2) { none, m, z };
+/// SVE predicate register P0..P15 (`P1.B`, `P1/Z`, ...).
+pub const P = struct { id: u4, et: Et = .none, q: PQ = .none };
+pub const Op = union(enum) { r: Gp, v: V, imm: i64, fimm: f64, shift: Shift, mem: Mem, cond: u4, rel: i64, z: Z, p: P };
+
+pub fn zreg(i: u5, et: Et) Op {
+    return .{ .z = .{ .id = i, .et = et } };
+}
+pub fn zelem(i: u5, et: Et, idx: u4) Op {
+    return .{ .z = .{ .id = i, .et = et, .idx = idx } };
+}
+pub fn preg(i: u4, et: Et) Op {
+    return .{ .p = .{ .id = i, .et = et } };
+}
+/// `Pg/M` (merging) or `Pg/Z` (zeroing).
+pub fn pmerge(i: u4) Op {
+    return .{ .p = .{ .id = i, .q = .m } };
+}
+pub fn pzero(i: u4) Op {
+    return .{ .p = .{ .id = i, .q = .z } };
+}
 
 pub fn w(i: u6) Op {
     return .{ .r = .{ .id = i, .x = false } };
@@ -187,6 +214,11 @@ fn regGp(o: Op, xw: bool, allow_sp: bool, allow_zr: bool) ?u5 {
     return @intCast(r.id);
 }
 
+fn indexOfEt(list: []const Et, e: Et) ?u3 {
+    for (list, 0..) |it, i| if (it == e and e != .none) return @intCast(i);
+    return null;
+}
+
 fn sizeLog2(kind: VKind) u3 {
     return switch (kind) {
         .b => 0,
@@ -263,7 +295,9 @@ fn matchOps(f: *const Form, ops: []const Op, c: *Ctx) bool {
             },
             .rext => {
                 if (o != .r or o.r.id == 32) return false;
+                if (c.get(.sf)) |sf| if ((sf == 1) != o.r.x) return false; // WHILE*: both W or both X
                 c.rext_x = o.r.x;
+                if (hasField(f, .sf)) c.put(.sf, @intFromBool(o.r.x));
                 c.put(s.f.?, @intCast(o.r.id & 31));
                 oi += 1;
             },
@@ -311,6 +345,76 @@ fn matchOps(f: *const Form, ops: []const Op, c: *Ctx) bool {
                 }
                 if (c.esz == null) c.esz = arrEt(a);
                 c.el(arrEt(a));
+                c.put(s.f.?, o.v.id);
+                oi += 1;
+            },
+            .zt, .zta, .ztb, .zfix => {
+                if (o != .z or o.z.idx != null or o.z.et == .none) return false;
+                const e = o.z.et;
+                switch (s.k) {
+                    .zfix => if (e != s.et) return false,
+                    else => {
+                        const list = switch (s.k) {
+                            .zt => f.zt,
+                            .zta => f.zta,
+                            else => f.ztb,
+                        };
+                        const i = indexOfEt(list, e) orelse return false;
+                        if (c.sz) |z| if (z != i) return false;
+                        c.sz = i;
+                    },
+                }
+                if (s.k != .zfix or f.zt.len == 0) c.el(etLog2(e));
+                if (c.esz == null) c.esz = etLog2(e);
+                c.put(s.f.?, o.z.id);
+                oi += 1;
+            },
+            .zelem => {
+                if (o != .z or o.z.idx == null or o.z.et != s.et) return false;
+                if (s.f2) |n| c.put(n, o.z.idx.?) else if (o.z.idx.? != s.fixed) return false;
+                c.put(s.f.?, o.z.id);
+                if (c.esz == null) c.esz = etLog2(s.et);
+                oi += 1;
+            },
+            .zelemt => {
+                if (o != .z or o.z.idx == null) return false;
+                const i = indexOfEt(f.zt, o.z.et) orelse return false;
+                if (c.sz) |z| if (z != i) return false;
+                c.sz = i;
+                c.el(etLog2(o.z.et));
+                c.put(.idx, o.z.idx.?);
+                c.put(s.f.?, o.z.id);
+                oi += 1;
+            },
+            .pg, .pgm, .pgz, .pgmz => {
+                if (o != .p or o.p.et != .none) return false;
+                switch (s.k) {
+                    .pg => if (o.p.q != .none) return false,
+                    .pgm => if (o.p.q != .m) return false,
+                    .pgz => if (o.p.q != .z) return false,
+                    else => {
+                        if (o.p.q == .none) return false;
+                        c.put(.M, if (o.p.q == .m) 1 else 0);
+                    },
+                }
+                c.put(s.f.?, o.p.id);
+                oi += 1;
+            },
+            .pt, .pfix => {
+                if (o != .p or o.p.q != .none or o.p.et == .none) return false;
+                if (s.k == .pfix) {
+                    if (o.p.et != s.et) return false;
+                } else {
+                    const i = indexOfEt(f.zt, o.p.et) orelse return false;
+                    if (c.sz) |z| if (z != i) return false;
+                    c.sz = i;
+                    c.el(etLog2(o.p.et));
+                }
+                c.put(s.f.?, o.p.id);
+                oi += 1;
+            },
+            .sany => {
+                if (o != .v or o.v.kind == .v) return false;
                 c.put(s.f.?, o.v.id);
                 oi += 1;
             },
@@ -635,6 +739,107 @@ fn applyImm(f: *const Form, c: *Ctx, ops: []const Op, bits: *u32) bool {
             c.put(.sysreg, v & 0x7FFF);
         },
         .ASimdMovPImm, .ASimdMovNImm, .ASimdLogicalImm => if (!simdImm(f, c, ops)) return false,
+        .SvePatternImm => {
+            const mul = c.get(.imm) orelse 1;
+            const pat = c.get(.pattern) orelse 31;
+            if (mul < 1 or mul > 16 or pat < 0 or pat > 31) return false;
+            c.put(.imm, mul - 1);
+            c.put(.pattern, pat);
+        },
+        .Rot2Imm => {
+            const r = c.get(.rot2) orelse return false;
+            if (@rem(r, 90) != 0 or r < 0 or r > 270) return false;
+            c.put(.imm, @divTrunc(r, 90));
+        },
+        .Rot1Imm => {
+            const r = c.get(.rot1) orelse c.get(.rot2) orelse return false;
+            if (r != 90 and r != 270) return false;
+            c.put(.imm, if (r == 270) 1 else 0);
+        },
+        .SveDupImm => {
+            // DUP (indexed): imm2:tsz = (idx << 1 | 1) << log2(esize).
+            const a0 = arg(f, 0);
+            const l: u3 = if (a0 >= 0) @intCast(a0) else (c.min_el orelse return false);
+            const a1 = arg(f, 1);
+            const idx: i64 = if (a1 >= 0) a1 else (c.get(.idx) orelse return false);
+            if (l > 4 or idx < 0) return false;
+            const v = ((idx << 1) | 1) << l;
+            if (v >= 128) return false;
+            c.put(.imm, v);
+        },
+        .Sve8BitImm => {
+            // #imm8, {lsl #0|8}; a multiple of 256 without an explicit shift uses lsl #8.
+            var v = c.get(.imm) orelse return false;
+            // `n` is already the LSL #8 flag (the shift spec scales by 8).
+            var n: i64 = if ((c.get(.n) orelse 0) != 0) 8 else 0;
+            const signed = false;
+            const fits = struct {
+                fn check(val: i64, sg: bool) bool {
+                    return if (sg) val >= -128 and val <= 127 else val >= 0 and val <= 255;
+                }
+            }.check;
+            if (n == 0 and !fits(v, signed) and @rem(v, 256) == 0 and fits(@divTrunc(v, 256), signed) and (c.min_el orelse 0) > 0) {
+                v = @divTrunc(v, 256);
+                n = 8;
+            }
+            if (!fits(v, signed)) return false;
+            if (n == 8 and (c.min_el orelse 0) == 0) return false;
+            c.put(.imm, v & 0xFF);
+            c.put(.n, @divTrunc(n, 8));
+        },
+        .SveXtImm => {
+            const l: u3 = c.min_el orelse return false;
+            if (l > 2) return false;
+            c.put(.imm, @as(i64, 1) << l);
+        },
+        .VecVFPImm => {
+            const v: f64 = @bitCast(c.get(.fimm) orelse return false);
+            c.put(.imm, fpImm8(v) orelse return false);
+        },
+        .SveShiftImm6, .SveShiftImm7 => {
+            // Element size in tsz (unary-coded) + shift amount in imm3: right shifts encode
+            // 2*esize - n, left shifts esize + n (SSHLLB/USHLLB: left).
+            const n = c.get(.imm) orelse return false;
+            const l: u3 = c.min_el orelse return false;
+            const es: i64 = @as(i64, 8) << l;
+            const right = !isLeftShift(f);
+            const v = if (right) blk: {
+                if (n < 1 or n > es) return false;
+                break :blk 2 * es - n;
+            } else blk: {
+                if (n < 0 or n >= es) return false;
+                break :blk es + n;
+            };
+            c.put(.imm, v);
+        },
+        .SveLogicalImm, .SveDupmImm => {
+            const raw: u64 = @bitCast(c.get(.imm) orelse return false);
+            // BIC/EON/ORN (immediate) are AND/EOR/ORR with the inverted immediate.
+            const l0: u3 = c.min_el orelse 3;
+            const emask: u64 = if (l0 >= 3) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(@as(u7, 8) << l0)) - 1;
+            const v: u64 = if (f.imm == .SveLogicalImm and arg(f, 1) == 1) ~raw & emask else raw;
+            const l: u3 = c.min_el orelse 3;
+            const ebits: u7 = @as(u7, 8) << l;
+            var r: u64 = if (ebits == 64) v else v & ((@as(u64, 1) << @intCast(ebits)) - 1);
+            if (ebits < 64 and v >> @intCast(ebits) != 0 and ~v >> @intCast(ebits - 1) != 0) return false;
+            var rw: u7 = ebits;
+            while (rw < 64) : (rw *= 2) r |= r << @intCast(rw);
+            const li = logicalImm(r, true) orelse return false;
+            c.put(.imm, (@as(i64, li.n) << 12) | (@as(i64, li.immr) << 6) | li.imms);
+        },
+        .FpZeroOrOneImm, .FpHalfOrOneImm, .FpHalfOrTwoImm => {
+            const v: f64 = @bitCast(c.get(.fimm) orelse return false);
+            const lo: f64 = switch (f.imm) {
+                .FpZeroOrOneImm => 0.0,
+                else => 0.5,
+            };
+            const hi: f64 = switch (f.imm) {
+                .FpHalfOrTwoImm => 2.0,
+                else => 1.0,
+            };
+            if (v != lo and v != hi) return false;
+            c.put(.imm, if (v == hi) 1 else 0);
+        },
         .ImmBFX, .ImmBFIZ => {
             const lsb = c.get(.lsb) orelse return false;
             const width = c.get(.width) orelse return false;
@@ -702,6 +907,12 @@ fn applyImm(f: *const Form, c: *Ctx, ops: []const Op, bits: *u32) bool {
         else => return false,
     }
     return true;
+}
+
+fn isLeftShift(f: *const Form) bool {
+    // Left-shift SVE forms encode `esize + n` (LSL, SQSHL, UQSHL, SQSHLU, SLI, SSHLL*, USHLL*);
+    // gen_a64_tables.py appends a trailing arg 1 to their SveShiftImm6/7 args.
+    return f.args.len > 1 and f.args[f.args.len - 1] == 1;
 }
 
 /// AdvSIMDExpandImm(op, cmode, imm8) -> 64-bit value.
@@ -816,7 +1027,8 @@ pub fn encode(f: *const Form, ops: []const Op) ?u32 {
     var bits = f.bits;
     if (hasField(f, .sz)) {
         // `size`: log2 of the (smallest) element; 1-bit `sz` (FP): S = 0, D = 1.
-        const l = c.min_el orelse return null;
+        // SVE: the size field is the index into the form's element list (`zt`/`zta`).
+        const l = if (f.zt.len > 0 or f.zta.len > 0) (c.sz orelse c.min_el orelse return null) else c.min_el orelse return null;
         const wsz = fieldWidth(f, .sz);
         c.put(.sz, if (wsz == 1) @as(i64, l) - 2 else l);
     }

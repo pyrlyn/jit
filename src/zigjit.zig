@@ -23,6 +23,7 @@ test {
     _ = @import("enc_tests.zig");
     _ = @import("gp_tests.zig");
     _ = @import("simd_tests.zig");
+    _ = @import("a64_sve_tests.zig");
     if (opts.asmjit_tests) _ = @import("asmjit_x64_tests.zig");
     if (opts.asmjit_tests) _ = @import("asmjit_x86_tests.zig");
     if (opts.asmjit_tests) _ = @import("asmjit_a64_tests.zig");

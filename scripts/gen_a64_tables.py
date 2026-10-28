@@ -14,6 +14,8 @@ import json, os, re, collections
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB = os.path.join(ROOT, "ref/asmjit/db/isa_aarch64.json")
 WIDTH = {"Rd": 5, "Rn": 5, "Rm": 5, "Rs": 5, "Rt": 5, "Ra": 5, "Rx": 5, "Rd2": 5, "Rs2": 5, "Rt2": 5,
+         "Zd": 5, "Zn": 5, "Zm": 5, "Za": 5, "Zda": 5, "Zdn": 5, "Zk": 5, "Zx": 5, "Zt": 5, "Rdn": 5,
+         "Pd": 4, "Pn": 4, "Pm": 4, "Pg": 4, "Pdm": 4, "Pdn": 4, "M": 1, "msz": 2,
          "sz": 2, "cond": 4, "nzcv": 4, "W": 1, "!post": 1, "CRm": 4, "CRn": 4, "sop": 2, "option": 3}
 ARRS = ["8B", "16B", "4H", "8H", "2S", "4S", "1D", "2D", "1Q", "4B", "2H", "2B", "1S", "2D"]
 ARR_Z = {a: "a" + a.lower() for a in ARRS}  # Zig enum tag: a8b, a16b, ...
@@ -22,6 +24,10 @@ names = set()  # every named value (fields + operand values)
 
 class Skip(Exception):
     pass
+
+def isreg(n, w):
+    """Register fields (Rn, Zdn, Pg, ...): a repeated one carries the same value twice."""
+    return bool(re.fullmatch(r"[RZP][a-z]+\d?", n)) and w in (3, 4, 5)
 
 def parse_bits(op):
     """-> (fixed bits, [(name, at, width, src)]) ; repeated plain pieces are MSB-first."""
@@ -45,7 +51,7 @@ def parse_bits(op):
     # src offsets for plain repeated names: first occurrence is most significant
     tot = collections.Counter(); 
     for n, w, s in pieces:
-        if s is None and not re.fullmatch(r"[01xX]+", n) and not (n.startswith("R") and w == 5): tot[n] += w
+        if s is None and not re.fullmatch(r"[01xX]+", n) and not isreg(n, w): tot[n] += w
     used = collections.Counter()
     fixed, fields, at = 0, [], 32
     for n, w, s in pieces:
@@ -53,7 +59,7 @@ def parse_bits(op):
         if re.fullmatch(r"[01xX]+", n):
             fixed |= int(n.replace("x", "0").replace("X", "0"), 2) << at
             continue
-        if s is None and n.startswith("R") and w == 5:
+        if s is None and isreg(n, w):
             s = 0  # repeated register field (cinc: Rn twice) = same value twice
         elif s is None:
             used[n] += w; s = tot[n] - used[n]
@@ -83,8 +89,34 @@ def op_spec(t, form):
         return dict(k=k, f=f)
     if t in ("Rm", "Rn", "Rd"):
         names.add(t); return dict(k="rext", f=t)
+    # SVE vectors and predicates
+    m = re.fullmatch(r"Z(d|n|m|a|da|dn|k|x|t)\.(t|ta|tb|[BHSDQ])(?:\[#(idx|\d+)\])?", t)
+    if m:
+        f = "Z" + m.group(1); names.add(f)
+        a = m.group(2)
+        if m.group(3) is not None:
+            if a in ("ta", "tb"): raise Skip("op zelem-t")
+            if a == "t": names.add("idx"); return dict(k="zelemt", f=f, f2="idx")
+            d = dict(k="zelem", f=f, et=a.lower())
+            if m.group(3).isdigit(): d["fixed"] = int(m.group(3))
+            else: d["f2"] = "idx"; names.add("idx")
+            return d
+        if a in ("t", "ta", "tb"): return dict(k="z" + a, f=f)
+        return dict(k="zfix", f=f, et=a.lower())
+    m = re.fullmatch(r"Pg(/M|/Z|/MZ)?", t)
+    if m:
+        names.add("Pg")
+        return dict(k={None: "pg", "/M": "pgm", "/Z": "pgz", "/MZ": "pgmz"}[m.group(1)], f="Pg")
+    m = re.fullmatch(r"P(d|n|m|dm|dn)\.(t|[BHSD])", t)
+    if m:
+        f = "P" + m.group(1); names.add(f)
+        if m.group(2) == "t": return dict(k="pt", f=f)
+        return dict(k="pfix", f=f, et=m.group(2).lower())
+    if t == "{mul #imm}": names.add("imm"); return dict(k="imm", f="imm", opt=True, fixed=1)
+    if t == "{#pattern}": names.add("pattern"); return dict(k="imm", f="pattern", opt=True, fixed=31)
+    if t == "Vd": names.add("Rd"); return dict(k="sany", f="Rd")
     # scalar FP/SIMD registers
-    m = re.fullmatch(r"([BHSDQ])(d|n|m|s|t|a|x)(2?)", t)
+    m = re.fullmatch(r"([BHSDQ])(d|n|m|s|t|a|x|dn)(2?)", t)
     if m:
         f = regname(m.group(2) + m.group(3)); names.add(f)
         return dict(k="s" + m.group(1).lower(), f=f)
@@ -126,7 +158,7 @@ def op_spec(t, form):
     if m: names.add("relS"); return dict(k="rel", f="relS", scale=int(m.group(1) or 1).bit_length() - 1)
     if t == "X16": return dict(k="x", fixed=16)
     if t == "#cond": names.add("cond"); return dict(k="cond", f="cond")
-    if t == "#fimm": names.add("fimm"); return dict(k="fimm", f="fimm")
+    if t in ("#fimm", "#immVFP", "#immF"): names.add("fimm"); return dict(k="fimm", f="fimm")
     m = re.fullmatch(r"\{?#(\w+)(?:\*(\d+))?(?:=(\d+))?\}?", t)
     if m:
         n = m.group(1); names.add(n)
@@ -183,7 +215,6 @@ def main(write=True):
     skipped = collections.Counter()
     for g in db["instructions"]:
         cat = g["category"]
-        if cat.startswith("SVE") or cat == "SME": continue
         for i in g["data"]:
             inst = i["inst"]
             mns, _, opstr = inst.partition(" ")
@@ -196,6 +227,52 @@ def main(write=True):
                 skipped[str(e).split(" ")[0]] += 1
                 continue
             t = ta = tb = None
+            sve = cat.startswith("SVE") or cat == "SME"
+            if sve:
+                zl = lambda v: [c if c != "~" else "~" for c in v.replace(" ", "")]
+                if "t" in i: t = zl(i["t"])
+                if "ta" in i: ta = zl(i["ta"])
+                if "tb" in i: tb = zl(i["tb"])
+                if "T" in i and t is None: t = zl(i["T"])
+                # Lists the DB leaves implicit: all element sizes; widening pairs H.B, S.H, D.S.
+                kinds = {o["k"] for o in ops}
+                if t is None and kinds & {"zt", "pt", "zelemt"}: t = list("BHSD")
+                if ta is None and "zta" in kinds: ta = list("~HSD")
+                if tb is None and "ztb" in kinds: tb = list("~BHS")
+                if any(n_ == "n" and w_ == 1 for n_, _, w_, _ in fields):
+                    for o in ops:
+                        if o["k"] == "shift" and o.get("f") == "n": o["scale"] = 8
+                # Field-name mismatches in the DB (token Zn / field Zm, token Sd / field Zd, a token
+                # repeated where the field exists once, ...): give each register operand a field of
+                # the same class, preferring the same role letter, in operand order.
+                fpos = [n_ for n_, _, _, _ in fields]
+                cls = lambda n_: "P" if n_.startswith("P") else ("ZR" if n_[0] in "ZR" else None)
+                exact = {o.get("f") for o in ops if o.get("f") in fpos}
+                claimed, firsts = set(exact), set()
+                for o in ops:
+                    f_ = o.get("f")
+                    if not f_ or cls(f_) is None or o["k"] in ("rel",): continue
+                    if f_ in fpos and f_ not in firsts: firsts.add(f_); continue
+                    pool = [n_ for n_ in dict.fromkeys(fpos) if n_ not in claimed and cls(n_) == cls(f_) and n_ != "Pg" or (n_ == "Pg" and f_ == "Pg" and n_ not in claimed)]
+                    same = [n_ for n_ in pool if n_[1:2] == f_[1:2]]
+                    pick = (same or pool or [None])[0]
+                    if pick is None:
+                        if f_ in fpos: continue  # intentional reuse (tied operand)
+                        raise_skip = True; break
+                    o["f"] = pick; names.add(pick); claimed.add(pick)
+                else:
+                    raise_skip = False
+                if raise_skip: skipped["sve-fields"] += 1; continue
+                for mn in mns:
+                    mn = mn.replace(".<cond>", "_cond")
+                    table.setdefault(mn, []).append(dict(fixed=fixed, fields=fields, ops=ops, t=None, ta=None, tb=None, zt=t, zta=ta, ztb=tb,
+                        immfn=re.sub(r"\(.*", "", i["imm"]) if "imm" in i else "none",
+                        immargs=[a.strip() for a in re.search(r"\((.*)\)", i["imm"]).group(1).split(",")] if "imm" in i else [],
+                        inst=inst, key=inst + " | " + i["op"]))
+                    e = table[mn][-1]
+                    if e["immfn"] in ("SveShiftImm6", "SveShiftImm7", "SveXtImm"):
+                        e["immargs"] = e["immargs"] + ["1" if re.fullmatch(r"(lsl|sqshlu?|uqshl|sli|[su]shll[bt])", mn) else "0"]
+                continue
             if "t" in i:
                 v = i["t"].split()
                 if "." in v[-1]: ta = [x.split(".")[0] if x != "~" else "~" for x in v]; tb = [x.split(".")[1] if x != "~" else "~" for x in v]
@@ -254,6 +331,8 @@ def main(write=True):
             if f["t"]: extra += f", .t = {zarr(f['t'])}"
             if f["ta"]: extra += f", .ta = {zarr(f['ta'])}"
             if f["tb"]: extra += f", .tb = {zarr(f['tb'])}"
+            for zk in ("zt", "zta", "ztb"):
+                if f.get(zk): extra += f", .{zk} = &.{{" + ", ".join("." + (c.lower() if c != "~" else "none") for c in f[zk]) + "}"
             if f["immfn"] != "none":
                 args = []
                 for a in f["immargs"]:
