@@ -225,11 +225,11 @@ fn checkMem(m: Mem) Error!void {
 pub const Buf = struct {
     b: [16]u8 = undefined,
     n: u8 = 0,
-    fn u8_(s: *Buf, v: u8) void {
+    pub fn u8_(s: *Buf, v: u8) void {
         s.b[s.n] = v;
         s.n += 1;
     }
-    fn int(s: *Buf, v: i64, bytes: u8) void {
+    pub fn int(s: *Buf, v: i64, bytes: u8) void {
         var x: u64 = @bitCast(v);
         for (0..bytes) |_| {
             s.u8_(@truncate(x));

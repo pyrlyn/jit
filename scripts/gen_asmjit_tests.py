@@ -14,6 +14,40 @@ ref = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else root.parent / "asmjit-l
 src = (ref / "asmjit-testing/tests/asmjit_test_assembler_x64.cpp").read_text()
 mnems = set(re.findall(r"^    (\w+|@\"\w+\"),$", (root / "src/x86_64/gp_table.zig").read_text().split("pub const Mnemonic = enum {")[1].split("};")[0], re.M))
 mnems = {m.strip('@"') for m in mnems}
+vmnems = set(re.findall(r'^    @"(\w+)",$', (root / "src/x86_64/vec_table.zig").read_text().split("pub const Mnemonic = enum {")[1].split("};")[0], re.M))
+VREG = {}
+for cls, n in (("xmm", 32), ("ymm", 32), ("zmm", 32), ("mm", 8), ("k", 8), ("tmm", 8)):
+    for i in range(n): VREG[f"{cls}{i}"] = f"vec.{cls}({i})"
+for i in range(8): VREG[f"st{i}"] = f"vec.st({i})"
+VSZ = {"byte_ptr": 1, "word_ptr": 2, "dword_ptr": 4, "qword_ptr": 8, "tbyte_ptr": 10, "fword_ptr": 6,
+       "xmmword_ptr": 16, "ymmword_ptr": 32, "zmmword_ptr": 64, "ptr": 0}
+RC = {"rn_sae": ".rn", "rd_sae": ".rd", "ru_sae": ".ru", "rz_sae": ".rz"}
+
+def vmem(fn, args, bc):
+    a = split_args(args)
+    if not a or a[0] not in REG or REG[a[0]][0] != "q": raise Unsup("mem-base")
+    base = REG[a[0]][1]; sz = VSZ[fn]
+    if len(a) >= 2 and a[1] in VREG:
+        sh = imm(a[2]) if len(a) > 2 else 0; d = imm(a[3]) if len(a) > 3 else 0
+        m = f"vec.vsib(.{base}, {VREG[a[1]]}, .x{1 << sh}, {d}, {sz})"
+    else:
+        m = f"vec.mem({mem(fn, args)}, {sz})"
+    return f"vec.bcst({m}, {bc})" if bc else m
+
+def voperand(t):
+    t = t.strip()
+    if t in VREG: return VREG[t]
+    if t in REG:
+        s_, g = REG[t]; return f"gp.{RFN[s_]}(.{g})"
+    if t in HI8: return f"gp.r8hi(.r{t[0]}x)"
+    bc = 0
+    mb = re.fullmatch(r"(.*)\._1to(\d+)\(\)", t)
+    if mb: t, bc = mb.group(1), int(mb.group(2))
+    m = re.fullmatch(r"(\w+)\((.*)\)", t)
+    if m and m.group(1) in VSZ: return vmem(m.group(1), m.group(2), bc)
+    if m: raise Unsup("operand:" + m.group(1))
+    if re.fullmatch(r"[a-z]\w*", t): raise Unsup("reg-class:" + re.sub(r"\d+$", "", t))
+    return str(imm(t))
 
 GP = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"] + [f"r{i}" for i in range(8, 16)]
 REG = {}
@@ -80,42 +114,63 @@ def operand(t, regsize):
 cases, unsup, total = [], collections.Counter(), 0
 for hexs, body in re.findall(r'TEST_INSTRUCTION\("([0-9A-F]*)"\s*,\s*(.*)\);', src):
     total += 1
-    m = re.fullmatch(r"(?:(\w+)\(\)\.)?(\w+)\((.*)\)", body.strip())
+    body = body.strip()
     try:
+        extra = []
+        while True:
+            m = re.match(r"(\w+)\((\w*)\)\.", body)
+            if not m: break
+            p, arg = m.group(1), m.group(2)
+            if p == "k" and arg in VREG: extra.append(f".k = {arg[1:]}")
+            elif p == "z": extra.append(".z = true")
+            elif p in RC: extra.append(f".rc = {RC[p]}")
+            elif p == "sae": extra.append(".sae = true")
+            elif p == "evex": extra.append(".evex = true")
+            elif p == "vex": extra.append(".vex = true")
+            else: raise Unsup("prefix:" + p)
+            body = body[m.end():]
+        m = re.fullmatch(r"(\w+)\((.*)\)", body)
         if not m: raise Unsup("syntax")
-        if m.group(1): raise Unsup("prefix:" + m.group(1))
-        mn = m.group(2).rstrip("_")
-        if mn not in mnems: raise Unsup("mnemonic:" + mn)
-        ops = split_args(m.group(3))
-        rs = None
-        zops = [operand(o, rs)[0] for o in ops]
-        # xchg is commutative; ZigJIT follows LLVM (reg=first), AsmJit puts the first reg in r/m.
-        # Same instruction, so the AsmJit case is checked with the operands swapped.
-        if mn == "xchg" and len(ops) == 2 and all(o in REG or o in HI8 for o in ops): zops.reverse()
-        name = f"@\"{mn}\""
+        mn = m.group(1).rstrip("_")
+        ops = split_args(m.group(2))
+        txt = (hexs + " " + body).replace("\\", "\\\\").replace('"', '\\"')
         bytes_ = ", ".join(f"0x{hexs[i:i+2]}" for i in range(0, len(hexs), 2))
-        txt = body.replace("\\", "\\\\").replace('"', '\\"')
-        cases.append(f'    fails += check(&.{{ {bytes_} }}, .{name}, .{{ {", ".join(zops)} }}, "{txt}");')
+        allgp = all(o in REG or o in HI8 or not re.search(r"[xyz]mm|\bk\d|\bmm\d|tmm|_1to|st\d", o) and not re.search(r"(xmm|ymm|zmm|tbyte|fword)word_ptr|tbyte_ptr|fword_ptr", o) for o in ops)
+        if mn in mnems and allgp and not extra:
+            zops = [operand(o, None)[0] for o in ops]
+            if mn == "xchg" and len(ops) == 2 and all(o in REG or o in HI8 for o in ops): zops.reverse()
+            cases.append(f'    fails += check(&.{{ {bytes_} }}, .@"{mn}", .{{ {", ".join(zops)} }}, "{txt}");')
+        elif mn in vmnems:
+            zops = [voperand(o) for o in ops]
+            cases.append(f'    fails += checkV(&.{{ {bytes_} }}, .@"{mn}", .{{ {", ".join(zops)} }}, .{{ {", ".join(extra)} }}, "{txt}");')
+        else:
+            raise Unsup("mnemonic:" + mn)
     except Unsup as e:
-        unsup[str(e).split(":")[0] if not str(e).startswith("mnemonic") else "mnemonic"] += 1
+        unsup[str(e).split(":")[0]] += 1
         unsup["  " + str(e)] += 1
 
 out = [f"//! GENERATED by scripts/gen_asmjit_tests.py — do not edit. Expected bytes from AsmJit's",
        f"//! asmjit_test_assembler_x64.cpp: {total} cases, {len(cases)} ported, {total-len(cases)} unsupported.",
        "const std = @import(\"std\");", "const opts = @import(\"zigjit_options\");",
-       "const CodeBuffer = @import(\"core/code_buffer.zig\").CodeBuffer;", "",
+       "const CodeBuffer = @import(\"core/code_buffer.zig\").CodeBuffer;",
+       "const x = @import(\"x86_64/assembler.zig\");", "const gp = @import(\"x86_64/gp.zig\");", "const vec = @import(\"x86_64/vec.zig\");", "",
        "fn check(expected: []const u8, comptime mn: anytype, args: anytype, text: []const u8) u32 {",
-       "    const gp = @import(\"x86_64/gp.zig\");",
        "    var cb = CodeBuffer.init(std.testing.allocator);", "    defer cb.deinit();",
        "    gp.emit(&cb, mn, args) catch |e| {", "        std.debug.print(\"{s}: {s}\\n\", .{ @errorName(e), text });", "        return 1;", "    };",
        "    if (std.mem.eql(u8, expected, cb.code())) return 0;",
        "    std.debug.print(\"encoding mismatch: {s}: expected {x}, got {x}\\n\", .{ text, expected, cb.code() });",
+       "    return 1;", "}", "",
+       "fn checkV(expected: []const u8, comptime mn: anytype, args: anytype, e: @import(\"x86_64/vec.zig\").Extra, text: []const u8) u32 {",
+       "    var cb = CodeBuffer.init(std.testing.allocator);", "    defer cb.deinit();",
+       "    vec.emit(&cb, mn, args, e) catch |err| {", "        std.debug.print(\"{s}: {s}\\n\", .{ @errorName(err), text });", "        return 1;", "    };",
+       "    if (std.mem.eql(u8, expected, cb.code())) return 0;",
+       "    std.debug.print(\"encoding mismatch: {s}: got {X}\\n\", .{ text, cb.code() });",
        "    return 1;", "}", ""]
 N = 400
 for i in range(0, len(cases), N):
     out += [f'test "AsmJit x86_64 assembler tests ({i}..{min(i+N, len(cases))})" {{',
             "    if (!opts.x86_64) return error.SkipZigTest;", "    @setEvalBranchQuota(1_000_000);",
-            "    const x = @import(\"x86_64/assembler.zig\");", "    const gp = @import(\"x86_64/gp.zig\");",
+
             "    var fails: u32 = 0;"] + cases[i:i+N] + ["    try std.testing.expectEqual(@as(u32, 0), fails);", "}", ""]
 (root / "src/asmjit_x64_tests.zig").write_text("\n".join(out))
 rep = [f"total {total}, ported {len(cases)}, unsupported {total-len(cases)}"] + [f"{v:6} {k}" for k, v in unsup.most_common() if not k.startswith("  ")]
