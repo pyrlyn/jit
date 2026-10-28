@@ -122,15 +122,17 @@ def op_spec(t, form):
         return dict(k="glist", f=f, n=int(m.group(1)), w=m.group(2) == "X")
     # immediates
     if t in ("#0", "#8", "#16", "#32"): return dict(k="immfix", fixed=int(t[1:]))
-    m = re.fullmatch(r"#relS(\*4)?", t)
-    if m: names.add("relS"); return dict(k="rel", f="relS", scale=2 if m.group(1) else 0)
+    m = re.fullmatch(r"#relS(?:\*(\d+))?", t)
+    if m: names.add("relS"); return dict(k="rel", f="relS", scale=int(m.group(1) or 1).bit_length() - 1)
+    if t == "X16": return dict(k="x", fixed=16)
     if t == "#cond": names.add("cond"); return dict(k="cond", f="cond")
     if t == "#fimm": names.add("fimm"); return dict(k="fimm", f="fimm")
-    m = re.fullmatch(r"\{?#(\w+)(?:=(\d+))?\}?", t)
+    m = re.fullmatch(r"\{?#(\w+)(?:\*(\d+))?(?:=(\d+))?\}?", t)
     if m:
         n = m.group(1); names.add(n)
         d = dict(k="imm", f=n)
-        if t.startswith("{"): d["opt"] = True; d["fixed"] = int(m.group(2) or 0)
+        if m.group(2): d["scale"] = int(m.group(2)).bit_length() - 1
+        if t.startswith("{"): d["opt"] = True; d["fixed"] = int(m.group(3) or 0)
         return d
     # shifts / extends (optional trailing operand)
     m = re.fullmatch(r"\{(lsl\|lsr\|asr|sop|lsl|extend|msl|lsl\|msl) #n(?:=(\d+)\|(\d+))?\}", t)
@@ -175,8 +177,8 @@ def main(write=True):
     # Fixed-bit corrections (stale U/opc bits in the JSON DB), as XOR masks keyed by "inst | op".
     # Derived from AsmJit's expected encodings by scripts/derive_a64_overrides.py.
     ovr = json.load(open(OVR)) if os.path.exists(OVR) else {}
-    # Forms missing from the DB: `ret` without an operand (= ret x30).
-    db["instructions"].append({"category": "BASE", "data": [{"inst": "ret", "op": "11010110|010|11111|0|00000|11110|00000"}]})
+    import sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import a64_db_patches; a64_db_patches.patch(db)
     table = collections.OrderedDict()
     skipped = collections.Counter()
     for g in db["instructions"]:
@@ -219,7 +221,7 @@ def main(write=True):
             # Pre/post-index and unscaled (imm9) offsets are byte offsets; the DB's "*8" only
             # holds for the MTE tag instructions (scaled by 16).
             for o in ops:
-                if o.get("mk") == "imm" and o.get("f") == "offS" and any(n_ == "offS" and w_ == 9 for n_, _, w_, _ in fields) \
+                if o.get("mk") == "imm" and o.get("f") == "offS" and sum(w_ for n_, _, w_, _ in fields if n_ == "offS") == 9 \
                         and not re.match(r"(st|stz|st2|stz2|ld)g\b", mns[0]):
                     o["scale"] = 0
             for mn in mns:

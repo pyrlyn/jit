@@ -253,7 +253,7 @@ fn matchOps(f: *const Form, ops: []const Op, c: *Ctx) bool {
         switch (s.k) {
             .w, .x => {
                 const id = regGp(o, s.k == .x, false, true) orelse return false;
-                c.put(s.f.?, id);
+                if (s.f) |n| c.put(n, id) else if (id != s.fixed) return false; // fixed register (chkfeat X16)
                 oi += 1;
             },
             .wsp, .xsp => {
@@ -282,13 +282,23 @@ fn matchOps(f: *const Form, ops: []const Op, c: *Ctx) bool {
                 oi += 1;
             },
             .vt, .vta, .vtb, .vfix => {
-                if (o != .v or o.v.kind != .v or o.v.idx != null or o.v.arr == .none) return false;
-                const a = o.v.arr;
+                if (o != .v or o.v.idx != null) return false;
+                // AsmJit accepts scalar D/Q registers for the 1D/1Q arrangements.
+                const a: Arr = if (o.v.kind == .v) o.v.arr else if (o.v.kind == .d and o.v.arr == .none) .a1d else if (o.v.kind == .q and o.v.arr == .none) .a1q else return false;
+                if (a == .none) return false;
                 switch (s.k) {
                     .vfix => if (a != s.arr) return false,
                     .vt, .vta => {
                         const list = if (s.k == .vt) f.t else f.ta;
-                        const i = indexOf(list, a) orelse return false;
+                        const i = indexOf(list, a) orelse {
+                            // SSHLL2/USHLL2: AsmJit derives the size from the source only.
+                            if (s.k == .vta and f.tb.len > 0 and f.imm == .ASimdShiftPImm) {
+                                c.put(s.f.?, o.v.id);
+                                oi += 1;
+                                continue;
+                            }
+                            return false;
+                        };
                         if (c.sz) |z| if (z != i) return false;
                         c.sz = i;
                     },
@@ -387,7 +397,9 @@ fn matchOps(f: *const Form, ops: []const Op, c: *Ctx) bool {
             },
             .imm => {
                 if (have and o == .imm) {
-                    c.put(s.f.?, o.imm);
+                    const sc: u6 = @intCast(s.scale);
+                    if (@rem(o.imm, @as(i64, 1) << sc) != 0) return false;
+                    c.put(s.f.?, o.imm >> sc);
                     oi += 1;
                 } else if (s.opt) {
                     c.put(s.f.?, s.fixed);
@@ -471,7 +483,8 @@ fn matchOps(f: *const Form, ops: []const Op, c: *Ctx) bool {
                         }
                         c.put(.Rm, ix.id & 31);
                         const e: Shift = m.ext orelse Shift{ .op = .lsl, .n = 0 };
-                        if (ix.x and !(e.op == .lsl or e.op == .sxtx)) return false;
+                        // AsmJit does not check the index width for UXTW/SXTW (`[x3, x4, sxtw]`).
+                        if (ix.x and !(e.op == .lsl or e.op == .sxtx or e.op == .uxtw or e.op == .sxtw)) return false;
                         if (!ix.x and !(e.op == .uxtw or e.op == .sxtw)) return false;
                         c.put(.option, switch (e.op) {
                             .uxtw => 2,
@@ -589,6 +602,39 @@ fn applyImm(f: *const Form, c: *Ctx, ops: []const Op, bits: *u32) bool {
             const n = c.get(.n) orelse 0;
             if (n >= (if (is64) @as(i64, 64) else 32)) return false;
         },
+        .ImmLSL => {
+            const n = c.get(.n) orelse return false;
+            const size: i64 = if (arg(f, 1) == 1) 64 else 32;
+            if (n < 0 or n >= size) return false;
+            c.put(.immr, @mod(size - n, size));
+            c.put(.imms, size - 1 - n);
+        },
+        .ImmISB, .ImmDataBarrier => {
+            const v = c.get(.isb_op) orelse c.get(.barrier_op) orelse c.get(.imm) orelse return false;
+            if (v < 0 or v > 15) return false;
+            c.put(.CRm, v);
+        },
+        .ImmAt, .ImmDC, .ImmIC, .ImmTLBI => {
+            // AsmJit packs op1:CRn:CRm:op2 as (op1 << 11) | (CRn << 7) | (CRm << 3) | op2.
+            const v = c.get(.at_op) orelse c.get(.dc_op) orelse c.get(.ic_op) orelse c.get(.tlbi_op) orelse return false;
+            if (v < 0 or v >= (1 << 14)) return false;
+            if (((bits.* >> 12) & 15) != ((v >> 7) & 15)) return false; // CRn is fixed by the form
+            c.put(.op1, (v >> 11) & 7);
+            c.put(.CRm, (v >> 3) & 15);
+            c.put(.op2, v & 7);
+        },
+        .ImmBTI => {
+            const v = c.get(.targets) orelse 0;
+            if (v < 0 or v > 3) return false;
+            c.put(.op2, v << 1);
+        },
+        .ImmSysReg => {
+            // op0:op1:CRn:CRm:op2 (16 bits); op0 is 2 or 3, its high bit is fixed in the opcode.
+            const v = c.get(.sysreg) orelse return false;
+            if (v < 0x8000 or v > 0xFFFF) return false;
+            c.put(.sysreg, v & 0x7FFF);
+        },
+        .ASimdMovPImm, .ASimdMovNImm, .ASimdLogicalImm => if (!simdImm(f, c, ops)) return false,
         .ImmBFX, .ImmBFIZ => {
             const lsb = c.get(.lsb) orelse return false;
             const width = c.get(.width) orelse return false;
@@ -658,6 +704,93 @@ fn applyImm(f: *const Form, c: *Ctx, ops: []const Op, bits: *u32) bool {
     return true;
 }
 
+/// AdvSIMDExpandImm(op, cmode, imm8) -> 64-bit value.
+fn expandImm(op: u1, cmode: u4, imm8: u8) u64 {
+    const b: u64 = imm8;
+    const r32 = struct {
+        fn f(v: u64) u64 {
+            return v | (v << 32);
+        }
+    }.f;
+    const r16 = struct {
+        fn f(v: u64) u64 {
+            return v | (v << 16) | (v << 32) | (v << 48);
+        }
+    }.f;
+    return switch (cmode >> 1) {
+        0 => r32(b),
+        1 => r32(b << 8),
+        2 => r32(b << 16),
+        3 => r32(b << 24),
+        4 => r16(b),
+        5 => r16(b << 8),
+        6 => if (cmode & 1 == 0) r32((b << 8) | 0xFF) else r32((b << 16) | 0xFFFF),
+        else => if (op == 0) b * 0x0101_0101_0101_0101 else blk: {
+            var v: u64 = 0;
+            for (0..8) |i| if ((imm8 >> @intCast(i)) & 1 != 0) {
+                v |= @as(u64, 0xFF) << @intCast(i * 8);
+            };
+            break :blk v;
+        },
+    };
+}
+
+/// MOVI/MVNI/ORR/BIC (vector, immediate): finds op/cmode/imm8 whose expansion equals the
+/// requested value (`imm << lsl`, or `(imm << n) | ones` for MSL) replicated over the lanes.
+fn simdImm(f: *const Form, c: *Ctx, ops: []const Op) bool {
+    const iv: u64 = @bitCast(c.get(.imm) orelse return false);
+    const n = c.get(.n) orelse 0;
+    if (n < 0 or n > 24) return false;
+    var msl = false;
+    for (ops) |o| if (o == .shift and o.shift.op == .msl) {
+        msl = true;
+    };
+    const lane: u7 = if (ops.len > 0 and ops[0] == .v and ops[0].v.kind == .v) @as(u7, 8) << arrEt(ops[0].v.arr) else 64;
+    const lmask: u64 = if (lane == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(lane)) - 1;
+    const sh: u6 = @intCast(n);
+    if (sh != 0 and (iv >> @intCast(@as(u7, lane) - sh)) != 0 and lane != 64) return false;
+    var v = (iv << sh) & lmask;
+    if (msl) v |= (@as(u64, 1) << sh) - 1;
+    if (v & ~lmask != 0 or (iv & ~lmask) != 0) return false;
+    var l: u7 = lane;
+    while (l < 64) : (l *= 2) v |= v << @intCast(l);
+    const has_op = hasField(f, .op);
+    // Candidate cmodes in AsmJit's order of preference.
+    const Cand = struct { op: u1, cmode: u4 };
+    const mov = [_]Cand{ .{ .op = 0, .cmode = 0b1110 }, .{ .op = 0, .cmode = 0b1000 }, .{ .op = 0, .cmode = 0b1010 }, .{ .op = 0, .cmode = 0b0000 }, .{ .op = 0, .cmode = 0b0010 }, .{ .op = 0, .cmode = 0b0100 }, .{ .op = 0, .cmode = 0b0110 }, .{ .op = 0, .cmode = 0b1100 }, .{ .op = 0, .cmode = 0b1101 }, .{ .op = 1, .cmode = 0b1110 } };
+    const mvn = [_]Cand{ .{ .op = 1, .cmode = 0b1000 }, .{ .op = 1, .cmode = 0b1010 }, .{ .op = 1, .cmode = 0b0000 }, .{ .op = 1, .cmode = 0b0010 }, .{ .op = 1, .cmode = 0b0100 }, .{ .op = 1, .cmode = 0b0110 }, .{ .op = 1, .cmode = 0b1100 }, .{ .op = 1, .cmode = 0b1101 } };
+    const logic = [_]Cand{ .{ .op = 0, .cmode = 0b1001 }, .{ .op = 0, .cmode = 0b1011 }, .{ .op = 0, .cmode = 0b0001 }, .{ .op = 0, .cmode = 0b0011 }, .{ .op = 0, .cmode = 0b0101 }, .{ .op = 0, .cmode = 0b0111 } };
+    const cands: []const Cand = switch (f.imm) {
+        .ASimdMovPImm => &mov,
+        .ASimdMovNImm => &mvn,
+        else => &logic,
+    };
+    for (cands) |cd| {
+        if (msl != (cd.cmode >> 1 == 6)) continue;
+        // Lane size of the encoding must match the arrangement (except 8-bit / 64-bit patterns).
+        const enc_lane: u7 = switch (cd.cmode >> 1) {
+            0, 1, 2, 3, 6 => 32,
+            4, 5 => 16,
+            else => if (cd.op == 0) 8 else 64,
+        };
+        if (f.imm != .ASimdMovPImm and enc_lane != lane) continue;
+        if (f.imm == .ASimdMovPImm and lane != 64 and enc_lane > lane) continue;
+        // imm8 candidates: derive from the value for this cmode.
+        var b: u16 = 0;
+        while (b < 256) : (b += 1) {
+            // MVNI takes the value before inversion (like AsmJit); only MOVI's 64-bit form uses op=1.
+            const eop: u1 = if (cd.cmode == 0b1110) cd.op else 0;
+            if (expandImm(eop, cd.cmode, @intCast(b)) != v) continue;
+            if (has_op) c.put(.op, cd.op);
+            c.put(.cmode, cd.cmode);
+            c.put(.abc, b >> 5);
+            c.put(.defgh, b & 31);
+            return true;
+        }
+    }
+    return false;
+}
+
 fn signedName(n: Name) bool {
     return n == .offS or n == .relS or n == .immS;
 }
@@ -716,8 +849,65 @@ pub fn encodeIdx(forms: []const Form, ops: []const Op) ?struct { word: u32, idx:
     return null;
 }
 
+const all_forms = blk: {
+    @setEvalBranchQuota(1_000_000);
+    const fs = @typeInfo(Mnemonic).@"enum".fields;
+    var out: [fs.len][]const Form = undefined;
+    for (fs, 0..) |f, i| out[i] = &@field(tbl.table, f.name);
+    break :blk out;
+};
+
+pub fn formsOf(mn: Mnemonic) []const Form {
+    return all_forms[@intFromEnum(mn)];
+}
+
+/// Encodes `mn`, applying AsmJit's assembler-level aliases when no form matches directly:
+/// - LDR/STR (+B/H/SB/SH/SW) and PRFM with an unaligned or negative offset -> LDUR/STUR/PRFUM;
+/// - BIC/BICS with an immediate -> AND/ANDS with the inverted immediate;
+/// - ADD/SUB/CMP/CMN with an immediate that is a multiple of 4096 -> `#imm >> 12, lsl #12`.
+pub fn encodeMnIdx(mn: Mnemonic, ops: []const Op) ?struct { word: u32, idx: usize } {
+    if (encodeIdx(formsOf(mn), ops)) |r| return .{ .word = r.word, .idx = r.idx };
+    const alt: ?Mnemonic = switch (mn) {
+        .ldr => .ldur,
+        .ldrb => .ldurb,
+        .ldrh => .ldurh,
+        .ldrsb => .ldursb,
+        .ldrsh => .ldursh,
+        .ldrsw => .ldursw,
+        .str => .stur,
+        .strb => .sturb,
+        .strh => .sturh,
+        .prfm => .prfum,
+        else => null,
+    };
+    if (alt) |a| if (ops.len >= 2 and ops[ops.len - 1] == .mem and ops[ops.len - 1].mem.mode == .off and ops[ops.len - 1].mem.index == null) {
+        if (encodeIdx(formsOf(a), ops)) |r| return .{ .word = r.word, .idx = 1000 + r.idx };
+    };
+    if ((mn == .bic or mn == .bics) and ops.len == 3 and ops[0] == .r and ops[2] == .imm) {
+        var o = ops[0..3].*;
+        const inv: u64 = ~@as(u64, @bitCast(o[2].imm));
+        o[2] = .{ .imm = @bitCast(if (o[0].r.x) inv else inv & 0xFFFF_FFFF) };
+        if (encodeIdx(formsOf(if (mn == .bic) .@"and" else .ands), &o)) |r| return .{ .word = r.word, .idx = 2000 + r.idx };
+    }
+    if ((mn == .add or mn == .adds or mn == .sub or mn == .subs or mn == .cmp or mn == .cmn) and ops.len >= 2 and ops.len <= 3 and ops[ops.len - 1] == .imm) {
+        const v = ops[ops.len - 1].imm;
+        if (v > 0 and v & 0xFFF == 0 and v >> 12 < 4096) {
+            var o: [4]Op = undefined;
+            @memcpy(o[0..ops.len], ops);
+            o[ops.len - 1] = .{ .imm = v >> 12 };
+            o[ops.len] = .{ .shift = .{ .op = .lsl, .n = 12 } };
+            if (encodeIdx(formsOf(mn), o[0 .. ops.len + 1])) |r| return .{ .word = r.word, .idx = 3000 + r.idx };
+        }
+    }
+    return null;
+}
+
+pub fn encodeMn(mn: Mnemonic, ops: []const Op) ?u32 {
+    return if (encodeMnIdx(mn, ops)) |r| r.word else null;
+}
+
 pub fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, ops: []const Op) Error!void {
-    const word = encodeAny(&@field(tbl.table, @tagName(mn)), ops) orelse return error.NoMatchingForm;
+    const word = encodeMn(mn, ops) orelse return error.NoMatchingForm;
     try buf.ensure(4);
     buf.put32(word);
 }

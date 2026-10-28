@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
     // C++ is built with the system compiler (`c++`, override with -Dcxx=...): Zig 0.16's bundled
     // libc++ does not compile against current macOS SDKs.
     {
-        const cxx = b.addSystemCommand(&.{ b.option([]const u8, "cxx", "examples: C++ compiler (default: c++)") orelse "c++", "-std=c++17", "-O1" });
+        const cxx = b.addSystemCommand(&.{ b.option([]const u8, "cxx", "examples: C++ compiler (default: c++)") orelse "c++", "-std=c++17", "-O1", "-Wl,-w" }); // -w: Zig stamps the .o with the patch-level macOS version
         cxx.addPrefixedDirectoryArg("-I", b.path("include"));
         cxx.addFileArg(b.path("examples/cpp/main.cpp"));
         cxx.addFileArg(lib_obj.getEmittedBin());

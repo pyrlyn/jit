@@ -141,7 +141,13 @@ fn FormMap(comptime T: type, comptime F: type) type {
         const map = std.StaticStringMap([]const F).initComptime(final);
     };
 }
-const a64_map = FormMap(a64.tbl.table, a64.Form).map;
+const a64_map = std.StaticStringMap(a64.Mnemonic).initComptime(blk: {
+    @setEvalBranchQuota(2_000_000);
+    const fs = @typeInfo(a64.Mnemonic).@"enum".fields;
+    var kvs: [fs.len]struct { []const u8, a64.Mnemonic } = undefined;
+    for (fs, 0..) |f, i| kvs[i] = .{ f.name, @enumFromInt(f.value) };
+    break :blk kvs;
+});
 const gp_map = FormMap(gp.tbl.table, gp.Form).map;
 
 fn lookup(comptime M: anytype, name: ?[*:0]const u8) ?@TypeOf(M.get("").?) {
@@ -200,11 +206,11 @@ fn a64Op(o: A64Op) ?a64.Op {
 
 export fn zj_a64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const A64Op, n: usize) c_int {
     const p = b orelse return EINVAL;
-    const forms = lookup(a64_map, mnemonic) orelse return @intFromEnum(Status.unknown_mnemonic);
+    const mn = lookup(a64_map, mnemonic) orelse return @intFromEnum(Status.unknown_mnemonic);
     if (n > 8 or (n > 0 and ops == null)) return EINVAL;
     var conv: [8]a64.Op = undefined;
     for (0..n) |i| conv[i] = a64Op(ops.?[i]) orelse return EINVAL;
-    const word = a64.encodeAny(forms, conv[0..n]) orelse return status(error.NoMatchingForm);
+    const word = a64.encodeMn(mn, conv[0..n]) orelse return status(error.NoMatchingForm);
     p.cb.ensure(4) catch |e| return status(e);
     p.cb.put32(word);
     return OK;
