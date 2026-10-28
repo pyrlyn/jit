@@ -40,7 +40,24 @@ pub const Form = struct {
     opreg: ?u2,
     /// CPU features required (AsmJit `ext`), empty for baseline x86-64.
     features: []const isa.Feature,
+    mode: Mode = .any,
 };
+
+/// Which CPU mode a form exists in (AsmJit DB `any` / `x64` / `x86`).
+pub const Mode = enum(u2) { any, x64, x86 };
+
+/// Encode for 32-bit protected mode (x86-32) instead of 64-bit mode: no REX, no 64-bit
+/// operands, x86-only forms (`inc r32` = 40+r, `pusha`, `aaa`, ...), `[disp32]` is absolute.
+/// Process-wide switch for the table-driven `gp` / `vec` encoders.
+pub var mode32: bool = false;
+
+pub fn modeOk(m: Mode) bool {
+    return switch (m) {
+        .any => true,
+        .x64 => !mode32,
+        .x86 => mode32,
+    };
+}
 
 /// Union of the features of all forms of `mn` (used for the comptime target/deny checks).
 pub fn requiredFeatures(comptime mn: Mnemonic) isa.Features {
@@ -72,7 +89,28 @@ pub const Mem = struct {
     size: Size = .none,
     rip: bool = false,
     label: ?Label = null,
+    /// 32-bit mode only: 16-bit addressing (67 prefix). `base`/`index` name the 16-bit
+    /// registers through their 64-bit ids: bx = .rbx, si = .rsi, di = .rdi, bp = .rbp.
+    addr16: bool = false,
 };
+
+/// ModRM.rm for a 16-bit address [base(+index)], or null if the combination does not exist.
+fn rm16(base: Gp, index: ?Gp) ?u8 {
+    if (index) |i| {
+        if (base == .rbx and i == .rsi) return 0;
+        if (base == .rbx and i == .rdi) return 1;
+        if (base == .rbp and i == .rsi) return 2;
+        if (base == .rbp and i == .rdi) return 3;
+        return null;
+    }
+    return switch (base) {
+        .rsi => 4,
+        .rdi => 5,
+        .rbp => 6,
+        .rbx => 7,
+        else => null,
+    };
+}
 
 pub const Op = union(enum) { reg: Reg, mem: Mem, imm: i64 };
 
@@ -206,8 +244,13 @@ fn matchKind(f: Form, k: Kind, o: Op) bool {
 
 fn matches(f: Form, ops: []const Op) bool {
     if (f.ops.len != ops.len) return false;
+    if (!modeOk(f.mode)) return false;
+    if (mode32) {
+        if (f.rexw) return false;
+        for (f.ops) |k| if (regSize(k) == .q and k != .m64) return false;
+    }
     // `xchg eax, eax` via 90+r would be `nop`, which does not zero-extend into rax: use 87 /r.
-    if (f.opreg != null and f.op.len == 1 and f.op[0] == 0x90 and !f.rexw and f.pre.len == 0 and
+    if (!mode32 and f.opreg != null and f.op.len == 1 and f.op[0] == 0x90 and !f.rexw and f.pre.len == 0 and
         ops[0] == .reg and ops[1] == .reg and ops[0].reg.id == .rax and ops[1].reg.id == .rax) return false;
     for (f.ops, ops) |k, o| if (!matchKind(f, k, o)) return false;
     return true;
@@ -289,6 +332,12 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
     // AH..BH are only addressable without REX.
     if (cur_opt.rex) need_rex = true;
     if (has_high and (rex != 0 or need_rex)) return error.InvalidOperand;
+    if (rm_mem) |m| if (m.addr16) {
+        if (!mode32) return error.InvalidOperand;
+        rex &= 0x48; // ids of bx/si/di/bp are < 8; nothing to extend
+        out.u8_(0x67);
+    };
+    if (mode32 and (rex != 0 or need_rex)) return error.InvalidOperand;
     for (f.pre) |p| out.u8_(p);
     if (rex != 0 or need_rex) out.u8_(0x40 | rex);
     for (f.op, 0..) |b, k| out.u8_(if (k == f.op.len - 1) b + plus else b);
@@ -298,7 +347,13 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
         if (rm_reg) |g| {
             out.u8_(0xC0 | r | (g & 7));
         } else if (rm_mem) |m| {
-            if (m.rip) {
+            if (m.addr16) {
+                const base = m.base orelse return error.InvalidOperand;
+                const rm = rm16(base, m.index) orelse return error.InvalidOperand;
+                const mod: u8 = if (m.disp == 0 and rm != 6) 0x00 else if (fits(m.disp, i8)) 0x40 else 0x80;
+                out.u8_(mod | r | rm);
+                if (mod == 0x40) out.int(m.disp, 1) else if (mod == 0x80) out.int(m.disp, 2);
+            } else if (m.rip) {
                 out.u8_(r | 5);
                 rip_at = out.n;
                 out.int(m.disp, 4);
@@ -309,6 +364,9 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
                     out.u8_(@as(u8, @intFromEnum(m.scale)) << 6 | (if (m.index) |x| rlo(x) else 4) << 3 | rlo(base));
                 } else out.u8_(mod | r | rlo(base));
                 if (mod == 0x40) out.int(m.disp, 1) else if (mod == 0x80) out.int(m.disp, 4);
+            } else if (mode32 and m.index == null) {
+                out.u8_(r | 5); // [disp32]: absolute in 32-bit mode
+                out.int(m.disp, 4);
             } else {
                 out.u8_(r | 4);
                 out.u8_(@as(u8, @intFromEnum(m.scale)) << 6 | (if (m.index) |x| rlo(x) else 4) << 3 | 5);
@@ -364,6 +422,22 @@ pub fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype) Error!void {
 }
 
 pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void {
+    // 32-bit mode: `mov acc, [abs]` / `mov [abs], acc` use the moffs32 forms (A0..A3), like AsmJit.
+    if (mode32 and cur_opt.mod == .auto and forms.ptr == &tbl.table.mov and ops.len == 2) {
+        for (0..2) |i| {
+            const a = ops[1 - i];
+            if (ops[i] == .mem and a == .reg and a.reg.id == .rax and !a.reg.high and a.reg.size != .q) {
+                const m = ops[i].mem;
+                if (m.base == null and m.index == null and !m.rip and (m.size == .none or m.size == a.reg.size)) {
+                    try buf.ensure(8);
+                    if (a.reg.size == .w) buf.put8(0x66);
+                    buf.put8(@as(u8, if (a.reg.size == .b) 0xA0 else 0xA1) + @as(u8, if (i == 0) 2 else 0));
+                    buf.put32(@bitCast(m.disp));
+                    return;
+                }
+            }
+        }
+    }
     return emitExact(buf, forms, ops) catch |e| switch (e) {
         error.NoMatchingForm => emitAliased(buf, forms, ops) orelse e,
         else => e,
@@ -439,7 +513,7 @@ fn emitExact(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void 
         if (o.mod == .rm and f.rm != null and f.rm.? == 0 and f.reg != null) continue;
         if (o.long and !(f.imm == 8)) continue;
         var b: Buf = .{};
-        const r = try encodeForm(f, ops, &b);
+        const r = encodeForm(f, ops, &b) catch |err| if (mode32) continue else return err;
         // Shortest wins; on a tie prefer the narrower immediate (`66 83 /r ib` over `66 05 iw`), like LLVM.
         if (best == null or b.n < best.?.n or (b.n == best.?.n and f.imm < best_imm)) {
             best = b;

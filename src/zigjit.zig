@@ -24,6 +24,7 @@ test {
     _ = @import("gp_tests.zig");
     _ = @import("simd_tests.zig");
     if (opts.asmjit_tests) _ = @import("asmjit_x64_tests.zig");
+    if (opts.asmjit_tests) _ = @import("asmjit_x86_tests.zig");
     if (opts.gp_fuzz) _ = @import("gp_fuzz.zig");
     if (opts.x86_64) _ = x86_64;
     if (opts.aarch64) _ = aarch64;

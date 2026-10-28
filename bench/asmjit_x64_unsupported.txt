@@ -1,8 +1,5 @@
-total 17874, ported 17873, unsupported 1
-     1 operand
+total 17874, ported 17874, unsupported 0
 
 top unsupported details:
-     1 operand:zmmword_ptr
 
 cases:
-operand:zmmword_ptr: 0F01FC clzero(zmmword_ptr(rax))

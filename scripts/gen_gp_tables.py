@@ -122,9 +122,12 @@ def forms():
         if g.get("category") != "GP" or g.get("ext"):
             continue
         for i in g["instructions"]:
-            enc = ENC_OVERRIDE.get(i["inst"]) or i.get("x64") or i.get("any")
-            if not enc:
-                continue
+          # Encodings per mode: "any" (both), "x64" (64-bit only), "x86" (32-bit only).
+          if i.get("any") or i["inst"] in ENC_OVERRIDE:
+              variants = [(ENC_OVERRIDE.get(i["inst"]) or i["any"], "any")]
+          else:
+              variants = [(i[m], m) for m in ("x64", "x86") if i.get(m)]
+          for enc, mode in variants:
             inst = re.sub(r"^(\[[^\]]*\]\s*)+", "", i["inst"])
             mn, _, ops = inst.partition(" ")
             if not re.fullmatch(r"[a-z][a-z0-9]*", mn):
@@ -132,6 +135,8 @@ def forms():
             toks = [re.sub(r"^[xXwWrR]:", "", o.strip()) for o in ops.split(",") if o.strip()]
             uses_v = any(re.search(r"(rv|mv|immv|axv|ry|my)", t) for t in toks)
             for osz in sizes_for(inst, enc):
+                if mode == "x86" and osz == 8:
+                    continue
                 e = parse_enc(enc, osz, uses_v)
                 if e is None:
                     continue
@@ -159,13 +164,24 @@ def forms():
                     f = place(e, c)
                     if f:
                         f["ext"] = (i.get("ext") or "").split()
+                        f["mode"] = mode
                         out.setdefault(mn, []).append(f)
+    # Mnemonics for which only 32-bit-mode forms landed here (`dec` 48+r) but whose other forms
+    # live in vec_table (category with `ext`): leave them all to vec_table.
+    other = set()
+    for g in db["instructions"]:
+        for i in g["instructions"]:
+            if i.get("any") or i.get("x64"):
+                other.add(re.sub(r"^(\[[^\]]*\]\s*)+", "", i["inst"]).split(" ")[0].split("{")[0])
+    for mn in list(out):
+        if all(f["mode"] == "x86" for f in out[mn]) and mn in other:
+            del out[mn]
     # de-dup, order: mr before rm (LLVM picks mr for reg,reg)
     for mn in out:
         seen, lst = set(), []
         first = "rm" if mn in PREFER_RM else "mr"
         for f in sorted(out[mn], key=lambda f: 0 if f["kind"] == first else 1):
-            key = (tuple(f["ext"]), tuple(f["ops"]), tuple(f["pre"]), f["rexw"], tuple(f["op"]), f["digit"], f["imm"], f["kind"])
+            key = (f["mode"], tuple(f["ext"]), tuple(f["ops"]), tuple(f["pre"]), f["rexw"], tuple(f["op"]), f["digit"], f["imm"], f["kind"])
             if key not in seen:
                 seen.add(key)
                 lst.append(f)
@@ -218,7 +234,8 @@ def zig_form(f):
             f'.op = &.{{{", ".join(hex(b) for b in f["op"])}}}, .rexw = {str(f["rexw"]).lower()}, '
             f'.plus_r = {str(f["plus"]).lower()}, .modrm = {str(f["modrm"]).lower()}, .digit = {opt(f["digit"])}, '
             f'.imm = {f["imm"]}, .reg = {opt(f["reg"])}, .rm = {opt(f["rm"])}, .opreg = {opt(f["opreg"])}, '
-            f'.features = &.{{{", ".join(feat(x) for x in f["ext"])}}} }}')
+            f'.features = &.{{{", ".join(feat(x) for x in f["ext"])}}}'
+            + ("" if f["mode"] == "any" else f', .mode = .{f["mode"]}') + ' }')
 
 
 def feat(x):

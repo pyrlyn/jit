@@ -20,7 +20,7 @@ const Gp = x.Gp;
 
 pub const Error = core.Error || error{ InvalidOperand, NoMatchingForm };
 
-pub const Kind = enum(u8) { xmm, ymm, zmm, mm, k, tmm, st0, sti, r8, r16, r32, r64, ax, al, cl, eax, rax, dx, mem, vx, vy, vz, imm, maddr, sreg, creg, dreg, fs, gs };
+pub const Kind = enum(u8) { xmm, ymm, zmm, mm, k, tmm, st0, sti, r8, r16, r32, r64, ax, al, cl, eax, rax, dx, mem, vx, vy, vz, imm, maddr, sreg, creg, dreg, fs, gs, es, cs, ss, ds };
 
 pub const OpKind = struct { k: Kind, size: u16 = 0, bcst: u8 = 0 };
 
@@ -58,6 +58,7 @@ pub const Form = struct {
     late_vex: bool = false,
     /// Memory operand must be explicitly sized (`mov word_ptr, sreg` takes 66, unsized does not).
     exact_mem: bool = false,
+    mode: gp.Mode = .any,
 };
 
 pub const Cls = enum(u4) { xmm, ymm, zmm, mm, k, tmm, st, seg, cr, dr };
@@ -163,6 +164,10 @@ inline fn matchKind(f: *const Form, kd: OpKind, o: Op) bool {
             .sreg => v.cls == .seg and v.id < 6,
             .creg => v.cls == .cr and v.id < 16,
             .dreg => v.cls == .dr and v.id < 16,
+            .es => v.cls == .seg and v.id == 0,
+            .cs => v.cls == .seg and v.id == 1,
+            .ss => v.cls == .seg and v.id == 2,
+            .ds => v.cls == .seg and v.id == 3,
             .fs => v.cls == .seg and v.id == 4,
             .gs => v.cls == .seg and v.id == 5,
             else => false,
@@ -225,6 +230,16 @@ fn regNum(o: Op) u8 {
 
 fn matches(f: *const Form, ops: []const Op, e: Extra) bool {
     if (f.ops.len != ops.len) return false;
+    if (f.mode != .any and !gp.modeOk(f.mode)) return false;
+    if (gp.mode32) {
+        if (f.rexw) return false;
+        for (ops) |o| switch (o) {
+            .r => |r| if (r.size == .q or @intFromEnum(r.id) >= 8) return false,
+            .v => |v| if (v.id >= 8 and v.cls != .cr and v.cls != .dr) return false,
+            .m => |m| if (m.rip) return false,
+            else => {},
+        };
+    }
     for (f.ops, ops) |kd, o| if (!matchKind(f, kd, o)) return false;
     const evex = f.enc == .evex;
     if (!evex) {
@@ -291,6 +306,9 @@ inline fn modrmMem(out: anytype, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
             out.u8_(sc | ((if (idx) |i| i else 4) & 7) << 3 | (b & 7));
         } else out.u8_(mod | r | (b & 7));
         if (mod == 0x40) out.int(disp8.?, 1) else if (mod == 0x80) out.int(m.disp, 4);
+    } else if (gp.mode32 and idx == null) {
+        out.u8_(r | 5); // [disp32]: absolute in 32-bit mode
+        out.int(m.disp, 4);
     } else {
         out.u8_(r | 4);
         out.u8_(sc | ((if (idx) |i| i else 4) & 7) << 3 | 5);
@@ -353,8 +371,13 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error
             };
             var rexv: u8 = (if (f.rexw) @as(u8, 8) else 0) | r3 << 2 | (if (rm_mem != null) x3 else 0) << 1 | b3;
             if (rm_reg != null) rexv &= 0b1101;
+            // 32-bit mode: CR8..CR15 are reached through a LOCK prefix instead of REX.R.
+            if (gp.mode32 and rexv & 4 != 0 and f.reg != null and ops[f.reg.?] == .v and ops[f.reg.?].v.cls == .cr) {
+                out.u8_(0xF0);
+                rexv &= ~@as(u8, 4);
+            }
             if (rexv != 0 or need_rex or e.rex) {
-                if (has_high) return error.InvalidOperand;
+                if (has_high or gp.mode32) return error.InvalidOperand;
                 out.u8_(0x40 | rexv);
             }
             switch (f.map) {
@@ -427,6 +450,12 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error
         out.u8_(v);
         is4_done = true;
     }
+    if (!is4_done and f.enc == .legacy and f.map == 0 and f.op.len == 1 and (f.op[0] == 0x9A or f.op[0] == 0xEA) and ops.len == 2) {
+        // Far pointer `lcall/ljmp sel, off`: the offset is encoded first.
+        out.int(ops[1].imm, @intCast(f.ops[1].size));
+        out.int(ops[0].imm, 2);
+        is4_done = true;
+    }
     if (!is4_done) {
         for (f.ops, ops) |kd, o| if (kd.k == .imm and imm_left > 0) {
             const nb: u8 = @intCast(@max(kd.size, 1));
@@ -449,7 +478,7 @@ pub inline fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Ex
     const Args = @TypeOf(args);
     if (comptime specializable(Args)) {
         const sorted = comptime prioritized(all, Args);
-        if (!e.vex) {
+        if (!e.vex and !gp.mode32) {
             inline for (sorted) |f| {
                 if (@call(.always_inline, matches, .{ &f, &ops, e })) return emitFormC(buf, f, &ops, e);
             }
@@ -511,7 +540,7 @@ inline fn emitFormC(buf: *CodeBuffer, comptime f: Form, ops: []const Op, e: Extr
 fn typeAccepts(comptime T: type, kd: Kind) bool {
     return switch (T) {
         V => switch (kd) {
-            .xmm, .ymm, .zmm, .mm, .k, .tmm, .st0, .sti, .sreg, .creg, .dreg, .fs, .gs => true,
+            .xmm, .ymm, .zmm, .mm, .k, .tmm, .st0, .sti, .sreg, .creg, .dreg, .fs, .gs, .es, .cs, .ss, .ds => true,
             else => false,
         },
         gp.Reg => switch (kd) {
@@ -570,18 +599,20 @@ fn pickEx(forms: []const Form, ops: []const Op, e: Extra, no67: bool) ?Form {
     // Levels (lower wins): 0 legacy/VEX preferred, 1 legacy/VEX other (not PreferEvex),
     // 2 EVEX preferred, 3 EVEX other, 4 VEX of a PreferEvex instruction.
     var best: ?*const Form = null;
-    var best_level: u8 = 5;
+    var best_level: u8 = 6;
     for (forms) |*f| {
         if (no67 and has67(f)) continue;
         const evex = f.enc == .evex;
         const preferred = !(regs and f.rm != null and f.rm.? == 0 and f.reg != null) and !f.lowprio and
             !(regs and f.w == 1 and f.enc == .xop);
-        const level: u8 = if (evex) (if (preferred) 2 else 3) else if (f.late_vex and !e.vex) 4 else if (preferred) 0 else 1;
+        // 32-bit mode: an x86-only form (`dec r32` = 48+r) beats the generic one.
+        const base: u8 = if (evex) (if (preferred) 2 else 3) else if (f.late_vex and !e.vex) 4 else if (preferred) 0 else 1;
+        const level: u8 = if (f.mode == .x86) 0 else base + 1;
         if (level >= best_level) continue;
         if (!matches(f, ops, e)) continue;
         best = f;
         best_level = level;
-        if (level == 0) break;
+        if (level == 0 or (level == 1 and !gp.mode32)) break;
     }
     return if (best) |p| p.* else null;
 }

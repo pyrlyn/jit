@@ -33,7 +33,7 @@ def expand_tok(t, li):
     if t in far: return ("mem", far[t])
     m = re.fullmatch(r"m(\d+)(?:_\w+)?(?:\(.*\))?", t)
     if m: return ("mem", int(m.group(1)) // 8)
-    if t == "m(ds:r64)": return ("maddr", 0)
+    if t in ("m(ds:r64)", "m(ds:r32)"): return ("maddr", 0)
     if t in ("m", "tmem") or re.fullmatch(r"m\(\w+:\w+\)", t): return ("mem", 0)
     m = re.fullmatch(r"vm(32|64)([xyz])", t)
     if m: return ("v" + m.group(2), int(m.group(1)) // 8)
@@ -41,7 +41,7 @@ def expand_tok(t, li):
     if t in ("imm16", "immu16", "imms16"): return ("imm", 2)
     if t in ("imm32", "imms32", "immu32"): return ("imm", 4)
     if t in ("imm64",): return ("imm", 8)
-    if t in ("eax", "rax", "al", "cl", "dx", "sreg", "creg", "dreg", "fs", "gs"): return (t, 0)
+    if t in ("eax", "rax", "al", "cl", "dx", "sreg", "creg", "dreg", "fs", "gs", "es", "cs", "ss", "ds"): return (t, 0)
     raise KeyError(t)
 
 def parse_enc(e):
@@ -87,7 +87,7 @@ def parse_enc(e):
         elif toks[:1] == ["0F"]: d["map"] = 1; toks = toks[1:]
     for t in toks:
         if re.fullmatch(r"[0-9A-Fa-f]{2}", t): d["op"].append(int(t, 16))
-        elif re.fullmatch(r"[0-9A-F]{2}\+i", t): d["op"].append(int(t[:2], 16)); d["plus"] = True
+        elif re.fullmatch(r"[0-9A-F]{2}\+[ir]", t): d["op"].append(int(t[:2], 16)); d["plus"] = True
         elif t == "/r": d["modrm"] = True
         elif re.fullmatch(r"/[0-7]", t): d["modrm"] = True; d["digit"] = int(t[1])
         elif t == "/is4": d["is4"] = True
@@ -172,13 +172,19 @@ def main():
         for ins in cat["instructions"]:
             if cat["category"] == "GP":
                 nm = re.sub(r"^\[[^\]]*\]\s*", "", ins["inst"]).split()[0]
-                if nm in gp_mn and not re.search(r"\b(sreg|creg|dreg|fs|gs)\b", ins["inst"]): continue
+                if nm in gp_mn and not re.search(r"\b(sreg|creg|dreg|fs|gs|es|cs|ss|ds)\b", ins["inst"]): continue
                 expanded += gp_variants(ins)
             else:
                 expanded.append((ins, None))
+        moded = []
         for ins, gsz in expanded:
-            enc = ins.get("any") or ins.get("x64")
-            if not enc: skipped["apx/x86-only"] += 1; continue
+            if ins.get("any"): moded.append((ins, gsz, "any"))
+            else:
+                for m_ in ("x64", "x86"):
+                    if ins.get(m_) and not (m_ == "x86" and gsz == 8): moded.append((dict(ins, any=ins[m_]), gsz, m_))
+        for ins, gsz, mode in moded:
+            enc = ins.get("any")
+            if not enc: skipped["apx"] += 1; continue
             role, e = [x.strip() for x in enc.split(":", 1)]
             role = role.rstrip("_")
             s = re.sub(r"^\[[^\]]*\]\s*", "", ins["inst"])
@@ -294,18 +300,21 @@ def main():
                                 reg=r["r"], rm=r["m"], vvvv=r["v"], is4=r["s"] if d["is4"] else None, plus=plus,
                                 mask=mask, er=er, sae=sae, n=n, sib=d.get("sib", False),
                                 evex_mem_bcst=any(b for _, _, b in ops), exact=exact, lowprio=lowprio or cat["category"].startswith("AVX10"),
-                                late_vex=d["enc"] == "vex" and name in cpp and cpp[name][2])
+                                late_vex=d["enc"] == "vex" and name in cpp and cpp[name][2], mode=mode)
                     table.setdefault(name, []).append(form)
     # Unsized far pointer (`lcall ptr(...)`): AsmJit uses the m16:64 form.
     for n_ in ("lcall", "ljmp"):
         if n_ in table: table[n_].sort(key=lambda f: -max([sz for k, sz, _ in f["ops"] if k == "mem"] or [0]))
+    # Far pointer immediates (x86): AsmJit defaults to ptr16:32, the 66 ptr16:16 form is last.
+    for n_ in ("lcall", "ljmp"):
+        if n_ in table: table[n_].sort(key=lambda f: 1 if f["ops"] and f["ops"][0][0] == "imm" and 0x66 in f["pre"] else 0)
     # EVEX scalar stores (vmovss/vmovsd/vmovsh m, xmm) accept {k} in AsmJit.
     for n_, forms in table.items():
         if any(f["enc"] == "evex" and f["mask"] for f in forms):
             for f in forms:
                 if f["enc"] == "evex" and not f["mask"] and f["ops"] and f["ops"][0][0] == "mem": f["mask"] = 1
     KMAP = {"xmm": "xmm", "ymm": "ymm", "zmm": "zmm", "mm": "mm", "k": "k", "tmm": "tmm", "st0": "st0", "sti": "sti",
-            "r8": "r8", "r16": "r16", "r32": "r32", "r64": "r64", "ax": "ax", "al": "al", "cl": "cl", "eax": "eax", "rax": "rax", "dx": "dx", "mem": "mem", "vx": "vx", "vy": "vy", "vz": "vz", "imm": "imm", "maddr": "maddr", "sreg": "sreg", "creg": "creg", "dreg": "dreg", "fs": "fs", "gs": "gs"}
+            "r8": "r8", "r16": "r16", "r32": "r32", "r64": "r64", "ax": "ax", "al": "al", "cl": "cl", "eax": "eax", "rax": "rax", "dx": "dx", "mem": "mem", "vx": "vx", "vy": "vy", "vz": "vz", "imm": "imm", "maddr": "maddr", "sreg": "sreg", "creg": "creg", "dreg": "dreg", "fs": "fs", "gs": "gs", "es": "es", "cs": "cs", "ss": "ss", "ds": "ds"}
     def opt(v): return "null" if v is None else str(v)
     lines = ["// Generated by scripts/gen_vec_tables.py from ref/asmjit/db/isa_x86.json. Do not edit.",
              "const Form = @import(\"vec.zig\").Form;", "", "pub const Mnemonic = enum {"]
@@ -322,7 +331,8 @@ def main():
                          f".map = {f['map']}, .op = &.{{{op}}}, .digit = {opt(f['digit'])}, .imm = {f['imm']}, .pp = {f['pp']}, "
                          f".w = {f['w']}, .l = {f['l']}, .reg = {opt(f['reg'])}, .rm = {opt(f['rm'])}, .vvvv = {opt(f['vvvv'])}, "
                          f".is4 = {opt(f['is4'])}, .plus = {opt(f['plus'])}, .mask = {f['mask']}, .er = {str(f['er']).lower()}, "
-                         f".sae = {str(f['sae']).lower()}, .n = {f['n']}, .lowprio = {str(f['lowprio']).lower()}, .late_vex = {str(f['late_vex']).lower()}, .exact_mem = {str(f['exact']).lower()} }},")
+                         f".sae = {str(f['sae']).lower()}, .n = {f['n']}, .lowprio = {str(f['lowprio']).lower()}, .late_vex = {str(f['late_vex']).lower()}, .exact_mem = {str(f['exact']).lower()}"
+                         + ("" if f["mode"] == "any" else f", .mode = .{f['mode']}") + " },")
         lines.append("    };")
     lines.append("};")
     open(os.path.join(ROOT, "src/x86_64/vec_table.zig"), "w").write("\n".join(lines) + "\n")
