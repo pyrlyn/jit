@@ -29,6 +29,14 @@ pub fn build(b: *std.Build) void {
     zigjit.addOptions("zigjit_options", opts);
 
     const tests = b.addTest(.{ .root_module = zigjit });
+    // Own fuzz driver: Zig 0.16.0's test runner does not build with `--fuzz` (see SECURITY.md).
+    const fuzz_exe = b.addExecutable(.{ .name = "zigjit_fuzz", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/fuzz_main.zig"),
+        .target = target,
+        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .link_libc = true,
+    }) });
+    b.step("fuzz", "Fuzz the encoders/code buffer with random seeds (env: ZIGJIT_FUZZ_ROUNDS/SEED/ITERS)").dependOn(&b.addRunArtifact(fuzz_exe).step);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 

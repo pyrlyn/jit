@@ -7,9 +7,11 @@ const std = @import("std");
 const a64 = @import("aarch64/a64.zig");
 const gp = @import("x86_64/gp.zig");
 const cbm = @import("core/code_buffer.zig");
+/// Leak-checked under `zig build test`; libc malloc in the standalone driver (src/fuzz_main.zig).
+const gpa = if (@import("builtin").is_test) std.testing.allocator else std.heap.c_allocator;
 
 /// Input source: `std.testing.Smith` (fuzzer) or `Prng` (deterministic runs).
-const Prng = struct {
+pub const Prng = struct {
     r: std.Random.DefaultPrng,
     pub fn value(self: *Prng, comptime T: type) T {
         return switch (@typeInfo(T)) {
@@ -62,7 +64,7 @@ fn a64Op(src: anytype) a64.Op {
     };
 }
 
-fn a64One(src: anytype) !void {
+pub fn a64One(src: anytype) !void {
     const forms = a64_forms[src.value(u16) % a64_forms.len];
     var ops: [6]a64.Op = undefined;
     const n = src.value(u8) % 7;
@@ -90,8 +92,8 @@ fn gpOp(src: anytype) gp.Op {
     };
 }
 
-fn gpOne(src: anytype) !void {
-    var buf = cbm.CodeBuffer.init(std.testing.allocator);
+pub fn gpOne(src: anytype) !void {
+    var buf = cbm.CodeBuffer.init(gpa);
     defer buf.deinit();
     const forms = gp_forms[src.value(u16) % gp_forms.len];
     var ops: [4]gp.Op = undefined;
@@ -103,8 +105,8 @@ fn gpOne(src: anytype) !void {
 
 // ---- CodeBuffer labels / fixups -------------------------------------------------------------
 
-fn bufferOne(src: anytype) !void {
-    var buf = cbm.CodeBuffer.init(std.testing.allocator);
+pub fn bufferOne(src: anytype) !void {
+    var buf = cbm.CodeBuffer.init(gpa);
     defer buf.deinit();
     buf.max_size = 1 << 16;
     for (0..src.value(u8) % 64) |_| switch (src.value(u8) % 6) {
@@ -118,8 +120,8 @@ fn bufferOne(src: anytype) !void {
         },
         4 => _ = buf.labelOffset(.{ .id = src.value(u32) }),
         else => {
-            const before = try std.testing.allocator.dupe(u8, buf.code());
-            defer std.testing.allocator.free(before);
+            const before = try gpa.dupe(u8, buf.code());
+            defer gpa.free(before);
             buf.finalize() catch {
                 // A failed finalize must leave the code untouched.
                 try std.testing.expectEqualSlices(u8, before, buf.code());
@@ -130,7 +132,7 @@ fn bufferOne(src: anytype) !void {
 
 // ---- drivers --------------------------------------------------------------------------------
 
-fn runPrng(comptime one: anytype, iters: usize, seed: u64) !void {
+pub fn runPrng(comptime one: anytype, iters: usize, seed: u64) !void {
     var src: Prng = .{ .r = .init(seed) };
     for (0..iters) |_| try one(&src);
 }
