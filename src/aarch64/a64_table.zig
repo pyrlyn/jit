@@ -2247,8 +2247,8 @@ pub const table = struct {
         .{ .bits = 0x04603000, .fields = &.{.{ .n = .@"Zn", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .d }, .{ .k = .zfix, .f = .@"Zn", .et = .d }} },
         // mov Zd.t, Zn.t[#idx]
         .{ .bits = 0x05202000, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 2, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .zelemt, .f = .@"Zn", .f2 = .@"idx" }}, .zt = &.{.b, .h, .s, .d}, .imm = .SveDupImm, .args = &.{ -2, -3 } },
-        // mov Zd.t, #imm, {lsl #n}
-        .{ .bits = 0x2538C000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"n", .at = 13, .w = 1, .src = 0 }, .{ .n = .@"imm", .at = 5, .w = 8, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .imm, .f = .@"imm" }, .{ .k = .shift, .sh = .lsl, .f = .@"n", .opt = true, .scale = 8 }}, .zt = &.{.b, .h, .s, .d} },
+        // mov Zd.t, #immS, {lsl #n}
+        .{ .bits = 0x2538C000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"n", .at = 13, .w = 1, .src = 0 }, .{ .n = .@"immS", .at = 5, .w = 8, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .imm, .f = .@"immS" }, .{ .k = .shift, .sh = .lsl, .f = .@"n", .opt = true, .scale = 8 }}, .zt = &.{.b, .h, .s, .d} },
         // mov Zd.t, #imm
         .{ .bits = 0x05C00000, .fields = &.{.{ .n = .@"imm", .at = 5, .w = 13, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .imm, .f = .@"imm" }}, .zt = &.{.b, .h, .s, .d}, .imm = .SveDupmImm, .args = &.{ -2, -3 } },
         // mov Pd.B, Pg/M, Pn.B
@@ -5153,8 +5153,8 @@ pub const table = struct {
         .{ .bits = 0x05E03800, .fields = &.{.{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .xsp, .f = .@"Rn" }}, .zt = &.{.b, .h, .s, .d} },
         // dup Zd.t, Zn.t[#idx]
         .{ .bits = 0x05202000, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 2, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .zelemt, .f = .@"Zn", .f2 = .@"idx" }}, .zt = &.{.b, .h, .s, .d}, .imm = .SveDupImm, .args = &.{ -2, -3 } },
-        // dup Zd.t, #imm, {lsl #n}
-        .{ .bits = 0x2538C000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"n", .at = 13, .w = 1, .src = 0 }, .{ .n = .@"imm", .at = 5, .w = 8, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .imm, .f = .@"imm" }, .{ .k = .shift, .sh = .lsl, .f = .@"n", .opt = true, .scale = 8 }}, .zt = &.{.b, .h, .s, .d} },
+        // dup Zd.t, #immS, {lsl #n}
+        .{ .bits = 0x2538C000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"n", .at = 13, .w = 1, .src = 0 }, .{ .n = .@"immS", .at = 5, .w = 8, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .imm, .f = .@"immS" }, .{ .k = .shift, .sh = .lsl, .f = .@"n", .opt = true, .scale = 8 }}, .zt = &.{.b, .h, .s, .d} },
     };
     pub const @"ext" = [_]Form{
         // ext Vd.8B, Vn.8B, Vm.8B, #idx
@@ -5339,8 +5339,8 @@ pub const table = struct {
         .{ .bits = 0x4EF8D800, .fields = &.{.{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .vfix, .f = .@"Rd", .arr = .a8h }, .{ .k = .vfix, .f = .@"Rn", .arr = .a8h }, .{ .k = .immfix, .fixed = 0 }} },
         // fcmeq Pd.t, Pg/Z, Zn.t, Zm.t
         .{ .bits = 0x65006000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Zm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .zt, .f = .@"Zm" }}, .zt = &.{.none, .h, .s, .d} },
-        // fcmeq Pd.t, Pg/Z, Zn.t, #zero
-        .{ .bits = 0x65122000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"zero" }}, .zt = &.{.none, .h, .s, .d} },
+        // fcmeq Pd.t, Pg/Z, Zn.t, #0
+        .{ .bits = 0x65122000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .immfix, .fixed = 0 }}, .zt = &.{.none, .h, .s, .d} },
     };
     pub const @"fcmge" = [_]Form{
         // fcmge Sd, Sn, Sm
@@ -5377,8 +5377,8 @@ pub const table = struct {
         .{ .bits = 0x6EF8C800, .fields = &.{.{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .vfix, .f = .@"Rd", .arr = .a8h }, .{ .k = .vfix, .f = .@"Rn", .arr = .a8h }, .{ .k = .immfix, .fixed = 0 }} },
         // fcmge Pd.t, Pg/Z, Zn.t, Zm.t
         .{ .bits = 0x65004000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Zm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .zt, .f = .@"Zm" }}, .zt = &.{.none, .h, .s, .d} },
-        // fcmge Pd.t, Pg/Z, Zn.t, #zero
-        .{ .bits = 0x65102000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"zero" }}, .zt = &.{.none, .h, .s, .d} },
+        // fcmge Pd.t, Pg/Z, Zn.t, #0
+        .{ .bits = 0x65102000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .immfix, .fixed = 0 }}, .zt = &.{.none, .h, .s, .d} },
     };
     pub const @"fcmgt" = [_]Form{
         // fcmgt Sd, Sn, Sm
@@ -5415,8 +5415,8 @@ pub const table = struct {
         .{ .bits = 0x4EF8C800, .fields = &.{.{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .vfix, .f = .@"Rd", .arr = .a8h }, .{ .k = .vfix, .f = .@"Rn", .arr = .a8h }, .{ .k = .immfix, .fixed = 0 }} },
         // fcmgt Pd.t, Pg/Z, Zn.t, Zm.t
         .{ .bits = 0x65004010, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Zm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .zt, .f = .@"Zm" }}, .zt = &.{.none, .h, .s, .d} },
-        // fcmgt Pd.t, Pg/Z, Zn.t, #zero
-        .{ .bits = 0x65102010, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"zero" }}, .zt = &.{.none, .h, .s, .d} },
+        // fcmgt Pd.t, Pg/Z, Zn.t, #0
+        .{ .bits = 0x65102010, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .immfix, .fixed = 0 }}, .zt = &.{.none, .h, .s, .d} },
     };
     pub const @"fcmle" = [_]Form{
         // fcmle Sd, Sn, #0
@@ -5437,8 +5437,8 @@ pub const table = struct {
         .{ .bits = 0x6EF8D800, .fields = &.{.{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .vfix, .f = .@"Rd", .arr = .a8h }, .{ .k = .vfix, .f = .@"Rn", .arr = .a8h }, .{ .k = .immfix, .fixed = 0 }} },
         // fcmle Pd.t, Pg/Z, Zn.t, Zm.t
         .{ .bits = 0x65004000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Zn", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zm", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .zt, .f = .@"Zm" }}, .zt = &.{.none, .h, .s, .d} },
-        // fcmle Pd.t, Pg/Z, Zn.t, #zero
-        .{ .bits = 0x65112010, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"zero" }}, .zt = &.{.none, .h, .s, .d} },
+        // fcmle Pd.t, Pg/Z, Zn.t, #0
+        .{ .bits = 0x65112010, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .immfix, .fixed = 0 }}, .zt = &.{.none, .h, .s, .d} },
     };
     pub const @"fcmlt" = [_]Form{
         // fcmlt Sd, Sn, #0
@@ -5459,8 +5459,8 @@ pub const table = struct {
         .{ .bits = 0x4EF8E800, .fields = &.{.{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .vfix, .f = .@"Rd", .arr = .a8h }, .{ .k = .vfix, .f = .@"Rn", .arr = .a8h }, .{ .k = .immfix, .fixed = 0 }} },
         // fcmlt Pd.t, Pg/Z, Zn.t, Zm.t
         .{ .bits = 0x65004010, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Zn", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zm", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .zt, .f = .@"Zm" }}, .zt = &.{.none, .h, .s, .d} },
-        // fcmlt Pd.t, Pg/Z, Zn.t, #zero
-        .{ .bits = 0x65112000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"zero" }}, .zt = &.{.none, .h, .s, .d} },
+        // fcmlt Pd.t, Pg/Z, Zn.t, #0
+        .{ .bits = 0x65112000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .immfix, .fixed = 0 }}, .zt = &.{.none, .h, .s, .d} },
     };
     pub const @"fcmp" = [_]Form{
         // fcmp Sn, Sm
@@ -9385,16 +9385,16 @@ pub const table = struct {
         .{ .bits = 0x25104000, .fields = &.{.{ .n = .@"Pg", .at = 10, .w = 4, .src = 0 }, .{ .n = .@"Pn", .at = 5, .w = 4, .src = 0 }, .{ .n = .@"M", .at = 4, .w = 1, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pfix, .f = .@"Pd", .et = .b }, .{ .k = .pgmz, .f = .@"Pg" }, .{ .k = .pfix, .f = .@"Pn", .et = .b }} },
     };
     pub const @"brkas" = [_]Form{
-        // brkas Pd.B, Pg/M, Pn.B
-        .{ .bits = 0x25504000, .fields = &.{.{ .n = .@"Pg", .at = 10, .w = 4, .src = 0 }, .{ .n = .@"Pn", .at = 5, .w = 4, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pfix, .f = .@"Pd", .et = .b }, .{ .k = .pgm, .f = .@"Pg" }, .{ .k = .pfix, .f = .@"Pn", .et = .b }} },
+        // brkas Pd.B, Pg/Z, Pn.B
+        .{ .bits = 0x25504000, .fields = &.{.{ .n = .@"Pg", .at = 10, .w = 4, .src = 0 }, .{ .n = .@"Pn", .at = 5, .w = 4, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pfix, .f = .@"Pd", .et = .b }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .pfix, .f = .@"Pn", .et = .b }} },
     };
     pub const @"brkb" = [_]Form{
         // brkb Pd.B, Pg/MZ, Pn.B
         .{ .bits = 0x25904000, .fields = &.{.{ .n = .@"Pg", .at = 10, .w = 4, .src = 0 }, .{ .n = .@"Pn", .at = 5, .w = 4, .src = 0 }, .{ .n = .@"M", .at = 4, .w = 1, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pfix, .f = .@"Pd", .et = .b }, .{ .k = .pgmz, .f = .@"Pg" }, .{ .k = .pfix, .f = .@"Pn", .et = .b }} },
     };
     pub const @"brkbs" = [_]Form{
-        // brkbs Pd.B, Pg/M, Pn.B
-        .{ .bits = 0x25D04000, .fields = &.{.{ .n = .@"Pg", .at = 10, .w = 4, .src = 0 }, .{ .n = .@"Pn", .at = 5, .w = 4, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pfix, .f = .@"Pd", .et = .b }, .{ .k = .pgm, .f = .@"Pg" }, .{ .k = .pfix, .f = .@"Pn", .et = .b }} },
+        // brkbs Pd.B, Pg/Z, Pn.B
+        .{ .bits = 0x25D04000, .fields = &.{.{ .n = .@"Pg", .at = 10, .w = 4, .src = 0 }, .{ .n = .@"Pn", .at = 5, .w = 4, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pfix, .f = .@"Pd", .et = .b }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .pfix, .f = .@"Pn", .et = .b }} },
     };
     pub const @"brkn" = [_]Form{
         // brkn Pdm.B, Pg/Z, Pn.B, Pdm.B
@@ -9569,8 +9569,8 @@ pub const table = struct {
         .{ .bits = 0x05A08000, .fields = &.{.{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .s }, .{ .k = .pgm, .f = .@"Pg" }, .{ .k = .ss, .f = .@"Rn" }} },
         // cpy Zd.D, Pg/M, Dn
         .{ .bits = 0x05E08000, .fields = &.{.{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .d }, .{ .k = .pgm, .f = .@"Pg" }, .{ .k = .sd, .f = .@"Rn" }} },
-        // cpy Zd.t, Pg/MZ, #imm, {lsl #n}
-        .{ .bits = 0x05100000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"M", .at = 14, .w = 1, .src = 0 }, .{ .n = .@"n", .at = 13, .w = 1, .src = 0 }, .{ .n = .@"imm", .at = 5, .w = 8, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .pgmz, .f = .@"Pg" }, .{ .k = .imm, .f = .@"imm" }, .{ .k = .shift, .sh = .lsl, .f = .@"n", .opt = true, .scale = 8 }}, .zt = &.{.b, .h, .s, .d} },
+        // cpy Zd.t, Pg/MZ, #immS, {lsl #n}
+        .{ .bits = 0x05100000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"M", .at = 14, .w = 1, .src = 0 }, .{ .n = .@"n", .at = 13, .w = 1, .src = 0 }, .{ .n = .@"immS", .at = 5, .w = 8, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .pgmz, .f = .@"Pg" }, .{ .k = .imm, .f = .@"immS" }, .{ .k = .shift, .sh = .lsl, .f = .@"n", .opt = true, .scale = 8 }}, .zt = &.{.b, .h, .s, .d} },
     };
     pub const @"ctermeq" = [_]Form{
         // ctermeq Rn, Rm
@@ -9653,8 +9653,8 @@ pub const table = struct {
     pub const @"fcmne" = [_]Form{
         // fcmne Pd.t, Pg/Z, Zn.t, Zm.t
         .{ .bits = 0x65006010, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Zm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .zt, .f = .@"Zm" }}, .zt = &.{.none, .h, .s, .d} },
-        // fcmne Pd.t, Pg/Z, Zn.t, #zero
-        .{ .bits = 0x65132000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"zero" }}, .zt = &.{.none, .h, .s, .d} },
+        // fcmne Pd.t, Pg/Z, Zn.t, #0
+        .{ .bits = 0x65132000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Pd", .at = 0, .w = 4, .src = 0 }}, .ops = &.{.{ .k = .pt, .f = .@"Pd" }, .{ .k = .pgz, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .immfix, .fixed = 0 }}, .zt = &.{.none, .h, .s, .d} },
     };
     pub const @"fcmuo" = [_]Form{
         // fcmuo Pd.t, Pg/Z, Zn.t, Zm.t
@@ -9949,12 +9949,12 @@ pub const table = struct {
         .{ .bits = 0x252C9000, .fields = &.{}, .ops = &.{} },
     };
     pub const @"shrnb" = [_]Form{
-        // shrnb Zd.t, Zn.t, #imm
-        .{ .bits = 0x45201000, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zt = &.{.none, .b, .h, .s}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 0 } },
+        // shrnb Zd.ta, Zn.tb, #imm
+        .{ .bits = 0x45201000, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zta, .f = .@"Zd" }, .{ .k = .ztb, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zta = &.{.none, .b, .h, .s}, .ztb = &.{.none, .h, .s, .d}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 0 } },
     };
     pub const @"shrnt" = [_]Form{
-        // shrnt Zd.t, Zn.t, #imm
-        .{ .bits = 0x45201400, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zt = &.{.none, .b, .h, .s}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 0 } },
+        // shrnt Zd.ta, Zn.tb, #imm
+        .{ .bits = 0x45201400, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zta, .f = .@"Zd" }, .{ .k = .ztb, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zta = &.{.none, .b, .h, .s}, .ztb = &.{.none, .h, .s, .d}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 0 } },
     };
     pub const @"sqdecb" = [_]Form{
         // sqdecb Xdn, Wdn, {#pattern}, {mul #imm}
@@ -9975,8 +9975,8 @@ pub const table = struct {
         .{ .bits = 0x0460F800, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .w, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
         // sqdech Xdn, {#pattern}, {mul #imm}
         .{ .bits = 0x0470F800, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
-        // sqdech Zdn.D, {#pattern}, {mul #imm}
-        .{ .bits = 0x0450C800, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .d }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
+        // sqdech Zdn.H, {#pattern}, {mul #imm}
+        .{ .bits = 0x0460C800, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .h }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
     };
     pub const @"sqdecp" = [_]Form{
         // sqdecp Xdn, Pm.t, Wdn
@@ -9991,8 +9991,8 @@ pub const table = struct {
         .{ .bits = 0x04A0F800, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .w, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
         // sqdecw Xdn, {#pattern}, {mul #imm}
         .{ .bits = 0x04B0F800, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
-        // sqdecw Zdn.D, {#pattern}, {mul #imm}
-        .{ .bits = 0x04A0C800, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .d }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
+        // sqdecw Zdn.S, {#pattern}, {mul #imm}
+        .{ .bits = 0x04A0C800, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .s }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
     };
     pub const @"sqincb" = [_]Form{
         // sqincb Xdn, Wdn, {#pattern}, {mul #imm}
@@ -10013,8 +10013,8 @@ pub const table = struct {
         .{ .bits = 0x0460F000, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .w, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
         // sqinch Xdn, {#pattern}, {mul #imm}
         .{ .bits = 0x0470F000, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
-        // sqinch Zdn.D, {#pattern}, {mul #imm}
-        .{ .bits = 0x0450C000, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .d }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
+        // sqinch Zdn.H, {#pattern}, {mul #imm}
+        .{ .bits = 0x0460C000, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .h }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
     };
     pub const @"sqincp" = [_]Form{
         // sqincp Xdn, Pm.t, Wdn
@@ -10029,8 +10029,8 @@ pub const table = struct {
         .{ .bits = 0x04A0F000, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .w, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
         // sqincw Xdn, {#pattern}, {mul #imm}
         .{ .bits = 0x04B0F000, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
-        // sqincw Zdn.D, {#pattern}, {mul #imm}
-        .{ .bits = 0x04A0C000, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .d }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
+        // sqincw Zdn.S, {#pattern}, {mul #imm}
+        .{ .bits = 0x04A0C000, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .s }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
     };
     pub const @"subr" = [_]Form{
         // subr Zdn.t, Zdn.t, #imm, {lsl #n}
@@ -10073,8 +10073,8 @@ pub const table = struct {
         .{ .bits = 0x0460FC00, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .w, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
         // uqdech Xdn, {#pattern}, {mul #imm}
         .{ .bits = 0x0470FC00, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
-        // uqdech Zdn.D, {#pattern}, {mul #imm}
-        .{ .bits = 0x0450CC00, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .d }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
+        // uqdech Zdn.H, {#pattern}, {mul #imm}
+        .{ .bits = 0x0460CC00, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .h }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
     };
     pub const @"uqdecp" = [_]Form{
         // uqdecp Xdn, Pm.t
@@ -10089,8 +10089,8 @@ pub const table = struct {
         .{ .bits = 0x04A0FC00, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .w, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
         // uqdecw Xdn, {#pattern}, {mul #imm}
         .{ .bits = 0x04B0FC00, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
-        // uqdecw Zdn.D, {#pattern}, {mul #imm}
-        .{ .bits = 0x04A0CC00, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .d }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
+        // uqdecw Zdn.S, {#pattern}, {mul #imm}
+        .{ .bits = 0x04A0CC00, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .s }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
     };
     pub const @"uqincb" = [_]Form{
         // uqincb Xdn, Wdn, {#pattern}, {mul #imm}
@@ -10111,8 +10111,8 @@ pub const table = struct {
         .{ .bits = 0x0460F400, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .w, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
         // uqinch Xdn, {#pattern}, {mul #imm}
         .{ .bits = 0x0470F400, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
-        // uqinch Zdn.D, {#pattern}, {mul #imm}
-        .{ .bits = 0x0450C400, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .d }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
+        // uqinch Zdn.H, {#pattern}, {mul #imm}
+        .{ .bits = 0x0460C400, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .h }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
     };
     pub const @"uqincp" = [_]Form{
         // uqincp Xdn, Pm.t
@@ -10127,8 +10127,8 @@ pub const table = struct {
         .{ .bits = 0x04A0F400, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .w, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
         // uqincw Xdn, {#pattern}, {mul #imm}
         .{ .bits = 0x04B0F400, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Rdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rdn" }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
-        // uqincw Zdn.D, {#pattern}, {mul #imm}
-        .{ .bits = 0x04A0C400, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .d }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
+        // uqincw Zdn.S, {#pattern}, {mul #imm}
+        .{ .bits = 0x04A0C400, .fields = &.{.{ .n = .@"imm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"pattern", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zdn", .et = .s }, .{ .k = .imm, .f = .@"pattern", .opt = true, .fixed = 31 }, .{ .k = .imm, .f = .@"imm", .opt = true, .fixed = 1 }}, .imm = .SvePatternImm, .args = &.{ -3, -3 } },
     };
     pub const @"uunpkhi" = [_]Form{
         // uunpkhi Zd.t, Zn.tb
@@ -10443,18 +10443,18 @@ pub const table = struct {
     pub const @"sqdmullb" = [_]Form{
         // sqdmullb Zd.ta, Zn.tb, Zm.tb
         .{ .bits = 0x45006000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Zm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zta, .f = .@"Zd" }, .{ .k = .ztb, .f = .@"Zn" }, .{ .k = .ztb, .f = .@"Zm" }}, .zta = &.{.none, .h, .s, .d}, .ztb = &.{.none, .b, .h, .s} },
-        // sqdmullb Zd.S, Zn.S, Zm.S[#idx]
-        .{ .bits = 0x44A0E000, .fields = &.{.{ .n = .@"idx", .at = 19, .w = 2, .src = 1 }, .{ .n = .@"Zm", .at = 16, .w = 3, .src = 0 }, .{ .n = .@"idx", .at = 11, .w = 1, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .s }, .{ .k = .zfix, .f = .@"Zn", .et = .s }, .{ .k = .zelem, .f = .@"Zm", .et = .s, .f2 = .@"idx" }} },
-        // sqdmullb Zd.D, Zn.D, Zm.D[#idx]
-        .{ .bits = 0x44E0E000, .fields = &.{.{ .n = .@"idx", .at = 20, .w = 1, .src = 1 }, .{ .n = .@"Zm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"idx", .at = 11, .w = 1, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .d }, .{ .k = .zfix, .f = .@"Zn", .et = .d }, .{ .k = .zelem, .f = .@"Zm", .et = .d, .f2 = .@"idx" }} },
+        // sqdmullb Zd.S, Zn.H, Zm.H[#idx]
+        .{ .bits = 0x44A0E000, .fields = &.{.{ .n = .@"idx", .at = 19, .w = 2, .src = 1 }, .{ .n = .@"Zm", .at = 16, .w = 3, .src = 0 }, .{ .n = .@"idx", .at = 11, .w = 1, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .s }, .{ .k = .zfix, .f = .@"Zn", .et = .h }, .{ .k = .zelem, .f = .@"Zm", .et = .h, .f2 = .@"idx" }} },
+        // sqdmullb Zd.D, Zn.S, Zm.S[#idx]
+        .{ .bits = 0x44E0E000, .fields = &.{.{ .n = .@"idx", .at = 20, .w = 1, .src = 1 }, .{ .n = .@"Zm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"idx", .at = 11, .w = 1, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .d }, .{ .k = .zfix, .f = .@"Zn", .et = .s }, .{ .k = .zelem, .f = .@"Zm", .et = .s, .f2 = .@"idx" }} },
     };
     pub const @"sqdmullt" = [_]Form{
         // sqdmullt Zd.ta, Zn.tb, Zm.tb
         .{ .bits = 0x45006400, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Zm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zta, .f = .@"Zd" }, .{ .k = .ztb, .f = .@"Zn" }, .{ .k = .ztb, .f = .@"Zm" }}, .zta = &.{.none, .h, .s, .d}, .ztb = &.{.none, .b, .h, .s} },
-        // sqdmullt Zd.S, Zn.S, Zm.S[#idx]
-        .{ .bits = 0x44A0E400, .fields = &.{.{ .n = .@"idx", .at = 19, .w = 2, .src = 1 }, .{ .n = .@"Zm", .at = 16, .w = 3, .src = 0 }, .{ .n = .@"idx", .at = 11, .w = 1, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .s }, .{ .k = .zfix, .f = .@"Zn", .et = .s }, .{ .k = .zelem, .f = .@"Zm", .et = .s, .f2 = .@"idx" }} },
-        // sqdmullt Zd.D, Zn.D, Zm.D[#idx]
-        .{ .bits = 0x44E0E400, .fields = &.{.{ .n = .@"idx", .at = 20, .w = 1, .src = 1 }, .{ .n = .@"Zm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"idx", .at = 11, .w = 1, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .d }, .{ .k = .zfix, .f = .@"Zn", .et = .d }, .{ .k = .zelem, .f = .@"Zm", .et = .d, .f2 = .@"idx" }} },
+        // sqdmullt Zd.S, Zn.H, Zm.H[#idx]
+        .{ .bits = 0x44A0E400, .fields = &.{.{ .n = .@"idx", .at = 19, .w = 2, .src = 1 }, .{ .n = .@"Zm", .at = 16, .w = 3, .src = 0 }, .{ .n = .@"idx", .at = 11, .w = 1, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .s }, .{ .k = .zfix, .f = .@"Zn", .et = .h }, .{ .k = .zelem, .f = .@"Zm", .et = .h, .f2 = .@"idx" }} },
+        // sqdmullt Zd.D, Zn.S, Zm.S[#idx]
+        .{ .bits = 0x44E0E400, .fields = &.{.{ .n = .@"idx", .at = 20, .w = 1, .src = 1 }, .{ .n = .@"Zm", .at = 16, .w = 4, .src = 0 }, .{ .n = .@"idx", .at = 11, .w = 1, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zfix, .f = .@"Zd", .et = .d }, .{ .k = .zfix, .f = .@"Zn", .et = .s }, .{ .k = .zelem, .f = .@"Zm", .et = .s, .f2 = .@"idx" }} },
     };
     pub const @"sqrdcmlah" = [_]Form{
         // sqrdcmlah Zda.t, Zn.t, Zm.t, #rot2
@@ -10529,12 +10529,12 @@ pub const table = struct {
         .{ .bits = 0x44068000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zm", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zdn" }, .{ .k = .pgm, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zdn" }, .{ .k = .zt, .f = .@"Zm" }}, .zt = &.{.b, .h, .s, .d} },
     };
     pub const @"sshllb" = [_]Form{
-        // sshllb Zd.t, Zn.t, #imm
-        .{ .bits = 0x4500A000, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zt = &.{.b, .h, .s, .d}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 1 } },
+        // sshllb Zd.ta, Zn.tb, #imm
+        .{ .bits = 0x4500A000, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zta, .f = .@"Zd" }, .{ .k = .ztb, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zta = &.{.none, .h, .s, .d}, .ztb = &.{.none, .b, .h, .s}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 1 } },
     };
     pub const @"sshllt" = [_]Form{
-        // sshllt Zd.t, Zn.t, #imm
-        .{ .bits = 0x4500A400, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zt = &.{.b, .h, .s, .d}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 1 } },
+        // sshllt Zd.ta, Zn.tb, #imm
+        .{ .bits = 0x4500A400, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zta, .f = .@"Zd" }, .{ .k = .ztb, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zta = &.{.none, .h, .s, .d}, .ztb = &.{.none, .b, .h, .s}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 1 } },
     };
     pub const @"ssublb" = [_]Form{
         // ssublb Zd.ta, Zn.tb, Zm.tb
@@ -10693,12 +10693,12 @@ pub const table = struct {
         .{ .bits = 0x44078000, .fields = &.{.{ .n = .@"sz", .at = 22, .w = 2, .src = 0 }, .{ .n = .@"Pg", .at = 10, .w = 3, .src = 0 }, .{ .n = .@"Zm", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zdn", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zdn" }, .{ .k = .pgm, .f = .@"Pg" }, .{ .k = .zt, .f = .@"Zdn" }, .{ .k = .zt, .f = .@"Zm" }}, .zt = &.{.b, .h, .s, .d} },
     };
     pub const @"ushllb" = [_]Form{
-        // ushllb Zd.t, Zn.t, #imm
-        .{ .bits = 0x4500A800, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zt = &.{.b, .h, .s, .d}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 1 } },
+        // ushllb Zd.ta, Zn.tb, #imm
+        .{ .bits = 0x4500A800, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zta, .f = .@"Zd" }, .{ .k = .ztb, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zta = &.{.none, .h, .s, .d}, .ztb = &.{.none, .b, .h, .s}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 1 } },
     };
     pub const @"ushllt" = [_]Form{
-        // ushllt Zd.t, Zn.t, #imm
-        .{ .bits = 0x4500AC00, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zt, .f = .@"Zd" }, .{ .k = .zt, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zt = &.{.b, .h, .s, .d}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 1 } },
+        // ushllt Zd.ta, Zn.tb, #imm
+        .{ .bits = 0x4500AC00, .fields = &.{.{ .n = .@"imm", .at = 22, .w = 1, .src = 5 }, .{ .n = .@"imm", .at = 16, .w = 5, .src = 0 }, .{ .n = .@"Zn", .at = 5, .w = 5, .src = 0 }, .{ .n = .@"Zd", .at = 0, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .zta, .f = .@"Zd" }, .{ .k = .ztb, .f = .@"Zn" }, .{ .k = .imm, .f = .@"imm" }}, .zta = &.{.none, .h, .s, .d}, .ztb = &.{.none, .b, .h, .s}, .imm = .SveShiftImm6, .args = &.{ -2, -3, 1 } },
     };
     pub const @"usublb" = [_]Form{
         // usublb Zd.ta, Zn.tb, Zm.tb

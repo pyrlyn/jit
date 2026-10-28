@@ -59,10 +59,25 @@ def patch(db):
         if not g["category"].startswith("SVE"): continue
         for i in g["data"]:
             i["inst"] = i["inst"].replace("#idxmm", "#imm")
+            # SVE forms checked against LLVM (scripts/gen_sve_extra_tests.py).
+            inst, mn = i["inst"], i["inst"].split(" ")[0]
+            if mn in ("brkas", "brkbs"): _sub(i, inst=(r"Pg/M", "Pg/Z"))  # only the zeroing form exists
+            elif re.fullmatch(r"fcm(eq|ge|gt|le|lt|ne)", mn) and "#zero" in inst: _sub(i, inst=(r"#zero$", "#0"))  # `#0.0`
+            elif mn in ("cpy", "dup", "mov") and inst.endswith("#imm, {lsl #n}"):  # signed imm8
+                _sub(i, inst=(r"#imm,", "#immS,"), op=(r"imm:8", "immS:8"))
+            elif mn in ("shrnb", "shrnt"):  # narrowing: Zd is the half-width arrangement
+                _sub(i, inst=(r"Zd\.t, Zn\.t", "Zd.ta, Zn.tb")); i.pop("t", None); i["ta"] = "~BHS"; i["tb"] = "~HSD"
+            elif re.fullmatch(r"[su]shll[bt]", mn):  # widening: Zn is the half-width arrangement
+                _sub(i, inst=(r"Zd\.t, Zn\.t", "Zd.ta, Zn.tb")); i.pop("t", None); i["ta"] = "~HSD"; i["tb"] = "~BHS"
+            elif re.fullmatch(r"[su]q(inc|dec)[hw]", mn) and "Zdn.D" in inst:  # vector forms are .H / .S
+                _sub(i, inst=(r"Zdn\.D", "Zdn." + ("H" if mn.endswith("h") else "S")))
+                if mn.endswith("h"): i["op"] = i["op"].replace("00000100|01|01|", "00000100|01|10|", 1)  # size=01, bit 20 set
+            elif mn in ("sqdmullb", "sqdmullt") and "[#idx]" in inst:  # indexed: source is half-width
+                _sub(i, inst=(r"Zn\.S, Zm\.S", "Zn.H, Zm.H")) if "Zd.S" in inst else _sub(i, inst=(r"Zn\.D, Zm\.D", "Zn.S, Zm.S"))
             if i["inst"].startswith("while") and "|000X" in i["op"]:
                 i["op"] = i["op"].replace("|000X", "|000|sf:1|")  # sf: X (1) or W (0) operands
             # Prefer DUP (imm8) over DUPM for `mov Zd.t, #imm` (as LLVM and AsmJit do).
-        mv = [x for x in g["data"] if x["inst"] == "mov Zd.t, #imm, {lsl #n}"]
+        mv = [x for x in g["data"] if x["inst"] == "mov Zd.t, #immS, {lsl #n}"]
         if mv:
             g["data"] = [x for x in g["data"] if x not in mv]
             k = next(j for j, x in enumerate(g["data"]) if x["inst"] == "mov Zd.t, #imm")

@@ -150,7 +150,7 @@ def main():
                [f"    if (xfail != {len(xf)}) return error.KnownFailuresChanged;", "}", ""]
     open(os.path.join(ROOT, "src/a64_sve_tests.zig"), "w").write("\n".join(out))
     rep = [f"SVE/SME forms: {nforms}; LLVM-verified cases: {len(cases)} (passing {len(live)}, known failures {len(xf)})",
-           f"forms with no case accepted by LLVM: {len(rejected)} (DB-only/odd syntax; listed below)", ""]
+           f"forms with no case accepted by LLVM: {len(rejected)} (DB syntax LLVM does not accept; these forms are verified by the hand-spelled LLVM cases in src/a64_sve_extra_tests.zig)", ""]
     rep += [f"{v:4} {k}" for k, v in sorted(rejected.items())]
     open(os.path.join(ROOT, "bench/a64_sve_coverage.txt"), "w").write("\n".join(rep) + "\n")
     print(rep[0]); print(rep[1])
