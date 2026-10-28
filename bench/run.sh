@@ -10,7 +10,7 @@ for i in $(seq "$RUNS"); do
   ../zig-out/bin/bench_x86_64 "$ITERS" out >> out/raw.txt 2>&1
 done
 field() { sed -n "s/.* $1=\([^ ]*\).*/\1/p"; }
-for s in straight calls loops mem; do
+for s in straight calls loops mem avx avx512; do
   cmp -s out/asmjit_$s.bin out/zigjit_$s.bin && same=identical || same=DIFFERENT
   for lib in asmjit zigjit; do
     L=$(grep "^$lib $s " out/raw.txt)

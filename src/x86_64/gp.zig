@@ -225,11 +225,11 @@ fn checkMem(m: Mem) Error!void {
 pub const Buf = struct {
     b: [16]u8 = undefined,
     n: u8 = 0,
-    fn u8_(s: *Buf, v: u8) void {
+    pub fn u8_(s: *Buf, v: u8) void {
         s.b[s.n] = v;
         s.n += 1;
     }
-    fn int(s: *Buf, v: i64, bytes: u8) void {
+    pub fn int(s: *Buf, v: i64, bytes: u8) void {
         var x: u64 = @bitCast(v);
         for (0..bytes) |_| {
             s.u8_(@truncate(x));
@@ -287,6 +287,7 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
         rex |= r >> 3;
     }
     // AH..BH are only addressable without REX.
+    if (cur_opt.rex) need_rex = true;
     if (has_high and (rex != 0 or need_rex)) return error.InvalidOperand;
     for (f.pre) |p| out.u8_(p);
     if (rex != 0 or need_rex) out.u8_(0x40 | rex);
@@ -320,6 +321,39 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
         else => {},
     };
     return rip_at;
+}
+
+/// Per-instruction options (AsmJit `lock()`, `rex()`, `mod_mr()` / `mod_rm()`, `long_()`).
+pub const Opt = struct {
+    lock: bool = false,
+    /// Always emit a REX prefix (0x40 if no bit is needed).
+    rex: bool = false,
+    /// reg,reg encoding direction: `.mr` (first operand in ModRM.rm) or `.rm`.
+    mod: enum { auto, mr, rm } = .auto,
+    /// `mov r64, imm`: always the 10-byte imm64 form.
+    long: bool = false,
+};
+threadlocal var cur_opt: Opt = .{};
+
+/// `emit` with options.
+pub fn emitOpt(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, opt: Opt) Error!void {
+    cur_opt = opt;
+    defer cur_opt = .{};
+    return emit(buf, mn, args);
+}
+
+/// `mov` between the accumulator and a 64-bit absolute address (A0..A3 moffs64).
+pub fn movMoffs(buf: *CodeBuffer, store: bool, acc: Reg, addr: u64) Error!void {
+    if (acc.id != .rax or acc.high) return error.InvalidOperand;
+    try buf.ensure(16);
+    if (acc.size == .w) buf.put8(0x66);
+    if (acc.size == .q) buf.put8(0x48);
+    buf.put8(@as(u8, if (acc.size == .b) 0xA0 else 0xA1) + @as(u8, if (store) 2 else 0));
+    var a = addr;
+    for (0..8) |_| {
+        buf.put8(@truncate(a));
+        a >>= 8;
+    }
 }
 
 /// Emits `mn` with operands `args` (tuple of Reg / Mem / integers) into `buf`.
@@ -400,6 +434,10 @@ fn emitExact(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void 
     var best_imm: u8 = 0;
     for (forms) |f| {
         if (!matches(f, ops)) continue;
+        const o = cur_opt;
+        if (o.mod == .mr and f.reg != null and f.reg.? == 0) continue;
+        if (o.mod == .rm and f.rm != null and f.rm.? == 0 and f.reg != null) continue;
+        if (o.long and !(f.imm == 8)) continue;
         var b: Buf = .{};
         const r = try encodeForm(f, ops, &b);
         // Shortest wins; on a tie prefer the narrower immediate (`66 83 /r ib` over `66 05 iw`), like LLVM.
@@ -415,7 +453,8 @@ fn emitExact(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void 
         b.b[0] = 0x90;
         b.n = 1;
     }
-    try buf.ensure(16);
+    try buf.ensure(17);
+    if (cur_opt.lock) buf.put8(0xF0);
     const start = buf.offset();
     for (b.b[0..b.n]) |x| buf.put8(x);
     if (best_rip) |at| for (ops) |o| switch (o) {

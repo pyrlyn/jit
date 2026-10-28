@@ -48,13 +48,32 @@ static int mem(Assembler& a) {
   a.ret(); return n + 1;
 }
 
+static int avx(Assembler& a) {
+  int n = 0;
+  for (int i = 0; i < UNITS; i++) {
+    a.vmovups(ymm(i % 16), ptr(rdi, i * 32)); a.vfmadd231ps(ymm0, ymm1, ymm2);
+    a.vaddps(ymm3, ymm4, ptr(rsi, rcx, 2, 64)); a.vpshufb(xmm5, xmm6, xmm7);
+    a.vmovups(ptr(rdx, i * 32), ymm8); a.vxorps(ymm9, ymm9, ymm9); n += 6;
+  }
+  a.ret(); return n + 1;
+}
+static int avx512(Assembler& a) {
+  int n = 0;
+  for (int i = 0; i < UNITS; i++) {
+    a.k(k1).z().vaddps(zmm(i % 32), zmm1, ptr(rdi, i * 64)); a.vfmadd231pd(zmm2, zmm3, qword_ptr(rsi)._1to8());
+    a.vpternlogd(zmm4, zmm5, zmm6, 0xAA); a.rn_sae().vaddps(zmm7, zmm8, zmm9);
+    a.vcmpps(k2, zmm10, zmm11, 1); a.k(k3).vmovdqu32(ptr(rdx, i * 64), zmm12); n += 6;
+  }
+  a.ret(); return n + 1;
+}
+
 typedef int (*Scenario)(Assembler&);
 int main(int argc, char** argv) {
-  const char* names[] = {"straight", "calls", "loops", "mem"};
-  Scenario fns[] = {straight, calls, loops, mem};
+  const char* names[] = {"straight", "calls", "loops", "mem", "avx", "avx512"};
+  Scenario fns[] = {straight, calls, loops, mem, avx, avx512};
   int iters = argc > 1 ? atoi(argv[1]) : 2000;
   const char* dump = argc > 2 ? argv[2] : nullptr;
-  for (int s = 0; s < 4; s++) {
+  for (int s = 0; s < 6; s++) {
     CodeHolder code; code.init(Environment(Arch::kX64));
     Assembler a(&code);
     if (getenv("ASMJIT_OPT_SIZE")) a.add_encoding_options(EncodingOptions::kOptimizeForSize);
