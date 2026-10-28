@@ -17,7 +17,7 @@ fn countCb(_: ?*anyopaque, _: x.Event) void {
     cb_count += 1;
 }
 const Gp = x.Gp;
-const Error = x.Error;
+const Error = x.Error || x.vec.Error;
 
 const R = [15]Gp{ .rax, .rcx, .rdx, .rbx, .rbp, .rsi, .rdi, .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15 };
 const UNITS = 256;
@@ -100,6 +100,42 @@ fn Scenarios(comptime Asm: type) type {
             try a.ret();
             return n + 1;
         }
+
+        /// AVX/AVX2/FMA (VEX) through the table-driven `vec` encoder.
+        pub fn avx(a: Asm) Error!u32 {
+            const v = x.vec;
+            var n: u32 = 0;
+            for (0..UNITS) |iu| {
+                const i: i32 = @intCast(iu);
+                try v.emit(a.buf, .vmovups, .{ v.ymm(@intCast(iu % 16)), v.mem(x.ptr(.rdi, i * 32), 0) }, .{});
+                try v.emit(a.buf, .vfmadd231ps, .{ v.ymm(0), v.ymm(1), v.ymm(2) }, .{});
+                try v.emit(a.buf, .vaddps, .{ v.ymm(3), v.ymm(4), v.mem(x.ptrIdx(.rsi, .rcx, .x4, 64), 0) }, .{});
+                try v.emit(a.buf, .vpshufb, .{ v.xmm(5), v.xmm(6), v.xmm(7) }, .{});
+                try v.emit(a.buf, .vmovups, .{ v.mem(x.ptr(.rdx, i * 32), 0), v.ymm(8) }, .{});
+                try v.emit(a.buf, .vxorps, .{ v.ymm(9), v.ymm(9), v.ymm(9) }, .{});
+                n += 6;
+            }
+            try a.ret();
+            return n + 1;
+        }
+
+        /// AVX-512 (EVEX): opmask/zeroing, broadcast, {er}, compare into k, masked store.
+        pub fn avx512(a: Asm) Error!u32 {
+            const v = x.vec;
+            var n: u32 = 0;
+            for (0..UNITS) |iu| {
+                const i: i32 = @intCast(iu);
+                try v.emit(a.buf, .vaddps, .{ v.zmm(@intCast(iu % 32)), v.zmm(1), v.mem(x.ptr(.rdi, i * 64), 0) }, .{ .k = 1, .z = true });
+                try v.emit(a.buf, .vfmadd231pd, .{ v.zmm(2), v.zmm(3), v.bcst(v.mem(x.ptr(.rsi, 0), 8), 8) }, .{});
+                try v.emit(a.buf, .vpternlogd, .{ v.zmm(4), v.zmm(5), v.zmm(6), 0xAA }, .{});
+                try v.emit(a.buf, .vaddps, .{ v.zmm(7), v.zmm(8), v.zmm(9) }, .{ .rc = .rn });
+                try v.emit(a.buf, .vcmpps, .{ v.k(2), v.zmm(10), v.zmm(11), 1 }, .{});
+                try v.emit(a.buf, .vmovdqu32, .{ v.mem(x.ptr(.rdx, i * 64), 0), v.zmm(12) }, .{ .k = 3 });
+                n += 6;
+            }
+            try a.ret();
+            return n + 1;
+        }
     };
 }
 const S = Scenarios(A);
@@ -110,8 +146,8 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const iters: usize = if (args.len > 1) try std.fmt.parseInt(usize, args[1], 10) else 2000;
     const dump: ?[]const u8 = if (args.len > 2) args[2] else null;
-    const names = [_][]const u8{ "straight", "calls", "loops", "mem" };
-    const fns = .{ S.straight, S.calls, S.loops, S.mem };
+    const names = [_][]const u8{ "straight", "calls", "loops", "mem", "avx", "avx512" };
+    const fns = .{ S.straight, S.calls, S.loops, S.mem, S.avx, S.avx512 };
     // Scenarios are inlined into the timing loop (as LLVM did on its own before the safety
     // layer); this keeps the comparison with the earlier baseline like-for-like.
     inline for (names, fns) |name, f| {
@@ -193,5 +229,16 @@ test "bench scenarios: byte-identical to AsmJit, all safety-layer configurations
         inline for (goldens) |g| {
             try expectScenario(Asm, @field(Scenarios(Asm), g[0]), g[1], g[2]);
         }
+    }
+}
+
+// SIMD scenarios go through `x.vec.emit`, which bypasses assembler hooks, so only the
+// hook-free configurations are checked here.
+test "SIMD bench scenarios: byte-identical to AsmJit" {
+    inline for (.{ x.AssemblerT(.{}), x.AssemblerT(.{ .validate = true }) }) |Asm| {
+        inline for (.{
+            .{ "avx", @embedFile("ref/asmjit_avx.bin") },
+            .{ "avx512", @embedFile("ref/asmjit_avx512.bin") },
+        }) |g| try expectScenario(Asm, @field(Scenarios(Asm), g[0]), g[1], 1537);
     }
 }

@@ -149,7 +149,7 @@ fn vl(l: u2) u16 {
     return @as(u16, 16) << l;
 }
 
-fn matchKind(f: Form, kd: OpKind, o: Op) bool {
+inline fn matchKind(f: *const Form, kd: OpKind, o: Op) bool {
     switch (o) {
         .v => |v| return switch (kd.k) {
             .xmm => v.cls == .xmm,
@@ -223,7 +223,7 @@ fn regNum(o: Op) u8 {
     };
 }
 
-fn matches(f: Form, ops: []const Op, e: Extra) bool {
+fn matches(f: *const Form, ops: []const Op, e: Extra) bool {
     if (f.ops.len != ops.len) return false;
     for (f.ops, ops) |kd, o| if (!matchKind(f, kd, o)) return false;
     const evex = f.enc == .evex;
@@ -282,7 +282,7 @@ fn modrmMem(out: *Buf, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
     return null;
 }
 
-pub fn encodeForm(f: Form, ops: []const Op, e: Extra, out: *Buf) Error!?u8 {
+pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: *Buf) Error!?u8 {
     var reg: u8 = f.digit orelse 0;
     if (f.reg) |i| reg = regNum(ops[i]);
     var rm_reg: ?u8 = null;
@@ -424,7 +424,53 @@ pub fn encodeForm(f: Form, ops: []const Op, e: Extra, out: *Buf) Error!?u8 {
 pub fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
     var ops: [args.len]Op = undefined;
     inline for (args, 0..) |a, i| ops[i] = toOp(a);
-    return emitOps(buf, &@field(tbl.table, @tagName(mn)), &ops, e);
+    // Operand *types* are known at compile time: keep only the forms they can match
+    // (the aliased/implicit-operand fallback still sees every form).
+    const all = &@field(tbl.table, @tagName(mn));
+    const narrowed = comptime narrow(all, @TypeOf(args));
+    if (pick(narrowed, &ops, e)) |f| return emitForm(buf, f, &ops, e);
+    return emitOps(buf, all, &ops, e);
+}
+
+fn typeAccepts(comptime T: type, kd: Kind) bool {
+    return switch (T) {
+        V => switch (kd) {
+            .xmm, .ymm, .zmm, .mm, .k, .tmm, .st0, .sti, .sreg, .creg, .dreg, .fs, .gs => true,
+            else => false,
+        },
+        gp.Reg => switch (kd) {
+            .r8, .r16, .r32, .r64, .ax, .al, .cl, .eax, .rax, .dx => true,
+            else => false,
+        },
+        Mem => switch (kd) {
+            .mem, .vx, .vy, .vz, .maddr => true,
+            else => false,
+        },
+        Op => true,
+        else => kd == .imm,
+    };
+}
+
+fn narrow(comptime all: []const Form, comptime Args: type) []const Form {
+    @setEvalBranchQuota(1_000_000);
+    const fields = @typeInfo(Args).@"struct".fields;
+    var out: []const Form = &.{};
+    for (all) |f| {
+        if (f.ops.len != fields.len) continue;
+        var ok = true;
+        for (f.ops, fields) |kd, fld| ok = ok and typeAccepts(fld.type, kd.k);
+        if (ok) out = out ++ &[_]Form{f};
+    }
+    const final = out[0..out.len].*;
+    return &final;
+}
+
+fn emitForm(buf: *CodeBuffer, f: Form, ops: []const Op, e: Extra) Error!void {
+    try buf.ensure(17);
+    if (e.lock) buf.put8(0xF0);
+    var b: Buf = .{};
+    _ = try encodeForm(&f, ops, e, &b);
+    for (b.b[0..b.n]) |bt| buf.put8(bt);
 }
 
 fn allRegs(ops: []const Op) bool {
@@ -438,33 +484,30 @@ fn pick(forms: []const Form, ops: []const Op, e: Extra) ?Form {
     return pickEx(forms, ops, e, false);
 }
 
-fn has67(f: Form) bool {
+fn has67(f: *const Form) bool {
     for (f.pre) |p| if (p == 0x67) return true;
     return false;
 }
 
 fn pickEx(forms: []const Form, ops: []const Op, e: Extra, no67: bool) ?Form {
     const regs = allRegs(ops);
-    // 0: legacy/VEX preferred, 1: legacy/VEX any (not PreferEvex), 2: EVEX preferred,
-    // 3: EVEX any, 4: VEX of a PreferEvex instruction.
-    for (0..5) |level| {
-        for (forms) |f| {
-            const evex = f.enc == .evex;
-            if (evex != (level == 2 or level == 3)) continue;
-            const preferred = !(regs and f.rm != null and f.rm.? == 0 and f.reg != null) and !f.lowprio and
-                !(regs and f.w == 1 and f.enc == .xop);
-            switch (level) {
-                0 => if (!preferred or (f.late_vex and !e.vex)) continue,
-                1 => if (f.late_vex and !e.vex) continue,
-                2 => if (!preferred) continue,
-                3 => {},
-                else => if (!f.late_vex) continue,
-            }
-            if (no67 and has67(f)) continue;
-            if (matches(f, ops, e)) return f;
-        }
+    // Levels (lower wins): 0 legacy/VEX preferred, 1 legacy/VEX other (not PreferEvex),
+    // 2 EVEX preferred, 3 EVEX other, 4 VEX of a PreferEvex instruction.
+    var best: ?*const Form = null;
+    var best_level: u8 = 5;
+    for (forms) |*f| {
+        if (no67 and has67(f)) continue;
+        const evex = f.enc == .evex;
+        const preferred = !(regs and f.rm != null and f.rm.? == 0 and f.reg != null) and !f.lowprio and
+            !(regs and f.w == 1 and f.enc == .xop);
+        const level: u8 = if (evex) (if (preferred) 2 else 3) else if (f.late_vex and !e.vex) 4 else if (preferred) 0 else 1;
+        if (level >= best_level) continue;
+        if (!matches(f, ops, e)) continue;
+        best = f;
+        best_level = level;
+        if (level == 0) break;
     }
-    return null;
+    return if (best) |p| p.* else null;
 }
 
 fn isImplicit(o: Op) bool {
@@ -516,7 +559,7 @@ pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops_in: []const Op, e: Ext
     };
     const f = chosen orelse return error.NoMatchingForm;
     var b: Buf = .{};
-    _ = try encodeForm(f, ops, e, &b);
+    _ = try encodeForm(&f, ops, e, &b);
     try buf.ensure(18);
     if (e.lock) buf.put8(0xF0);
     for (b.b[0..b.n]) |bt| buf.put8(bt);
