@@ -74,6 +74,25 @@ Registers `X` (`.x0`..`.x30`, `.zr_sp` = register 31, SP or XZR depending on the
 | `ldr`, `str` | `[xn, #off]`, `off` multiple of 8, < 32768 |
 | `b`, `bl`, `bcond`, `cbz`, `cbnz`, `blr`, `ret`, `word(u32)` | branches; `word` emits a raw instruction |
 
+### C / C++ / Rust (`include/zigjit.h`)
+
+A stable C ABI with a header-only C++ RAII wrapper (`include/zigjit.hpp`). It is used from
+Rust via plain `extern "C"`. Full reference: [docs/c-api.md](docs/c-api.md).
+
+```c
+zj_buffer *b; zj_func *f;
+zj_buffer_new(&b);
+zj_a64_op ops[] = { zj_a64_x(0), zj_a64_x(0), zj_a64_x(1) };
+zj_a64_emit(b, "add", ops, 3);          /* any AsmJit mnemonic; errors are return codes */
+zj_a64_emit(b, "ret", NULL, 0);
+zj_finalize(b);
+zj_jit_add(b, &f);                      /* W^X executable copy */
+long r = ((long (*)(long, long))zj_func_ptr(f))(40, 2);
+```
+
+Examples for every language live in `examples/{c,cpp,rust,zig}`. Run them with `zig build examples`
+(add `-Drust=true` for Rust). They also run as part of `zig build test`.
+
 ## Safety
 
 Validation and emission hooks. Both are optional, chosen at comptime, and free when off.

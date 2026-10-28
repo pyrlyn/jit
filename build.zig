@@ -32,6 +32,65 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
+    // ---- C ABI library (include/zigjit.h) + examples in C, C++, Rust, Zig ----------------
+    const capi_mod = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    capi_mod.addOptions("zigjit_options", opts);
+    const lib_static = b.addLibrary(.{ .name = "zigjit", .linkage = .static, .root_module = capi_mod });
+    const lib_shared = b.addLibrary(.{ .name = "zigjit", .linkage = .dynamic, .root_module = capi_mod });
+    b.installArtifact(lib_static);
+    b.installArtifact(lib_shared);
+    b.installDirectory(.{ .source_dir = b.path("include"), .install_dir = .header, .install_subdir = "" });
+    b.step("lib", "Build libzigjit (static + shared) and install include/").dependOn(&b.addInstallArtifact(lib_static, .{}).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = capi_mod })).step);
+    // Plain object for foreign toolchains: Apple ld rejects Zig's archive members that are not
+    // 8-byte aligned ("64-bit mach-o not 8-byte aligned"), so external linkers get the .o.
+    const lib_obj = b.addObject(.{ .name = "zigjit", .root_module = capi_mod });
+
+    const examples_step = b.step("examples", "Build and run examples/{c,cpp,zig} (+ rust with -Drust=true)");
+    {
+        const m = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+        m.addCSourceFile(.{ .file = b.path("examples/c/main.c"), .flags = &.{"-std=c11"} });
+        m.addIncludePath(b.path("include"));
+        m.linkLibrary(lib_static);
+        examples_step.dependOn(&b.addRunArtifact(b.addExecutable(.{ .name = "example_c", .root_module = m })).step);
+    }
+    // C++ is built with the system compiler (`c++`, override with -Dcxx=...): Zig 0.16's bundled
+    // libc++ does not compile against current macOS SDKs.
+    {
+        const cxx = b.addSystemCommand(&.{ b.option([]const u8, "cxx", "examples: C++ compiler (default: c++)") orelse "c++", "-std=c++17", "-O1" });
+        cxx.addPrefixedDirectoryArg("-I", b.path("include"));
+        cxx.addFileArg(b.path("examples/cpp/main.cpp"));
+        cxx.addFileArg(lib_obj.getEmittedBin());
+        cxx.addArg("-o");
+        const cpp_exe = cxx.addOutputFileArg("example_cpp");
+        const run_cpp = std.Build.Step.Run.create(b, "run example_cpp");
+        run_cpp.addFileArg(cpp_exe);
+        examples_step.dependOn(&run_cpp.step);
+    }
+    const zig_example = b.addExecutable(.{ .name = "example_zig", .root_module = b.createModule(.{
+        .root_source_file = b.path("examples/zig/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zigjit", .module = zigjit }},
+    }) });
+    examples_step.dependOn(&b.addRunArtifact(zig_example).step);
+    if (b.option(bool, "rust", "examples: also build and run examples/rust with rustc (no crates)") orelse false) {
+        const rustc = b.addSystemCommand(&.{ "rustc", "--edition=2021", "-O", "-o" });
+        const rust_exe = rustc.addOutputFileArg("example_rust");
+        rustc.addFileArg(b.path("examples/rust/main.rs"));
+        rustc.addPrefixedFileArg("-Clink-arg=", lib_obj.getEmittedBin());
+        const run_rust = std.Build.Step.Run.create(b, "run example_rust");
+        run_rust.addFileArg(rust_exe);
+        examples_step.dependOn(&run_rust.step);
+    }
+    test_step.dependOn(examples_step);
+
     inline for (.{ "example_x86_64", "example_aarch64", "example_hooks", "bench_x86_64" }) |name| {
         const enabled = if (comptime std.mem.eql(u8, name, "example_hooks")) want_x86_64 and want_aarch64 else if (comptime std.mem.endsWith(u8, name, "aarch64")) want_aarch64 else want_x86_64;
         const dir = if (comptime std.mem.startsWith(u8, name, "bench")) "bench/" else "examples/";

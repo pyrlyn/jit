@@ -1,0 +1,44 @@
+// ZigJIT C example: JIT-compiles `long add(long a, long b)` for the host and calls it.
+#include <stdio.h>
+#include <zigjit.h>
+
+#define CHECK(x) do { int s_ = (x); if (s_ != ZJ_OK) { fprintf(stderr, "%s: %s\n", #x, zj_status_str(s_)); return 1; } } while (0)
+
+int main(void) {
+    zj_buffer *b;
+    CHECK(zj_buffer_new(&b));
+    uint32_t done;
+    CHECK(zj_label_new(b, &done));
+#if defined(__aarch64__)
+    zj_a64_op add[] = { zj_a64_x(0), zj_a64_x(0), zj_a64_x(1) };
+    CHECK(zj_a64_emit(b, "add", add, 3));
+    CHECK(zj_a64_branch(b, -1, done));            /* b done */
+    CHECK(zj_a64_emit(b, "brk", (zj_a64_op[]){ zj_a64_imm(1) }, 1)); /* skipped */
+    CHECK(zj_label_bind(b, done));
+    CHECK(zj_a64_emit(b, "ret", NULL, 0));
+#elif defined(__x86_64__)
+    zj_x64_op mov[] = { zj_x64_reg(ZJ_RAX, 8), zj_x64_reg(ZJ_RDI, 8) };
+    zj_x64_op add[] = { zj_x64_reg(ZJ_RAX, 8), zj_x64_reg(ZJ_RSI, 8) };
+    CHECK(zj_x64_emit(b, "mov", mov, 2));
+    CHECK(zj_x64_emit(b, "add", add, 2));
+    CHECK(zj_x64_jump(b, -1, done));              /* jmp done */
+    CHECK(zj_x64_emit(b, "int3", NULL, 0));       /* skipped */
+    CHECK(zj_label_bind(b, done));
+    CHECK(zj_x64_emit(b, "ret", NULL, 0));
+#else
+#error "unsupported host"
+#endif
+    CHECK(zj_finalize(b));
+
+    /* Errors are values, not crashes: */
+    if (zj_a64_emit(b, "no_such_insn", NULL, 0) != ZJ_ERR_UNKNOWN_MNEMONIC) return 1;
+
+    zj_func *f;
+    CHECK(zj_jit_add(b, &f));
+    long (*fn)(long, long) = (long (*)(long, long))zj_func_ptr(f);
+    long r = fn(40, 2);
+    printf("zigjit %u.%u.%u (C): add(40, 2) = %ld\n", zj_version() >> 16, (zj_version() >> 8) & 0xFF, zj_version() & 0xFF, r);
+    zj_func_free(f);
+    zj_buffer_free(b);
+    return r == 42 ? 0 : 1;
+}
