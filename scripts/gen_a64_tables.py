@@ -175,6 +175,8 @@ def main(write=True):
     # Fixed-bit corrections (stale U/opc bits in the JSON DB), as XOR masks keyed by "inst | op".
     # Derived from AsmJit's expected encodings by scripts/derive_a64_overrides.py.
     ovr = json.load(open(OVR)) if os.path.exists(OVR) else {}
+    # Forms missing from the DB: `ret` without an operand (= ret x30).
+    db["instructions"].append({"category": "BASE", "data": [{"inst": "ret", "op": "11010110|010|11111|0|00000|11110|00000"}]})
     table = collections.OrderedDict()
     skipped = collections.Counter()
     for g in db["instructions"]:

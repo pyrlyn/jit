@@ -2001,7 +2001,9 @@ pub const table = struct {
     };
     pub const @"ret" = [_]Form{
         // ret Xn
-        .{ .bits = 0xD45F0000, .fields = &.{.{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rn" }} },
+        .{ .bits = 0xD65F0000, .fields = &.{.{ .n = .@"Rn", .at = 5, .w = 5, .src = 0 }}, .ops = &.{.{ .k = .x, .f = .@"Rn" }} },
+        // ret
+        .{ .bits = 0xD65F03C0, .fields = &.{}, .ops = &.{} },
     };
     pub const @"rev" = [_]Form{
         // rev Wd, Wn
