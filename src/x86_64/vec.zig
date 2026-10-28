@@ -247,12 +247,29 @@ fn matches(f: *const Form, ops: []const Op, e: Extra) bool {
 
 const Buf = gp.Buf;
 
+/// Output cursor writing directly into reserved code-buffer memory.
+const DBuf = struct {
+    p: [*]u8,
+    n: u8 = 0,
+    inline fn u8_(s: *DBuf, v: u8) void {
+        s.p[s.n] = v;
+        s.n += 1;
+    }
+    inline fn int(s: *DBuf, v: i64, bytes: u8) void {
+        var t: u64 = @bitCast(v);
+        for (0..bytes) |_| {
+            s.u8_(@truncate(t));
+            t >>= 8;
+        }
+    }
+};
+
 fn fitsI8(v: i64) bool {
     return v >= -128 and v <= 127;
 }
 
 /// ModRM (+SIB, disp) for memory `m` with reg field `r3`; `n` = EVEX disp8 scale (1 otherwise).
-fn modrmMem(out: *Buf, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
+inline fn modrmMem(out: anytype, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
     const r = (r3 & 7) << 3;
     if (m.rip) {
         out.u8_(r | 5);
@@ -282,7 +299,7 @@ fn modrmMem(out: *Buf, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
     return null;
 }
 
-pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: *Buf) Error!?u8 {
+pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error!?u8 {
     var reg: u8 = f.digit orelse 0;
     if (f.reg) |i| reg = regNum(ops[i]);
     var rm_reg: ?u8 = null;
@@ -421,15 +438,74 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: *Buf) Error!?u
 }
 
 /// Emits `mn` with operands `args` (tuple of `V` / `gp.Reg` / `Mem` / integers).
-pub fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
+///
+/// Operand *types* are comptime, so the candidate forms are narrowed and put in AsmJit priority
+/// order at compile time; each candidate is then checked and encoded with its form as a comptime
+/// constant (register-class tests and the encoder fold to a few compares and stores).
+pub inline fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
     var ops: [args.len]Op = undefined;
     inline for (args, 0..) |a, i| ops[i] = toOp(a);
-    // Operand *types* are known at compile time: keep only the forms they can match
-    // (the aliased/implicit-operand fallback still sees every form).
     const all = &@field(tbl.table, @tagName(mn));
-    const narrowed = comptime narrow(all, @TypeOf(args));
-    if (pick(narrowed, &ops, e)) |f| return emitForm(buf, f, &ops, e);
-    return emitOps(buf, all, &ops, e);
+    const Args = @TypeOf(args);
+    if (comptime specializable(Args)) {
+        const sorted = comptime prioritized(all, Args);
+        if (!e.vex) {
+            inline for (sorted) |f| {
+                if (@call(.always_inline, matches, .{ &f, &ops, e })) return emitFormC(buf, f, &ops, e);
+            }
+            return emitOps(buf, all, &ops, e);
+        }
+    }
+    return emitSlow(buf, all, comptime narrow(all, Args), &ops, e);
+}
+
+/// Same result as `emit`, without per-call-site specialization (small code; used by the
+/// AsmJit test port, which has ~18k distinct call sites).
+pub fn emitCompact(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
+    var ops: [args.len]Op = undefined;
+    inline for (args, 0..) |a, i| ops[i] = toOp(a);
+    const all = &@field(tbl.table, @tagName(mn));
+    return emitSlow(buf, all, comptime narrow(all, @TypeOf(args)), &ops, e);
+}
+
+noinline fn emitSlow(buf: *CodeBuffer, all: []const Form, narrowed: []const Form, ops: []const Op, e: Extra) Error!void {
+    if (pick(narrowed, ops, e)) |f| return emitForm(buf, f, ops, e);
+    return emitOps(buf, all, ops, e);
+}
+
+fn specializable(comptime Args: type) bool {
+    for (@typeInfo(Args).@"struct".fields) |fld| if (fld.type == Op) return false;
+    return true;
+}
+
+/// Narrowed forms, stably sorted by `pickEx` level for `.vex = false` (register-only-ness is
+/// known from the operand types).
+fn prioritized(comptime all: []const Form, comptime Args: type) []const Form {
+    @setEvalBranchQuota(1_000_000);
+    const nar = narrow(all, Args);
+    var regs = true;
+    for (@typeInfo(Args).@"struct".fields) |fld| if (fld.type == Mem) {
+        regs = false;
+    };
+    var out: []const Form = &.{};
+    for (0..5) |lvl| for (nar) |f| {
+        const evex = f.enc == .evex;
+        const preferred = !(regs and f.rm != null and f.rm.? == 0 and f.reg != null) and !f.lowprio and
+            !(regs and f.w == 1 and f.enc == .xop);
+        const level: u8 = if (evex) (if (preferred) 2 else 3) else if (f.late_vex) 4 else if (preferred) 0 else 1;
+        if (level == lvl) out = out ++ &[_]Form{f};
+    };
+    const final = out[0..out.len].*;
+    return &final;
+}
+
+inline fn emitFormC(buf: *CodeBuffer, comptime f: Form, ops: []const Op, e: Extra) Error!void {
+    try buf.ensure(17);
+    if (e.lock) buf.put8(0xF0);
+    // Encode straight into the buffer (ensure() left >= 17 bytes); commit only on success.
+    var d: DBuf = .{ .p = buf.data[buf.len..].ptr };
+    _ = try @call(.always_inline, encodeForm, .{ &f, ops, e, &d });
+    buf.len += d.n;
 }
 
 fn typeAccepts(comptime T: type, kd: Kind) bool {
