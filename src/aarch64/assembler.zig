@@ -1,5 +1,6 @@
 //! AArch64 Assembler (A64): fixed 32-bit words, emitted directly.
-//! Subset: movz/movk/mov(imm64 via movz+movk)/mov reg, add/sub (reg, imm12), mul,
+//! Subset: movz/movk/mov(imm64 via movz+movk)/mov reg, add/sub (reg, imm12), mul, madd/msub/mneg,
+//! smulh/umulh, sdiv/udiv, neg, and/orr/eor (reg), lsl/lsr/asr (imm), csel/cset,
 //! cmp, b, b.cond, cbz/cbnz, bl, blr, ret, ldr/str (unsigned imm offset).
 const std = @import("std");
 const core = @import("../core/code_buffer.zig");
@@ -59,13 +60,14 @@ pub const Cond = enum(u4) { eq, ne, hs, lo, mi, pl, vs, vc, hi, ls, ge, lt, gt, 
 
 /// Instruction id seen by validation and hooks (one per public emitter; `movImm` is
 /// reported as its movz/movk parts).
-pub const Inst = enum { word, movz, movk, mov, add, sub, mul, add_imm, sub_imm, cmp, cmp_imm, ldr, str, ret, blr, b, bl, bcond, cbz, cbnz };
+pub const Inst = enum { word, movz, movk, mov, add, sub, mul, add_imm, sub_imm, cmp, cmp_imm, ldr, str, ret, blr, b, bl, bcond, cbz, cbnz, sdiv, udiv, madd, msub, mneg, smulh, umulh, neg, and_, orr, eor, csel, cset, lsl_imm, lsr_imm, asr_imm };
 
 /// Operands of one instruction for validation and hooks (unused fields are null).
 pub const Ops = struct {
     rd: ?X = null,
     rn: ?X = null,
     rm: ?X = null,
+    ra: ?X = null,
     imm: ?i64 = null,
     label: ?Label = null,
     cond: ?Cond = null,
@@ -145,7 +147,7 @@ pub fn AssemblerT(comptime opts: Options) type {
         /// Operand check before encoding (only compiled when `opts.validate`), driven by the
         /// AsmJit form: register-31 meaning, immediate width/scale, CPU features.
         pub inline fn validate(a: Self, comptime id: Inst, ops: Ops) Error!void {
-            inline for (.{ "rd", "rn", "rm" }) |f| {
+            inline for (.{ "rd", "rn", "rm", "ra" }) |f| {
                 if (@field(ops, f)) |r| if (r == .zr_sp and !reg31Allowed(id, f)) return error.InvalidOperand;
             }
             if (ops.label) |l| if (!a.buf.isValidLabel(l)) return error.InvalidLabel;
@@ -239,6 +241,22 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         fn rawMul(a: Self, rd: X, rn: X, rm: X) Error!void {
             return a.put(0x9B007C00 | rm.n() << 16 | rn.n() << 5 | rd.n());
+        }
+        fn rawRRR(a: Self, comptime base: u32, rd: X, rn: X, rm: X) Error!void {
+            return a.put(base | rm.n() << 16 | rn.n() << 5 | rd.n());
+        }
+        fn rawRRRR(a: Self, comptime base: u32, rd: X, rn: X, rm: X, ra: X) Error!void {
+            return a.put(base | rm.n() << 16 | ra.n() << 10 | rn.n() << 5 | rd.n());
+        }
+        fn rawCsel(a: Self, rd: X, rn: X, rm: X, c: Cond) Error!void {
+            return a.put(0x9A800000 | rm.n() << 16 | @as(u32, @intFromEnum(c)) << 12 | rn.n() << 5 | rd.n());
+        }
+        fn rawCset(a: Self, rd: X, c: Cond) Error!void {
+            // csinc Xd, xzr, xzr, invert(c)
+            return a.put(0x9A9F07E0 | @as(u32, @intFromEnum(c) ^ 1) << 12 | rd.n());
+        }
+        fn rawShiftImm(a: Self, comptime base: u32, rd: X, rn: X, immr: u6, imms: u6) Error!void {
+            return a.put(base | @as(u32, immr) << 16 | @as(u32, imms) << 10 | rn.n() << 5 | rd.n());
         }
         fn rawAddImm(a: Self, rd: X, rn: X, imm12: u12) Error!void {
             return a.put(0x91000000 | @as(u32, imm12) << 10 | rn.n() << 5 | rd.n());
@@ -387,6 +405,79 @@ pub fn AssemblerT(comptime opts: Options) type {
             if (!a.active()) return a.rawMul(rd, rn, rm);
             return a.emit(.mul, .{ .rd = rd, .rn = rn, .rm = rm }, rawMul, .{ rd, rn, rm });
         }
+        pub fn sdiv(a: Self, rd: X, rn: X, rm: X) Error!void {
+            if (!a.active()) return a.rawRRR(0x9AC00C00, rd, rn, rm);
+            return a.emit(.sdiv, .{ .rd = rd, .rn = rn, .rm = rm }, rawRRR, .{ 0x9AC00C00, rd, rn, rm });
+        }
+        pub fn udiv(a: Self, rd: X, rn: X, rm: X) Error!void {
+            if (!a.active()) return a.rawRRR(0x9AC00800, rd, rn, rm);
+            return a.emit(.udiv, .{ .rd = rd, .rn = rn, .rm = rm }, rawRRR, .{ 0x9AC00800, rd, rn, rm });
+        }
+        pub fn mneg(a: Self, rd: X, rn: X, rm: X) Error!void {
+            if (!a.active()) return a.rawRRR(0x9B00FC00, rd, rn, rm);
+            return a.emit(.mneg, .{ .rd = rd, .rn = rn, .rm = rm }, rawRRR, .{ 0x9B00FC00, rd, rn, rm });
+        }
+        pub fn smulh(a: Self, rd: X, rn: X, rm: X) Error!void {
+            if (!a.active()) return a.rawRRR(0x9B407C00, rd, rn, rm);
+            return a.emit(.smulh, .{ .rd = rd, .rn = rn, .rm = rm }, rawRRR, .{ 0x9B407C00, rd, rn, rm });
+        }
+        pub fn umulh(a: Self, rd: X, rn: X, rm: X) Error!void {
+            if (!a.active()) return a.rawRRR(0x9BC07C00, rd, rn, rm);
+            return a.emit(.umulh, .{ .rd = rd, .rn = rn, .rm = rm }, rawRRR, .{ 0x9BC07C00, rd, rn, rm });
+        }
+        pub fn and_(a: Self, rd: X, rn: X, rm: X) Error!void {
+            if (!a.active()) return a.rawRRR(0x8A000000, rd, rn, rm);
+            return a.emit(.and_, .{ .rd = rd, .rn = rn, .rm = rm }, rawRRR, .{ 0x8A000000, rd, rn, rm });
+        }
+        pub fn orr(a: Self, rd: X, rn: X, rm: X) Error!void {
+            if (!a.active()) return a.rawRRR(0xAA000000, rd, rn, rm);
+            return a.emit(.orr, .{ .rd = rd, .rn = rn, .rm = rm }, rawRRR, .{ 0xAA000000, rd, rn, rm });
+        }
+        pub fn eor(a: Self, rd: X, rn: X, rm: X) Error!void {
+            if (!a.active()) return a.rawRRR(0xCA000000, rd, rn, rm);
+            return a.emit(.eor, .{ .rd = rd, .rn = rn, .rm = rm }, rawRRR, .{ 0xCA000000, rd, rn, rm });
+        }
+        /// madd Xd, Xn, Xm, Xa: Xd = Xa + Xn * Xm.
+        pub fn madd(a: Self, rd: X, rn: X, rm: X, ra: X) Error!void {
+            if (!a.active()) return a.rawRRRR(0x9B000000, rd, rn, rm, ra);
+            return a.emit(.madd, .{ .rd = rd, .rn = rn, .rm = rm, .ra = ra }, rawRRRR, .{ 0x9B000000, rd, rn, rm, ra });
+        }
+        /// msub Xd, Xn, Xm, Xa: Xd = Xa - Xn * Xm.
+        pub fn msub(a: Self, rd: X, rn: X, rm: X, ra: X) Error!void {
+            if (!a.active()) return a.rawRRRR(0x9B008000, rd, rn, rm, ra);
+            return a.emit(.msub, .{ .rd = rd, .rn = rn, .rm = rm, .ra = ra }, rawRRRR, .{ 0x9B008000, rd, rn, rm, ra });
+        }
+        /// neg Xd, Xm (= sub Xd, xzr, Xm).
+        pub fn neg(a: Self, rd: X, rm: X) Error!void {
+            if (!a.active()) return a.rawRRR(0xCB0003E0, rd, .x0, rm);
+            return a.emit(.neg, .{ .rd = rd, .rm = rm }, rawRRR, .{ 0xCB0003E0, rd, X.x0, rm });
+        }
+        pub fn csel(a: Self, rd: X, rn: X, rm: X, c: Cond) Error!void {
+            if (!a.active()) return a.rawCsel(rd, rn, rm, c);
+            return a.emit(.csel, .{ .rd = rd, .rn = rn, .rm = rm, .cond = c }, rawCsel, .{ rd, rn, rm, c });
+        }
+        /// cset Xd, c: Xd = 1 if c holds, else 0 (`al`/`nv` are not valid conditions here).
+        pub fn cset(a: Self, rd: X, c: Cond) Error!void {
+            if (c == .al or c == .nv) return error.InvalidOperand;
+            if (!a.active()) return a.rawCset(rd, c);
+            return a.emit(.cset, .{ .rd = rd, .cond = c }, rawCset, .{ rd, c });
+        }
+        /// lsl Xd, Xn, #s (= ubfm Xd, Xn, #(-s mod 64), #(63-s)).
+        pub fn lslImm(a: Self, rd: X, rn: X, s: u6) Error!void {
+            const immr: u6 = @truncate(@as(u7, 64) - s);
+            if (!a.active()) return a.rawShiftImm(0xD3400000, rd, rn, immr, 63 - s);
+            return a.emit(.lsl_imm, .{ .rd = rd, .rn = rn, .imm = s }, rawShiftImm, .{ 0xD3400000, rd, rn, immr, 63 - s });
+        }
+        /// lsr Xd, Xn, #s (= ubfm Xd, Xn, #s, #63).
+        pub fn lsrImm(a: Self, rd: X, rn: X, s: u6) Error!void {
+            if (!a.active()) return a.rawShiftImm(0xD3400000, rd, rn, s, 63);
+            return a.emit(.lsr_imm, .{ .rd = rd, .rn = rn, .imm = s }, rawShiftImm, .{ 0xD3400000, rd, rn, s, 63 });
+        }
+        /// asr Xd, Xn, #s (= sbfm Xd, Xn, #s, #63).
+        pub fn asrImm(a: Self, rd: X, rn: X, s: u6) Error!void {
+            if (!a.active()) return a.rawShiftImm(0x93400000, rd, rn, s, 63);
+            return a.emit(.asr_imm, .{ .rd = rd, .rn = rn, .imm = s }, rawShiftImm, .{ 0x93400000, rd, rn, s, 63 });
+        }
         pub fn addImm(a: Self, rd: X, rn: X, imm12: u12) Error!void {
             if (!a.active()) return a.rawAddImm(rd, rn, imm12);
             return a.emit(.add_imm, .{ .rd = rd, .rn = rn, .imm = imm12 }, rawAddImm, .{ rd, rn, imm12 });
@@ -480,4 +571,65 @@ test "a64 branches" {
     try a.bind(out);
     try a.ret();
     try expectWords(&.{ 0xB4000060, 0xD1000400, 0x17FFFFFE, 0xD65F03C0 }, &cb);
+}
+
+test "a64 data processing (LLVM words; matches the AsmJit-parity encoder)" {
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    const a = Assembler.init(&cb);
+    try a.sdiv(.x0, .x1, .x2);
+    try a.udiv(.x3, .x4, .x5);
+    try a.madd(.x0, .x1, .x2, .x3);
+    try a.msub(.x4, .x5, .x6, .x7);
+    try a.mneg(.x8, .x9, .x10);
+    try a.smulh(.x11, .x12, .x13);
+    try a.umulh(.x14, .x15, .x16);
+    try a.neg(.x17, .x18);
+    try a.and_(.x0, .x1, .x2);
+    try a.orr(.x3, .x4, .x5);
+    try a.eor(.x6, .x7, .x8);
+    try a.csel(.x0, .x1, .x2, .lt);
+    try a.cset(.x3, .eq);
+    try a.cset(.x4, .hi);
+    try a.lslImm(.x5, .x6, 3);
+    try a.lslImm(.x5, .x6, 63);
+    try a.lsrImm(.x7, .x8, 1);
+    try a.asrImm(.x9, .x10, 63);
+    // clang -c -target aarch64 (LLVM's assembler) for the same instructions.
+    const want = [_]u32{ 0x9AC20C20, 0x9AC50883, 0x9B020C20, 0x9B069CA4, 0x9B0AFD28, 0x9B4D7D8B, 0x9BD07DEE, 0xCB1203F1, 0x8A020020, 0xAA050083, 0xCA0800E6, 0x9A82B020, 0x9A9F17E3, 0x9A9F97E4, 0xD37DF0C5, 0xD34100C5, 0xD341FD07, 0x937FFD49 };
+    // The generic encoder (AsmJit test-suite parity) must agree word for word.
+    const a64 = @import("a64.zig");
+    const generic = [_]struct { a64.Mnemonic, []const a64.Op }{
+        .{ .sdiv, &.{ a64.x(0), a64.x(1), a64.x(2) } },
+        .{ .udiv, &.{ a64.x(3), a64.x(4), a64.x(5) } },
+        .{ .madd, &.{ a64.x(0), a64.x(1), a64.x(2), a64.x(3) } },
+        .{ .msub, &.{ a64.x(4), a64.x(5), a64.x(6), a64.x(7) } },
+        .{ .mneg, &.{ a64.x(8), a64.x(9), a64.x(10) } },
+        .{ .smulh, &.{ a64.x(11), a64.x(12), a64.x(13) } },
+        .{ .umulh, &.{ a64.x(14), a64.x(15), a64.x(16) } },
+        .{ .neg, &.{ a64.x(17), a64.x(18) } },
+        .{ .@"and", &.{ a64.x(0), a64.x(1), a64.x(2) } },
+        .{ .orr, &.{ a64.x(3), a64.x(4), a64.x(5) } },
+        .{ .eor, &.{ a64.x(6), a64.x(7), a64.x(8) } },
+        .{ .csel, &.{ a64.x(0), a64.x(1), a64.x(2), a64.cond(@intFromEnum(Cond.lt)) } },
+        .{ .cset, &.{ a64.x(3), a64.cond(@intFromEnum(Cond.eq)) } },
+        .{ .cset, &.{ a64.x(4), a64.cond(@intFromEnum(Cond.hi)) } },
+        .{ .lsl, &.{ a64.x(5), a64.x(6), a64.imm(3) } },
+        .{ .lsl, &.{ a64.x(5), a64.x(6), a64.imm(63) } },
+        .{ .lsr, &.{ a64.x(7), a64.x(8), a64.imm(1) } },
+        .{ .asr, &.{ a64.x(9), a64.x(10), a64.imm(63) } },
+    };
+    for (generic, want) |g, w| try std.testing.expectEqual(w, (a64.encodeMnIdx(g[0], g[1]) orelse return error.NoMatchingForm).word);
+    try expectWords(&want, &cb);
+}
+
+test "a64 data processing operand checks" {
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    const a = AssemblerT(.{ .validate = true }).init(&cb);
+    try std.testing.expectError(error.InvalidOperand, a.sdiv(.zr_sp, .x1, .x2));
+    try std.testing.expectError(error.InvalidOperand, a.madd(.x0, .x1, .x2, .zr_sp));
+    try std.testing.expectError(error.InvalidOperand, a.and_(.zr_sp, .x1, .x2));
+    try std.testing.expectError(error.InvalidOperand, a.cset(.x0, .al));
+    try std.testing.expectEqual(@as(usize, 0), cb.len);
 }
