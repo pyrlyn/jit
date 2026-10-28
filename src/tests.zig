@@ -738,7 +738,8 @@ test "jit_runtime: dual mapping runs code and patches through the RW view" {
     try t.expectEqual(@as(u32, 7), f.ptr(F)());
     try t.expectEqual(@as(u8, if (x86) 0xcc else 0), f.rw[f.rw.len - 1]); // trap-filled tail
     if (rt.underRosetta()) return; // Rosetta does not observe writes through the alias
-    if (x86) f.write(1, &.{42}) else f.write(0, std.mem.asBytes(&@as(u32, 0x52800540)));
+    if (x86) try f.write(1, &.{42}) else try f.write(0, std.mem.asBytes(&@as(u32, 0x52800540)));
+    try std.testing.expectError(error.OutOfBounds, f.write(f.rw.len - 1, &.{ 0, 0 }));
     try t.expectEqual(@as(u32, 42), f.ptr(F)());
 }
 

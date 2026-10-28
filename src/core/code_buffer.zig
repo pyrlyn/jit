@@ -25,7 +25,7 @@ pub const Fixup = struct {
     kind: FixupKind,
 };
 
-pub const Error = error{ OutOfMemory, UnboundLabel, LabelAlreadyBound, DisplacementOutOfRange, InvalidLabel, CodeTooLarge, TooManyLabels, EmitFailed };
+pub const Error = error{ OutOfMemory, UnboundLabel, LabelAlreadyBound, DisplacementOutOfRange, InvalidLabel, CodeTooLarge, TooManyLabels, EmitFailed, InvalidFixup };
 
 /// Code is limited to 2 GiB so every rel32 / label offset fits in an i32 / u32.
 pub const max_code_size: usize = std.math.maxInt(i32);
@@ -162,12 +162,17 @@ pub const CodeBuffer = struct {
         p.* = self.offset();
     }
 
+    /// Bound offset of `l`, or null if unbound or not created by this buffer.
     pub inline fn labelOffset(self: *const CodeBuffer, l: Label) ?u32 {
+        if (l.id >= self.labels.items.len) return null;
         const o = self.labels.items[l.id];
         return if (o == unbound) null else o;
     }
 
+    /// Errors: `InvalidLabel` (label not created by this buffer). The patched field must lie
+    /// inside the emitted code by `finalize` time, otherwise `finalize` returns `InvalidFixup`.
     pub inline fn addFixup(self: *CodeBuffer, f: Fixup) Error!void {
+        if (f.label >= self.labels.items.len) return error.InvalidLabel;
         if (self.fixups.items.len == self.fixups.capacity) try self.growFixups();
         self.fixups.appendAssumeCapacity(f);
     }
@@ -186,7 +191,7 @@ pub const CodeBuffer = struct {
     pub fn unresolvedLabels(self: *const CodeBuffer, out: []u32) []u32 {
         var n: usize = 0;
         outer: for (self.fixups.items) |f| {
-            if (self.labels.items[f.label] != unbound) continue;
+            if (f.label < self.labels.items.len and self.labels.items[f.label] != unbound) continue;
             for (out[0..n]) |id| if (id == f.label) continue :outer;
             if (n == out.len) break;
             out[n] = f.label;
@@ -204,6 +209,12 @@ pub const CodeBuffer = struct {
         if (self.len > self.limit()) return error.CodeTooLarge;
         // Pass 1: check everything, so a failing finalize leaves the code untouched.
         for (self.fixups.items) |f| {
+            if (f.label >= self.labels.items.len) return error.InvalidLabel;
+            const width: usize = switch (f.kind) {
+                .rel8 => 1,
+                .rel32, .a64_imm26, .a64_imm19 => 4,
+            };
+            if (@as(usize, f.at) + width > self.len or f.base > self.len) return error.InvalidFixup;
             const target = self.labels.items[f.label];
             if (target == unbound) return error.UnboundLabel;
             const disp: i64 = @as(i64, target) - @as(i64, f.base);
@@ -228,10 +239,10 @@ pub const CodeBuffer = struct {
                     var w = std.mem.readInt(u32, p[0..4], .little);
                     if (f.kind == .a64_imm26) {
                         if (words < -(1 << 25) or words >= (1 << 25)) return error.DisplacementOutOfRange;
-                        w |= @as(u32, @truncate(@as(u64, @bitCast(words)))) & 0x03FF_FFFF;
+                        w = (w & ~@as(u32, 0x03FF_FFFF)) | (@as(u32, @truncate(@as(u64, @bitCast(words)))) & 0x03FF_FFFF);
                     } else {
                         if (words < -(1 << 18) or words >= (1 << 18)) return error.DisplacementOutOfRange;
-                        w |= (@as(u32, @truncate(@as(u64, @bitCast(words)))) & 0x7FFFF) << 5;
+                        w = (w & ~@as(u32, 0x7FFFF << 5)) | ((@as(u32, @truncate(@as(u64, @bitCast(words)))) & 0x7FFFF) << 5);
                     }
                     std.mem.writeInt(u32, p[0..4], w, .little);
                 },
@@ -252,4 +263,17 @@ test "labels and rel32 fixup" {
     try cb.bind(l);
     try cb.finalize();
     try std.testing.expectEqualSlices(u8, &.{ 0xE9, 0, 0, 0, 0 }, cb.code());
+}
+
+test "fixup bounds and label validation" {
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    const l = try cb.newLabel();
+    try std.testing.expectError(error.InvalidLabel, cb.addFixup(.{ .at = 0, .base = 0, .label = 7, .kind = .rel32 }));
+    try std.testing.expectEqual(@as(?u32, null), cb.labelOffset(.{ .id = 99 }));
+    try cb.emitBytes(&.{ 0xE9, 0, 0 });
+    try cb.addFixup(.{ .at = 1, .base = 5, .label = l.id, .kind = .rel32 }); // field runs past the end
+    try cb.bind(l);
+    try std.testing.expectError(error.InvalidFixup, cb.finalize());
+    try std.testing.expectEqualSlices(u8, &.{ 0xE9, 0, 0 }, cb.code());
 }
