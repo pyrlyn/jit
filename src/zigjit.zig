@@ -27,6 +27,7 @@ test {
     if (opts.asmjit_tests) _ = @import("asmjit_x86_tests.zig");
     if (opts.asmjit_tests) _ = @import("asmjit_a64_tests.zig");
     if (opts.gp_fuzz) _ = @import("gp_fuzz.zig");
+    _ = @import("fuzz.zig");
     if (opts.x86_64) _ = x86_64;
     if (opts.aarch64) _ = aarch64;
 }

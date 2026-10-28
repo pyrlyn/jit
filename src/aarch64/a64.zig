@@ -662,7 +662,22 @@ fn signedName(n: Name) bool {
     return n == .offS or n == .relS or n == .immS;
 }
 
+/// Rejects operand values no form can accept (instead of relying on each spec to catch them).
+fn opsValid(ops: []const Op) bool {
+    for (ops) |o| switch (o) {
+        .r => |r| if (r.id > 32) return false,
+        .mem => |m| {
+            if (m.base.id > 32) return false;
+            if (m.index) |i| if (i.id > 31) return false;
+        },
+        .fimm => |v| if (!std.math.isFinite(v)) return false,
+        else => {},
+    };
+    return true;
+}
+
 pub fn encode(f: *const Form, ops: []const Op) ?u32 {
+    if (!opsValid(ops)) return null;
     var c: Ctx = .{};
     if (!matchOps(f, ops, &c)) return null;
     var bits = f.bits;

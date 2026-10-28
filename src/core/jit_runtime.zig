@@ -22,7 +22,7 @@ const MAP_JIT = 0x800;
 const use_map_jit = is_darwin and builtin.cpu.arch == .aarch64;
 const MAP_FAILED: usize = std.math.maxInt(usize);
 
-pub const Error = error{ MapFailed, ProtectFailed };
+pub const Error = error{ MapFailed, ProtectFailed, OutOfBounds };
 
 pub const Function = struct {
     mem: []align(4096) u8,
@@ -47,10 +47,14 @@ pub fn add(cb: *const CodeBuffer) Error!Function {
     if (@intFromPtr(p) == MAP_FAILED) return error.MapFailed;
     const mem: []align(4096) u8 = @as([*]align(4096) u8, @ptrCast(@alignCast(p)))[0..size];
     if (use_map_jit) {
-        pthread_jit_write_protect_np(0); // this thread: writable
+        // MAP_JIT pages are RWX in the page tables, but Apple Silicon enforces W^X per thread:
+        // they are writable only inside this window and only for this thread.
+        pthread_jit_write_protect_np(0); // this thread: writable, not executable
+        defer pthread_jit_write_protect_np(1); // this thread: executable, not writable
         @memcpy(mem[0..code.len], code);
         fillTrap(mem[code.len..]);
-        pthread_jit_write_protect_np(1); // this thread: executable
+    }
+    if (use_map_jit) {
         sys_icache_invalidate(mem.ptr, code.len);
     } else {
         @memcpy(mem[0..code.len], code);
@@ -92,7 +96,9 @@ pub const DualFunction = struct {
         return @ptrCast(@alignCast(self.rx.ptr));
     }
     /// Patches code through the RW view and flushes the icache for the RX view.
-    pub fn write(self: DualFunction, offset: usize, bytes: []const u8) void {
+    /// Returns `OutOfBounds` (and writes nothing) if the range does not fit the mapping.
+    pub fn write(self: DualFunction, offset: usize, bytes: []const u8) Error!void {
+        if (offset > self.rw.len or bytes.len > self.rw.len - offset) return error.OutOfBounds;
         @memcpy(self.rw[offset..][0..bytes.len], bytes);
         flush(self.rx[offset..].ptr, bytes.len);
     }
@@ -171,6 +177,6 @@ pub fn allocDual(min_size: usize) Error!DualFunction {
 pub fn addDual(cb: *const CodeBuffer) Error!DualFunction {
     const code = cb.code();
     const f = try allocDual(code.len);
-    f.write(0, code);
+    f.write(0, code) catch unreachable; // allocDual sized the mapping for `code`
     return f;
 }
