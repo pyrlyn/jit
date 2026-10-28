@@ -20,7 +20,7 @@ const Gp = x.Gp;
 
 pub const Error = core.Error || error{ InvalidOperand, NoMatchingForm };
 
-pub const Kind = enum(u8) { xmm, ymm, zmm, mm, k, tmm, st0, sti, r8, r16, r32, r64, ax, al, cl, eax, rax, dx, mem, vx, vy, vz, imm, maddr };
+pub const Kind = enum(u8) { xmm, ymm, zmm, mm, k, tmm, st0, sti, r8, r16, r32, r64, ax, al, cl, eax, rax, dx, mem, vx, vy, vz, imm, maddr, sreg, creg, dreg, fs, gs };
 
 pub const OpKind = struct { k: Kind, size: u16 = 0, bcst: u8 = 0 };
 
@@ -56,9 +56,11 @@ pub const Form = struct {
     /// VEX form of an ISA extension newer than its EVEX twin (AVX-IFMA, AVX-VNNI,
     /// AVX-NE-CONVERT): AsmJit uses EVEX unless `.vex = true`.
     late_vex: bool = false,
+    /// Memory operand must be explicitly sized (`mov word_ptr, sreg` takes 66, unsized does not).
+    exact_mem: bool = false,
 };
 
-pub const Cls = enum(u3) { xmm, ymm, zmm, mm, k, tmm, st };
+pub const Cls = enum(u4) { xmm, ymm, zmm, mm, k, tmm, st, seg, cr, dr };
 
 /// Vector / mask / MMX / x87 / AMX register.
 pub const V = struct { cls: Cls, id: u5 };
@@ -82,6 +84,16 @@ pub inline fn tmm(i: u5) V {
 }
 pub inline fn st(i: u5) V {
     return .{ .cls = .st, .id = i };
+}
+/// Segment register: es=0, cs=1, ss=2, ds=3, fs=4, gs=5.
+pub inline fn seg(i: u5) V {
+    return .{ .cls = .seg, .id = i };
+}
+pub inline fn cr(i: u5) V {
+    return .{ .cls = .cr, .id = i };
+}
+pub inline fn dr(i: u5) V {
+    return .{ .cls = .dr, .id = i };
 }
 
 /// Memory operand; `size` in bytes (0 = unsized), `bcst` = broadcast count (`{1toN}`),
@@ -114,7 +126,7 @@ pub inline fn bcst(m: Mem, count: u8) Mem {
 pub const Rc = enum(u2) { rn, rd, ru, rz };
 
 /// Instruction options: opmask `{k}`, zeroing `{z}`, rounding `{er}`, `{sae}`, force EVEX.
-pub const Extra = struct { k: u3 = 0, z: bool = false, rc: ?Rc = null, sae: bool = false, evex: bool = false, vex: bool = false };
+pub const Extra = struct { k: u3 = 0, z: bool = false, rc: ?Rc = null, sae: bool = false, evex: bool = false, vex: bool = false, lock: bool = false, rex: bool = false };
 
 pub const Op = union(enum) { v: V, r: gp.Reg, m: Mem, imm: i64 };
 
@@ -148,6 +160,11 @@ fn matchKind(f: Form, kd: OpKind, o: Op) bool {
             .tmm => v.cls == .tmm and v.id < 8,
             .st0 => v.cls == .st and v.id == 0,
             .sti => v.cls == .st and v.id < 8,
+            .sreg => v.cls == .seg and v.id < 6,
+            .creg => v.cls == .cr and v.id < 16,
+            .dreg => v.cls == .dr and v.id < 16,
+            .fs => v.cls == .seg and v.id == 4,
+            .gs => v.cls == .seg and v.id == 5,
             else => false,
         },
         .r => |r| return switch (kd.k) {
@@ -171,6 +188,7 @@ fn matchKind(f: Form, kd: OpKind, o: Op) bool {
                     if (m.size != 0 and m.size != kd.bcst) return false;
                     return @as(u16, m.bcst) * kd.bcst == (if (kd.size != 0) kd.size else vl(f.l));
                 }
+                if (f.exact_mem) return m.size == kd.size;
                 return m.size == 0 or kd.size == 0 or m.size == kd.size;
             },
             // umonitor: `[reg]` encoded as the register in ModRM.rm (mod = 11).
@@ -318,7 +336,7 @@ pub fn encodeForm(f: Form, ops: []const Op, e: Extra, out: *Buf) Error!?u8 {
             };
             var rexv: u8 = (if (f.rexw) @as(u8, 8) else 0) | r3 << 2 | (if (rm_mem != null) x3 else 0) << 1 | b3;
             if (rm_reg != null) rexv &= 0b1101;
-            if (rexv != 0 or need_rex) {
+            if (rexv != 0 or need_rex or e.rex) {
                 if (has_high) return error.InvalidOperand;
                 out.u8_(0x40 | rexv);
             }
@@ -499,6 +517,7 @@ pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops_in: []const Op, e: Ext
     const f = chosen orelse return error.NoMatchingForm;
     var b: Buf = .{};
     _ = try encodeForm(f, ops, e, &b);
-    try buf.ensure(16);
+    try buf.ensure(18);
+    if (e.lock) buf.put8(0xF0);
     for (b.b[0..b.n]) |bt| buf.put8(bt);
 }

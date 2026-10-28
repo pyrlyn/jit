@@ -1,19 +1,8 @@
-total 17874, ported 17828, unsupported 46
-    20 reg-class
-    15 prefix
-     8 mem-base
-     1 mnemonic
-     1 mem-index
+total 17874, ported 17873, unsupported 1
      1 operand
 
 top unsupported details:
-    20 reg-class
-     8 mem-base
-     4 prefix:rex
-     4 prefix:mod_mr
-     4 prefix:mod_rm
-     2 prefix:lock
-     1 mnemonic:clzero
-     1 mem-index
-     1 prefix:long_
-     1 operand:ptr_abs
+     1 operand:zmmword_ptr
+
+cases:
+operand:zmmword_ptr: 0F01FC clzero(zmmword_ptr(rax))

@@ -19,6 +19,8 @@ VREG = {}
 for cls, n in (("xmm", 32), ("ymm", 32), ("zmm", 32), ("mm", 8), ("k", 8), ("tmm", 8)):
     for i in range(n): VREG[f"{cls}{i}"] = f"vec.{cls}({i})"
 for i in range(8): VREG[f"st{i}"] = f"vec.st({i})"
+for i, sg in enumerate(("es", "cs", "ss", "ds", "fs", "gs")): VREG[sg] = f"vec.seg({i})"
+for i in range(16): VREG[f"cr{i}"] = f"vec.cr({i})"; VREG[f"dr{i}"] = f"vec.dr({i})"
 VSZ = {"byte_ptr": 1, "word_ptr": 2, "dword_ptr": 4, "qword_ptr": 8, "tbyte_ptr": 10, "fword_ptr": 6,
        "xmmword_ptr": 16, "ymmword_ptr": 32, "zmmword_ptr": 64, "ptr": 0}
 RC = {"rn_sae": ".rn", "rd_sae": ".rd", "ru_sae": ".ru", "rz_sae": ".rz"}
@@ -33,15 +35,14 @@ def alias(mn):
     return mn
 
 def vmem(fn, args, bc):
-    a = split_args(args)
-    if not a or a[0] not in REG or REG[a[0]][0] != "q": raise Unsup("mem-base")
-    base = REG[a[0]][1]; sz = VSZ[fn]
-    if len(a) >= 2 and a[1] in VREG:
-        sh = imm(a[2]) if len(a) > 2 else 0; d = imm(a[3]) if len(a) > 3 else 0
-        m = f"vec.vsib(.{base}, {VREG[a[1]]}, .x{1 << sh}, {d}, {sz})"
-    else:
-        m = f"vec.mem({mem(fn, args)}, {sz})"
-    return f"vec.bcst({m}, {bc})" if bc else m
+    p = mem_parts(args); sz = VSZ[fn]
+    f = []
+    if p["base"]: f.append(f".base = .{p['base']}")
+    if p["index"]: f.append(f".index = .{p['index']}")
+    if p["vindex"]: f.append(f".vindex = {p['vindex']}")
+    f += [f".scale = .x{1 << p['shift']}", f".disp = {p['disp']}", f".size = {sz}", f".bcst = {bc}"]
+    if p["rip"]: f.append(".rip = true")
+    return "vec.Mem{ " + ", ".join(f) + " }"
 
 def voperand(t):
     t = t.strip()
@@ -94,18 +95,38 @@ def imm(t):
     v = int(m.group(2), 0)
     return -v if m.group(1) else v
 
-def mem(fn, args):
+def mem_parts(args):
     a = split_args(args)
-    if not a or a[0] not in REG or REG[a[0]][0] != "q":
-        raise Unsup("mem-base")
-    base = REG[a[0]][1]
-    if len(a) == 1: return f"x.ptr(.{base}, 0)"
-    if len(a) == 2:
-        if a[1] in REG: return f"x.ptrIdx(.{base}, .{REG[a[1]][1]}, .x1, 0)"
-        return f"x.ptr(.{base}, {imm(a[1])})"
-    if a[1] not in REG or REG[a[1]][0] != "q": raise Unsup("mem-index")
-    sh = imm(a[2]); d = imm(a[3]) if len(a) > 3 else 0
-    return f"x.ptrIdx(.{base}, .{REG[a[1]][1]}, .x{1 << sh}, {d})"
+    p = dict(base=None, index=None, vindex=None, shift=0, disp=0, rip=False, addr32=False)
+    if not a: raise Unsup("mem-base")
+    if a[0] == "rip": p["rip"] = True
+    elif a[0] in REG and REG[a[0]][0] == "q": p["base"] = REG[a[0]][1]
+    else:
+        try: p["disp"] = imm(a[0])
+        except Unsup: raise Unsup("mem-base")
+    rest = a[1:]
+    if rest and (rest[0] in REG or rest[0] in VREG):
+        if rest[0] in VREG: p["vindex"] = VREG[rest[0]]
+        elif REG[rest[0]][0] == "q": p["index"] = REG[rest[0]][1]
+        elif REG[rest[0]][0] == "d": p["index"] = REG[rest[0]][1]; p["addr32"] = True  # AsmJit encodes it like the 64-bit index
+        else: raise Unsup("mem-index")
+        rest = rest[1:]
+        if rest: p["shift"] = imm(rest[0]); rest = rest[1:]
+    if rest: p["disp"] += imm(rest[0])
+    if not -2**31 <= p["disp"] < 2**31: raise Unsup("moffs")
+    return p
+
+def xmem(p):
+    f = []
+    if p["base"]: f.append(f".base = .{p['base']}")
+    if p["index"]: f.append(f".index = .{p['index']}")
+    f.append(f".scale = .x{1 << p['shift']}"); f.append(f".disp = {p['disp']}")
+    return "x.Mem{ " + ", ".join(f) + " }"
+
+def mem(fn, args):
+    p = mem_parts(args)
+    if p["rip"] or p["vindex"] or p["addr32"]: raise Unsup("mem-kind")
+    return xmem(p)
 
 def operand(t, regsize):
     t = t.strip()
@@ -116,6 +137,9 @@ def operand(t, regsize):
     if ma and int(ma.group(1), 0) < 2**31:
         return f"gp.mem(.{{ .disp = {int(ma.group(1), 0)} }})", None
     m = re.fullmatch(r"(\w+)\((.*)\)", t)
+    if m and m.group(1) in SZ and mem_parts(m.group(2))["rip"]:
+        p = mem_parts(m.group(2))
+        return f"gp.rip({p['disp']}, .{SZ[m.group(1)] or 'none'})", None
     if m and m.group(1) in SZ:
         s = SZ[m.group(1)]
         return f"gp.{FN[s]}({mem(m.group(1), m.group(2))})", None
@@ -124,11 +148,12 @@ def operand(t, regsize):
     return str(imm(t)), None
 
 cases, unsup, total = [], collections.Counter(), 0
+unsup_cases = []
 for hexs, body in re.findall(r'TEST_INSTRUCTION\("([0-9A-F]*)"\s*,\s*(.*)\);', src):
     total += 1
     body = body.strip()
     try:
-        extra = []
+        extra = []; gopt = []
         while True:
             m = re.match(r"(\w+)\((\w*)\)\.", body)
             if not m: break
@@ -139,6 +164,11 @@ for hexs, body in re.findall(r'TEST_INSTRUCTION\("([0-9A-F]*)"\s*,\s*(.*)\);', s
             elif p == "sae": extra.append(".sae = true")
             elif p == "evex": extra.append(".evex = true")
             elif p == "vex": extra.append(".vex = true")
+            elif p == "lock": gopt.append(".lock = true"); extra.append(".lock = true")
+            elif p == "rex": gopt.append(".rex = true"); extra.append(".rex = true")
+            elif p == "mod_mr": gopt.append(".mod = .mr")
+            elif p == "mod_rm": gopt.append(".mod = .rm")
+            elif p == "long_": gopt.append(".long = true")
             else: raise Unsup("prefix:" + p)
             body = body[m.end():]
         m = re.fullmatch(r"(\w+)\((.*)\)", body)
@@ -148,28 +178,47 @@ for hexs, body in re.findall(r'TEST_INSTRUCTION\("([0-9A-F]*)"\s*,\s*(.*)\);', s
         ops = split_args(m.group(2))
         txt = (hexs + " " + body).replace("\\", "\\\\").replace('"', '\\"')
         bytes_ = ", ".join(f"0x{hexs[i:i+2]}" for i in range(0, len(hexs), 2))
-        allgp = all(o in REG or o in HI8 or not re.search(r"[xyz]mm|\bk\d|\bmm\d|tmm|_1to|st\d", o) and not re.search(r"(xmm|ymm|zmm|tbyte|fword)word_ptr|tbyte_ptr|fword_ptr", o) for o in ops)
-        if mn in mnems and allgp and not extra:
+        allgp = all(o in REG or o in HI8 or not re.search(r"[xyz]mm|\bk\d|\bmm\d|tmm|_1to|st\d|^(es|cs|ss|ds|fs|gs|cr\d+|dr\d+)$", o) and not re.search(r"(xmm|ymm|zmm|tbyte|fword)word_ptr|tbyte_ptr|fword_ptr", o) for o in ops)
+        mo = None
+        if mn in ("mov", "movabs") and len(ops) == 2:
+            for i_, o_ in enumerate(ops):
+                mm_ = re.fullmatch(r"(?:ptr_abs|ptr)\((0x[0-9A-Fa-f]+|\d+)\)", o_)
+                if mm_ and (mn == "movabs" or int(mm_.group(1), 0) >= 2**31) and ops[1 - i_] in REG:
+                    s_, g_ = REG[ops[1 - i_]]
+                    mo = f"check3(&.{{ {bytes_} }}, {str(i_ == 0).lower()}, gp.{RFN[s_]}(.{g_}), {int(mm_.group(1), 0)}, \"{txt}\")"
+        if mo:
+            cases.append(f"    fails += {mo};")
+        elif mn in mnems and allgp and not [e_ for e_ in extra if e_ not in (".lock = true", ".rex = true")]:
             zops = [operand(o, None)[0] for o in ops]
-            if mn == "xchg" and len(ops) == 2 and all(o in REG or o in HI8 for o in ops): zops.reverse()
-            cases.append(f'    fails += check(&.{{ {bytes_} }}, .@"{mn}", .{{ {", ".join(zops)} }}, "{txt}");')
+            if mn == "xchg" and len(ops) == 2 and all(o in REG or o in HI8 for o in ops) and not gopt: zops.reverse()
+            cases.append(f'    fails += check(&.{{ {bytes_} }}, .@"{mn}", .{{ {", ".join(zops)} }}, .{{ {", ".join(gopt)} }}, "{txt}");')
         elif mn in vmnems:
+            if any(g_ not in (".lock = true", ".rex = true") for g_ in gopt): raise Unsup("prefix:vec")
             zops = [voperand(o) for o in ops]
             cases.append(f'    fails += checkV(&.{{ {bytes_} }}, .@"{mn}", .{{ {", ".join(zops)} }}, .{{ {", ".join(extra)} }}, "{txt}");')
+        elif mn in mnems and not extra:
+            zops = [operand(o, None)[0] for o in ops]
+            cases.append(f'    fails += check(&.{{ {bytes_} }}, .@"{mn}", .{{ {", ".join(zops)} }}, .{{ {", ".join(gopt)} }}, "{txt}");')
         else:
             raise Unsup("mnemonic:" + mn)
     except Unsup as e:
         unsup[str(e).split(":")[0]] += 1
         unsup["  " + str(e)] += 1
+        unsup_cases.append(f"{e}: {hexs} {body}")
 
 out = [f"//! GENERATED by scripts/gen_asmjit_tests.py — do not edit. Expected bytes from AsmJit's",
        f"//! asmjit_test_assembler_x64.cpp: {total} cases, {len(cases)} ported, {total-len(cases)} unsupported.",
        "const std = @import(\"std\");", "const opts = @import(\"zigjit_options\");",
        "const CodeBuffer = @import(\"core/code_buffer.zig\").CodeBuffer;",
        "const x = @import(\"x86_64/assembler.zig\");", "const gp = @import(\"x86_64/gp.zig\");", "const vec = @import(\"x86_64/vec.zig\");", "",
-       "fn check(expected: []const u8, comptime mn: anytype, args: anytype, text: []const u8) u32 {",
+       "fn check3(expected: []const u8, store: bool, acc: gp.Reg, addr: u64, text: []const u8) u32 {",
        "    var cb = CodeBuffer.init(std.testing.allocator);", "    defer cb.deinit();",
-       "    gp.emit(&cb, mn, args) catch |e| {", "        std.debug.print(\"{s}: {s}\\n\", .{ @errorName(e), text });", "        return 1;", "    };",
+       "    gp.movMoffs(&cb, store, acc, addr) catch |e| {", "        std.debug.print(\"{s}: {s}\\n\", .{ @errorName(e), text });", "        return 1;", "    };",
+       "    if (std.mem.eql(u8, expected, cb.code())) return 0;",
+       "    std.debug.print(\"encoding mismatch: {s}: got {X}\\n\", .{ text, cb.code() });", "    return 1;", "}", "",
+       "fn check(expected: []const u8, comptime mn: anytype, args: anytype, opt: gp.Opt, text: []const u8) u32 {",
+       "    var cb = CodeBuffer.init(std.testing.allocator);", "    defer cb.deinit();",
+       "    gp.emitOpt(&cb, mn, args, opt) catch |e| {", "        std.debug.print(\"{s}: {s}\\n\", .{ @errorName(e), text });", "        return 1;", "    };",
        "    if (std.mem.eql(u8, expected, cb.code())) return 0;",
        "    std.debug.print(\"encoding mismatch: {s}: expected {x}, got {x}\\n\", .{ text, expected, cb.code() });",
        "    return 1;", "}", "",
@@ -188,5 +237,6 @@ for i in range(0, len(cases), N):
 (root / "src/asmjit_x64_tests.zig").write_text("\n".join(out))
 rep = [f"total {total}, ported {len(cases)}, unsupported {total-len(cases)}"] + [f"{v:6} {k}" for k, v in unsup.most_common() if not k.startswith("  ")]
 rep += ["", "top unsupported details:"] + [f"{v:6} {k.strip()}" for k, v in unsup.most_common() if k.startswith("  ")][:60]
+rep += ["", "cases:"] + unsup_cases
 (root / "bench/asmjit_x64_unsupported.txt").write_text("\n".join(rep) + "\n")
 print("\n".join(rep[:30]))
