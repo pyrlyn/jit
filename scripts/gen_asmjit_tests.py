@@ -23,6 +23,15 @@ VSZ = {"byte_ptr": 1, "word_ptr": 2, "dword_ptr": 4, "qword_ptr": 8, "tbyte_ptr"
        "xmmword_ptr": 16, "ymmword_ptr": 32, "zmmword_ptr": 64, "ptr": 0}
 RC = {"rn_sae": ".rn", "rd_sae": ".rd", "ru_sae": ".ru", "rz_sae": ".rz"}
 
+# AsmJit condition-code aliases -> the spelling used by ZigJIT's tables.
+CC = {"a": "nbe", "ae": "nb", "c": "b", "e": "z", "g": "nle", "ge": "nl", "na": "be", "nae": "b",
+      "nc": "nb", "ne": "nz", "ng": "le", "nge": "l", "pe": "p", "po": "np"}
+def alias(mn):
+    if mn == "sal": return "shl"
+    for p in ("cmov", "set", "j"):
+        if mn.startswith(p) and mn[len(p):] in CC: return p + CC[mn[len(p):]]
+    return mn
+
 def vmem(fn, args, bc):
     a = split_args(args)
     if not a or a[0] not in REG or REG[a[0]][0] != "q": raise Unsup("mem-base")
@@ -103,6 +112,9 @@ def operand(t, regsize):
     if t in REG:
         s, g = REG[t]; return f"gp.{RFN[s]}(.{g})", s
     if t in HI8: return f"gp.r8hi(.r{t[0]}x)", "b"
+    ma = re.fullmatch(r"ptr_abs\((0x[0-9a-fA-F]+|\d+)\)", t)
+    if ma and int(ma.group(1), 0) < 2**31:
+        return f"gp.mem(.{{ .disp = {int(ma.group(1), 0)} }})", None
     m = re.fullmatch(r"(\w+)\((.*)\)", t)
     if m and m.group(1) in SZ:
         s = SZ[m.group(1)]
@@ -132,6 +144,7 @@ for hexs, body in re.findall(r'TEST_INSTRUCTION\("([0-9A-F]*)"\s*,\s*(.*)\);', s
         m = re.fullmatch(r"(\w+)\((.*)\)", body)
         if not m: raise Unsup("syntax")
         mn = m.group(1).rstrip("_")
+        mn = alias(mn)
         ops = split_args(m.group(2))
         txt = (hexs + " " + body).replace("\\", "\\\\").replace('"', '\\"')
         bytes_ = ", ".join(f"0x{hexs[i:i+2]}" for i in range(0, len(hexs), 2))

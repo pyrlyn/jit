@@ -20,7 +20,7 @@ const Gp = x.Gp;
 
 pub const Error = core.Error || error{ InvalidOperand, NoMatchingForm };
 
-pub const Kind = enum(u8) { xmm, ymm, zmm, mm, k, tmm, st0, sti, r8, r16, r32, r64, ax, mem, vx, vy, vz, imm };
+pub const Kind = enum(u8) { xmm, ymm, zmm, mm, k, tmm, st0, sti, r8, r16, r32, r64, ax, al, cl, eax, rax, dx, mem, vx, vy, vz, imm, maddr };
 
 pub const OpKind = struct { k: Kind, size: u16 = 0, bcst: u8 = 0 };
 
@@ -156,6 +156,11 @@ fn matchKind(f: Form, kd: OpKind, o: Op) bool {
             .r32 => r.size == .d,
             .r64 => r.size == .q,
             .ax => r.size == .w and r.id == .rax and !r.high,
+            .al => r.size == .b and r.id == .rax and !r.high,
+            .cl => r.size == .b and r.id == .rcx and !r.high,
+            .eax => r.size == .d and r.id == .rax,
+            .rax => r.size == .q and r.id == .rax,
+            .dx => r.size == .w and r.id == .rdx,
             else => false,
         },
         .m => |m| switch (kd.k) {
@@ -168,6 +173,8 @@ fn matchKind(f: Form, kd: OpKind, o: Op) bool {
                 }
                 return m.size == 0 or kd.size == 0 or m.size == kd.size;
             },
+            // umonitor: `[reg]` encoded as the register in ModRM.rm (mod = 11).
+            .maddr => return m.base != null and m.index == null and m.vindex == null and m.disp == 0 and !m.rip,
             .vx, .vy, .vz => {
                 const vi = m.vindex orelse return false;
                 const want: Cls = switch (kd.k) {
@@ -179,8 +186,13 @@ fn matchKind(f: Form, kd: OpKind, o: Op) bool {
             },
             else => return false,
         },
-        .imm => return kd.k == .imm,
+        .imm => |v| return kd.k == .imm and (kd.size >= 8 or fitsN(v, kd.size)),
     }
+}
+
+fn fitsN(v: i64, bytes: u16) bool {
+    const bits: u6 = @intCast(bytes * 8);
+    return v >= -(@as(i64, 1) << (bits - 1)) and v < (@as(i64, 1) << bits);
 }
 
 fn regNum(o: Op) u8 {
@@ -258,7 +270,11 @@ pub fn encodeForm(f: Form, ops: []const Op, e: Extra, out: *Buf) Error!?u8 {
     var rm_reg: ?u8 = null;
     var rm_mem: ?Mem = null;
     if (f.rm) |i| switch (ops[i]) {
-        .m => |m| rm_mem = m,
+        .m => |m| if (f.ops[i].k == .maddr) {
+            rm_reg = @intFromEnum(m.base.?);
+        } else {
+            rm_mem = m;
+        },
         .imm => return error.InvalidOperand,
         else => rm_reg = regNum(ops[i]),
     };
@@ -378,8 +394,9 @@ pub fn encodeForm(f: Form, ops: []const Op, e: Extra, out: *Buf) Error!?u8 {
     }
     if (!is4_done) {
         for (f.ops, ops) |kd, o| if (kd.k == .imm and imm_left > 0) {
-            out.int(o.imm, 1);
-            imm_left -= 1;
+            const nb: u8 = @intCast(@max(kd.size, 1));
+            out.int(o.imm, nb);
+            imm_left -|= nb;
         };
     }
     return rip_at;
@@ -400,6 +417,15 @@ fn allRegs(ops: []const Op) bool {
 /// AsmJit order: legacy/VEX before EVEX; for register-only operands the load-style form (first
 /// operand in ModRM.reg) before the store-style one (`mr`, `mvr`).
 fn pick(forms: []const Form, ops: []const Op, e: Extra) ?Form {
+    return pickEx(forms, ops, e, false);
+}
+
+fn has67(f: Form) bool {
+    for (f.pre) |p| if (p == 0x67) return true;
+    return false;
+}
+
+fn pickEx(forms: []const Form, ops: []const Op, e: Extra, no67: bool) ?Form {
     const regs = allRegs(ops);
     // 0: legacy/VEX preferred, 1: legacy/VEX any (not PreferEvex), 2: EVEX preferred,
     // 3: EVEX any, 4: VEX of a PreferEvex instruction.
@@ -416,6 +442,7 @@ fn pick(forms: []const Form, ops: []const Op, e: Extra) ?Form {
                 3 => {},
                 else => if (!f.late_vex) continue,
             }
+            if (no67 and has67(f)) continue;
             if (matches(f, ops, e)) return f;
         }
     }
@@ -448,7 +475,11 @@ fn pickAliased(forms: []const Form, ops: []const Op, e: Extra, tmp: []Op) ?struc
                 var ok = true;
                 for (ops[0..lo]) |o| ok = ok and isImplicit(o);
                 for (ops[hi..]) |o| ok = ok and isImplicit(o);
-                if (ok) if (pick(forms, ops[lo..hi], e)) |f| return .{ .f = f, .ops = ops[lo..hi] };
+                // A dropped 64-bit address register (`invlpga(rax, ecx)`) excludes the 67 form.
+                var wide = false;
+                for (ops[0..lo]) |o| wide = wide or (o == .r and o.r.size == .q);
+                for (ops[hi..]) |o| wide = wide or (o == .r and o.r.size == .q);
+                if (ok) if (pickEx(forms, ops[lo..hi], e, wide)) |f| return .{ .f = f, .ops = ops[lo..hi] };
             }
             if (hi == lo) break;
         }

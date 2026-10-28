@@ -29,12 +29,19 @@ def expand_tok(t, li):
     if t == "mxxy": return ("mem", [8, 16, 32][li])
     if t == "mxxx": return ("mem", [4, 8, 16][li])
     if t in ("xmm", "ymm", "zmm", "mm", "k", "tmm", "st0", "sti", "r8", "r16", "r32", "r64", "ax"): return (t, 0)
+    far = {"m16_16": 4, "m16_32": 6, "m16_64": 10}
+    if t in far: return ("mem", far[t])
     m = re.fullmatch(r"m(\d+)(?:_\w+)?(?:\(.*\))?", t)
     if m: return ("mem", int(m.group(1)) // 8)
-    if t in ("m", "tmem"): return ("mem", 0)
+    if t == "m(ds:r64)": return ("maddr", 0)
+    if t in ("m", "tmem") or re.fullmatch(r"m\(\w+:\w+\)", t): return ("mem", 0)
     m = re.fullmatch(r"vm(32|64)([xyz])", t)
     if m: return ("v" + m.group(2), int(m.group(1)) // 8)
-    if t in ("imm8", "imm4", "ib"): return ("imm", 1)
+    if t in ("imm8", "imm4", "ib", "imms8", "immu8"): return ("imm", 1)
+    if t in ("imm16", "immu16", "imms16"): return ("imm", 2)
+    if t in ("imm32", "imms32", "immu32"): return ("imm", 4)
+    if t in ("imm64",): return ("imm", 8)
+    if t in ("eax", "rax", "al", "cl", "dx"): return (t, 0)
     raise KeyError(t)
 
 def parse_enc(e):
@@ -67,8 +74,9 @@ def parse_enc(e):
         toks = toks[1:]
     else:
         # legacy: prefixes, REX.W, escape bytes, opcode
-        while toks and toks[0] in ("NP", "66", "F2", "F3", "REX.W", "9B"):
+        while toks and toks[0] in ("NP", "66", "67", "F2", "F3", "REX.W", "9B", "NFx", "NOREP"):
             t = toks.pop(0)
+            if t in ("NFx", "NOREP"): continue
             if t == "REX.W": d["rexw"] = True
             elif t == "NP": pass
             elif t == "9B": d["pre"].append(0x9B)
@@ -78,7 +86,7 @@ def parse_enc(e):
         elif toks[:2] == ["0F", "0F"]: d["map"] = 4; toks = toks[2:]  # 3DNow!: 0F 0F /r ib(opcode)
         elif toks[:1] == ["0F"]: d["map"] = 1; toks = toks[1:]
     for t in toks:
-        if re.fullmatch(r"[0-9A-F]{2}", t): d["op"].append(int(t, 16))
+        if re.fullmatch(r"[0-9A-Fa-f]{2}", t): d["op"].append(int(t, 16))
         elif re.fullmatch(r"[0-9A-F]{2}\+i", t): d["op"].append(int(t[:2], 16)); d["plus"] = True
         elif t == "/r": d["modrm"] = True
         elif re.fullmatch(r"/[0-7]", t): d["modrm"] = True; d["digit"] = int(t[1])
@@ -147,9 +155,28 @@ def main():
     db = json.load(open(os.path.join(ROOT, "ref/asmjit/db/isa_x86.json")))
     table = collections.OrderedDict()
     skipped = collections.Counter()
+    gp_mn = set(re.findall(r"^    (\w+|@\"\w+\"),$", open(os.path.join(ROOT, "src/x86_64/gp_table.zig")).read().split("pub const Mnemonic = enum {")[1].split("};")[0], re.M))
+    gp_mn = {m.strip('@"') for m in gp_mn}
+    def gp_variants(ins):
+        s = ins["inst"]
+        if not re.search(r"\b(rv|mv|immv|axv|dxv)\b", s): return [(ins, None)]
+        out = []
+        for sz, r, m, im, ax in ((2, "r16", "m16", "imm16", "ax"), (4, "r32", "m32", "imm32", "eax"), (8, "r64", "m64", "imm32", "rax")):
+            t = re.sub(r"\brv\b", r, s); t = re.sub(r"\bmv\b", m, t); t = re.sub(r"\bimmv\b", im, t)
+            t = re.sub(r"\baxv\b", ax, t); t = re.sub(r"\bdxv\b", {"ax": "dx", "eax": "edx", "rax": "rdx"}[ax], t)
+            out.append((dict(ins, inst=t), sz))
+        return out
     for cat in db["instructions"]:
-        if cat["category"] in SKIP_CATS: continue
+        if cat["category"] in SKIP_CATS and cat["category"] != "GP": continue
+        expanded = []
         for ins in cat["instructions"]:
+            if cat["category"] == "GP":
+                nm = re.sub(r"^\[[^\]]*\]\s*", "", ins["inst"]).split()[0]
+                if nm in gp_mn: continue
+                expanded += gp_variants(ins)
+            else:
+                expanded.append((ins, None))
+        for ins, gsz in expanded:
             enc = ins.get("any") or ins.get("x64")
             if not enc: skipped["apx/x86-only"] += 1; continue
             role, e = [x.strip() for x in enc.split(":", 1)]
@@ -159,11 +186,13 @@ def main():
             s = re.sub(r"\s*\{[^}]*\}", "", s)
             name, _, opstr = s.partition(" ")
             raw_ops = [re.sub(r"^[A-Za-z?]+:", "", o.strip()) for o in opstr.split(",")] if opstr.strip() else []
-            raw_ops = [o for o in raw_ops if not o.startswith("<") and o != "k+1" and o != "1"]
+            raw_ops = [o for o in raw_ops if not o.lstrip("~").startswith("<") and o != "k+1" and o != "1"]
             try:
                 d = parse_enc(e)
             except KeyError as ex:
                 skipped["enc " + str(ex)] += 1; continue
+            if gsz == 2 and d["enc"] == "legacy" and 0x66 not in d["pre"]: d["pre"] = [0x66] + d["pre"]
+            if gsz == 8 and d["enc"] == "legacy": d["rexw"] = True
             fx = cpp_fix(cpp, name, d, d["enc"], sib_encs[name])
             if fx:
                 if fx["pp"] is not None: d["pp"] = fx["pp"]
@@ -174,7 +203,7 @@ def main():
                 # Role from the C++ encoding name, e.g. VexRmMr_Lx: main opcode `rm`, alt `mr`.
                 parts = re.findall(r"[A-Z][a-z]*", cpp[name][0].split("_")[0])
                 parts = [p_.lower() for p_ in parts if re.fullmatch(r"[RMVSI][rmvsi]*", p_) and p_ not in ("Vex", "Evex")]
-                if parts and not (d["is4"] and len(role) == 4):
+                if parts and not (d["is4"] and len(role) == 4) and cat["category"] != "GP":
                     cand = parts[min(fx["idx"], len(parts) - 1)]
                     if len(cand.replace("i", "")) == 4: cand = cand[:2] + cand[2:].replace("r", "s")
                     if len([c_ for c_ in cand if c_ in "rmvs"]) == len([o for o in raw_ops if not o.startswith("imm")]) and d["modrm"]:
@@ -201,6 +230,7 @@ def main():
                             if t in ("b16", "b32", "b64"):
                                 opts = [(k, sz, int(t[1:]) // 8) if k == "mem" else (k, sz, 0) for (k, sz, _) in opts]
                                 continue
+                            t = t.lstrip("~")
                             if t in ("ry", "rv"):
                                 opts += [("r32", 0, 0), ("r64", 0, 0)]; continue
                             if t in ("my", "mv"):
@@ -216,6 +246,8 @@ def main():
                 for c in combos:
                     w = d["w"]
                     lowprio = any(k == "mem" and g for k, _, _, g in c)
+                    # `sldt r16/m16` (66) vs `sldt r32/m16`: memory takes the form without 66.
+                    if cat["category"] == "GP" and gsz is None and 0x66 in d["pre"] and any(k == "mem" for k, _, _, _ in c) and any("r16/m16" in o for o in raw_ops): continue
                     gpy = any(t in ("ry", "rv", "my", "mv") for o in raw_ops for t in o.split("/"))
                     wide = gpy and any(k == "r64" or sz == -8 for k, sz, _, _ in c)
                     ops = [(k, abs(sz), b) for k, sz, b, _ in c]
@@ -235,9 +267,9 @@ def main():
                         r["m"], r["r"] = r["r"], None
                     plus = None
                     if d["plus"]:
-                        plus = next(i for i, (k, _, _) in enumerate(ops) if k in ("sti", "r32", "r64", "xmm", "mm", "k"))
+                        plus = next(i for i, (k, _, _) in enumerate(ops) if k in ("sti", "r8", "r16", "r32", "r64", "xmm", "mm", "k"))
                     if role == "op" and d["modrm"]:
-                        mi = [i for i, (k, _, _) in enumerate(ops) if k in ("mem", "vx", "vy", "vz") or k in ("r32", "r64", "xmm")]
+                        mi = [i for i, (k, _, _) in enumerate(ops) if k != "imm"]
                         if mi: r["m"] = mi[0]
                     used = {x for x in r.values() if x is not None} | ({plus} if plus is not None else set())
                     # n for disp8*N: memory operand size; broadcast uses element size at runtime
@@ -261,13 +293,16 @@ def main():
                                 evex_mem_bcst=any(b for _, _, b in ops), lowprio=lowprio or cat["category"].startswith("AVX10"),
                                 late_vex=d["enc"] == "vex" and name in cpp and cpp[name][2])
                     table.setdefault(name, []).append(form)
+    # Unsized far pointer (`lcall ptr(...)`): AsmJit uses the m16:64 form.
+    for n_ in ("lcall", "ljmp"):
+        if n_ in table: table[n_].sort(key=lambda f: -max([sz for k, sz, _ in f["ops"] if k == "mem"] or [0]))
     # EVEX scalar stores (vmovss/vmovsd/vmovsh m, xmm) accept {k} in AsmJit.
     for n_, forms in table.items():
         if any(f["enc"] == "evex" and f["mask"] for f in forms):
             for f in forms:
                 if f["enc"] == "evex" and not f["mask"] and f["ops"] and f["ops"][0][0] == "mem": f["mask"] = 1
     KMAP = {"xmm": "xmm", "ymm": "ymm", "zmm": "zmm", "mm": "mm", "k": "k", "tmm": "tmm", "st0": "st0", "sti": "sti",
-            "r8": "r8", "r16": "r16", "r32": "r32", "r64": "r64", "ax": "ax", "mem": "mem", "vx": "vx", "vy": "vy", "vz": "vz", "imm": "imm"}
+            "r8": "r8", "r16": "r16", "r32": "r32", "r64": "r64", "ax": "ax", "al": "al", "cl": "cl", "eax": "eax", "rax": "rax", "dx": "dx", "mem": "mem", "vx": "vx", "vy": "vy", "vz": "vz", "imm": "imm", "maddr": "maddr"}
     def opt(v): return "null" if v is None else str(v)
     lines = ["// Generated by scripts/gen_vec_tables.py from ref/asmjit/db/isa_x86.json. Do not edit.",
              "const Form = @import(\"vec.zig\").Form;", "", "pub const Mnemonic = enum {"]

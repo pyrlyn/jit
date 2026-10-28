@@ -1,69 +1,19 @@
-total 17874, ported 17192, unsupported 682
-   635 mnemonic
+total 17874, ported 17828, unsupported 46
     20 reg-class
     15 prefix
      8 mem-base
-     3 operand
+     1 mnemonic
      1 mem-index
+     1 operand
 
 top unsupported details:
     20 reg-class
-    18 mnemonic:sal
-    17 mnemonic:cmpxchg
-    17 mnemonic:xadd
-     9 mnemonic:cmova
-     9 mnemonic:cmovae
-     9 mnemonic:cmovc
-     9 mnemonic:cmove
-     9 mnemonic:cmovg
-     9 mnemonic:cmovge
-     9 mnemonic:cmovna
-     9 mnemonic:cmovnae
-     9 mnemonic:cmovnc
-     9 mnemonic:cmovne
-     9 mnemonic:cmovng
-     9 mnemonic:cmovnge
-     9 mnemonic:cmovpe
-     9 mnemonic:cmovpo
-     9 mnemonic:dec
-     8 mnemonic:lods
-     8 mnemonic:scas
-     8 mnemonic:stos
      8 mem-base
-     6 mnemonic:lfs
-     6 mnemonic:lgs
-     6 mnemonic:lss
-     6 mnemonic:andn
-     6 mnemonic:bextr
-     6 mnemonic:blcfill
-     6 mnemonic:blci
-     6 mnemonic:blcic
-     6 mnemonic:blcmsk
-     6 mnemonic:blcs
-     6 mnemonic:blsfill
-     6 mnemonic:blsi
-     6 mnemonic:blsic
-     6 mnemonic:blsmsk
-     6 mnemonic:blsr
-     6 mnemonic:bzhi
-     6 mnemonic:lwpins
-     6 mnemonic:lwpval
-     6 mnemonic:mulx
-     6 mnemonic:pdep
-     6 mnemonic:pext
-     6 mnemonic:rorx
-     6 mnemonic:sarx
-     6 mnemonic:shlx
-     6 mnemonic:shrx
-     6 mnemonic:t1mskc
-     6 mnemonic:tzmsk
-     5 mnemonic:sldt
-     5 mnemonic:smsw
-     5 mnemonic:str
-     5 mnemonic:vfmaddsd
-     5 mnemonic:vfmaddss
-     4 mnemonic:cmps
-     4 mnemonic:lcall
-     4 mnemonic:ljmp
-     4 mnemonic:movs
-     4 mnemonic:seta
+     4 prefix:rex
+     4 prefix:mod_mr
+     4 prefix:mod_rm
+     2 prefix:lock
+     1 mnemonic:clzero
+     1 mem-index
+     1 prefix:long_
+     1 operand:ptr_abs
