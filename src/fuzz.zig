@@ -17,7 +17,7 @@ pub const Prng = struct {
         return switch (@typeInfo(T)) {
             .bool => self.r.random().boolean(),
             .int => self.r.random().int(T),
-            .float => @bitCast(self.r.random().int(std.meta.Int(.unsigned, @bitSizeOf(T)))),
+            .float => @bitCast(self.r.random().int(@Int(.unsigned, @bitSizeOf(T)))),
             else => @compileError("unsupported"),
         };
     }
@@ -41,9 +41,9 @@ fn smallImm(src: anytype) i64 {
 
 const a64_forms = blk: {
     @setEvalBranchQuota(1_000_000);
-    const decls = @typeInfo(a64.tbl.table).@"struct".decls;
+    const decls = @typeInfo(a64.tbl.table).@"struct".decl_names;
     var out: [decls.len][]const a64.Form = undefined;
-    for (decls, 0..) |d, i| out[i] = &@field(a64.tbl.table, d.name);
+    for (decls, 0..) |d, i| out[i] = &@field(a64.tbl.table, d);
     break :blk out;
 };
 
@@ -78,9 +78,9 @@ const GpId = @FieldType(gp.Reg, "id");
 
 const gp_forms = blk: {
     @setEvalBranchQuota(1_000_000);
-    const decls = @typeInfo(gp.tbl.table).@"struct".decls;
+    const decls = @typeInfo(gp.tbl.table).@"struct".decl_names;
     var out: [decls.len][]const gp.Form = undefined;
-    for (decls, 0..) |d, i| out[i] = &@field(gp.tbl.table, d.name);
+    for (decls, 0..) |d, i| out[i] = &@field(gp.tbl.table, d);
     break :blk out;
 };
 

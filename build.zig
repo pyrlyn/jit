@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) void {
     opts.addOption(bool, "x86_64", want_x86_64);
     opts.addOption(bool, "aarch64", want_aarch64);
     // Validation: on by default in Debug/ReleaseSafe, off in ReleaseFast/ReleaseSmall.
-    const safe_default = optimize == .Debug or optimize == .ReleaseSafe;
+    const safe_default = optimize == .debug or optimize == .safe;
     opts.addOption(bool, "validate", b.option(bool, "validate", "Validate operands before emission (default: on in Debug/ReleaseSafe)") orelse safe_default);
     // Hooks stay available in every mode (Ivan: not disabled in release); -Dhooks=false opts out.
     opts.addOption(bool, "hooks", b.option(bool, "hooks", "Default Assembler supports runtime emission hooks (default: on in all modes)") orelse true);
@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
     const fuzz_exe = b.addExecutable(.{ .name = "pyrlyn_jit_fuzz", .root_module = b.createModule(.{
         .root_source_file = b.path("src/fuzz_main.zig"),
         .target = target,
-        .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
+        .optimize = if (optimize == .debug) .safe else optimize,
         .link_libc = true,
     }) });
     b.step("fuzz", "Fuzz the encoders/code buffer with random seeds (env: PYRLYN_JIT_FUZZ_ROUNDS/SEED/ITERS)").dependOn(&b.addRunArtifact(fuzz_exe).step);
@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
                 test_step.dependOn(&b.addRunArtifact(bt).step);
             }
             const run = b.addRunArtifact(exe);
-            if (b.args) |args| run.addArgs(args);
+            run.addPassthruArgs();
             b.step("run-" ++ name, "Run " ++ name).dependOn(&run.step);
         }
     }

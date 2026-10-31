@@ -346,7 +346,7 @@ test "riscv: branches and jal with labels (forward fixups and backward)" {
 
 /// Tiny RV64 interpreter for the ops `li` emits (verifies constant materialization).
 fn evalLi(code: []align(1) const u32, rd: u5) i64 {
-    var x: [32]i64 = .{0} ** 32;
+    var x: [32]i64 = @splat(0);
     for (code) |w| {
         const op = w & 0x7F;
         const d: u5 = @truncate(w >> 7);

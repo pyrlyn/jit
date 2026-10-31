@@ -163,11 +163,11 @@ pub fn ptrPostReg(base: Op, index: Op) Op {
 
 // ---- encoder --------------------------------------------------------------------------------
 
-const n_names = @typeInfo(Name).@"enum".fields.len;
+const n_names = @typeInfo(Name).@"enum".field_names.len;
 
 const Ctx = struct {
     vals: [n_names]i64 = undefined,
-    set: std.StaticBitSet(n_names) = .initEmpty(),
+    set: std.StaticBitSet(n_names) = .empty,
     sz: ?u3 = null,
     /// log2 of the scalar/element register size for shifts and fbits (b=0 .. q=4)
     esz: ?u3 = null,
@@ -1063,9 +1063,9 @@ pub fn encodeIdx(forms: []const Form, ops: []const Op) ?struct { word: u32, idx:
 
 const all_forms = blk: {
     @setEvalBranchQuota(1_000_000);
-    const fs = @typeInfo(Mnemonic).@"enum".fields;
+    const fs = @typeInfo(Mnemonic).@"enum".field_names;
     var out: [fs.len][]const Form = undefined;
-    for (fs, 0..) |f, i| out[i] = &@field(tbl.table, f.name);
+    for (fs, 0..) |f, i| out[i] = &@field(tbl.table, f);
     break :blk out;
 };
 

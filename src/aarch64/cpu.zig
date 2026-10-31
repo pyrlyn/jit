@@ -13,7 +13,7 @@ fn has(name: [*:0]const u8) bool {
 }
 
 fn detect() isa.Features {
-    var f: isa.Features = .initEmpty();
+    var f: isa.Features = .empty;
     f.insert(.ASIMD); // mandatory on Apple silicon
     const map = .{
         .{ .LSE, "hw.optional.arm.FEAT_LSE" },       .{ .CRC32, "hw.optional.armv8_crc32" },

@@ -372,7 +372,7 @@ pub const Builder = struct {
         try buf.emitBytes(op);
         const at = buf.offset();
         const w: u32 = if (size == .short) 1 else 4;
-        const zeros = [_]u8{0} ** 4;
+        const zeros: [4]u8 = @splat(0);
         try buf.emitBytes(zeros[0..w]);
         try buf.addFixup(.{ .at = at, .base = at + w, .label = l.id, .kind = if (size == .short) .rel8 else .rel32 });
     }
@@ -743,7 +743,7 @@ test "builder: shortened code executes (fuzz vs Assembler semantics)" {
         defer b.deinit();
         var labels: [8]Label = undefined;
         for (&labels) |*l| l.* = try b.newLabel();
-        var bound: [8]bool = .{false} ** 8;
+        var bound: [8]bool = @splat(false);
         for (0..60) |_| {
             switch (r.uintLessThan(u8, 4)) {
                 0 => for (0..r.uintLessThan(u8, 40)) |_| try b.nop(),

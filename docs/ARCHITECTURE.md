@@ -1,7 +1,7 @@
 # pyrlyn-jit architecture vs AsmJit
 
 Reference: AsmJit `0464e1c` (2026-10-16), read-only clone in `ref/asmjit` (~115k lines C++).
-pyrlyn-jit: ~1.3k lines Zig 0.16, stdlib only.
+pyrlyn-jit: ~1.3k lines Zig 0.17, stdlib only.
 
 ## AsmJit, in brief
 | Layer | AsmJit | Notes |

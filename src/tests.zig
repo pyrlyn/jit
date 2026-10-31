@@ -277,7 +277,7 @@ test "LogHooks truncates instead of overflowing" {
 test "default options: hooks on in every mode, validation only in Debug/ReleaseSafe" {
     const builtin = @import("builtin");
     // Holds for builds without explicit -Dvalidate/-Dhooks (the test step's defaults).
-    const safe = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+    const safe = builtin.mode == .debug or builtin.mode == .safe;
     if (opts.validate != safe or !opts.hooks) return error.SkipZigTest; // overridden on the command line
     if (opts.x86_64) {
         const x = @import("x86_64/assembler.zig");
@@ -301,8 +301,8 @@ test "default options: hooks on in every mode, validation only in Debug/ReleaseS
 test "x86_64 isa: every instruction has AsmJit forms; matchForm accepts/rejects" {
     if (!opts.x86_64) return error.SkipZigTest;
     const x = @import("x86_64/assembler.zig");
-    inline for (@typeInfo(x.Inst).@"enum".fields) |f| {
-        const id: x.Inst = @enumFromInt(f.value);
+    inline for (@typeInfo(x.Inst).@"enum".field_values) |v| {
+        const id: x.Inst = @enumFromInt(v);
         if (id == .gp) continue; // generated GP path: its own tables (gp_table.zig)
         const ops: x.Ops = .{ .alu = .add, .cond = .e };
         try t.expect(x.formsFor(id, ops).len > 0);
@@ -374,7 +374,7 @@ test "finalize: out-of-range fixups are errors and leave the code untouched" {
     const l = try cb.newLabel();
     try cb.emitBytes(&.{ 0xEB, 0x00 }); // jmp rel8 with a fixup to a far label
     try cb.addFixup(.{ .at = 1, .base = 2, .label = l.id, .kind = .rel8 });
-    try cb.emitBytes(&([_]u8{0x90} ** 200));
+    try cb.emitBytes(&@as([200]u8, @splat(0x90)));
     try cb.bind(l);
     try t.expectError(error.DisplacementOutOfRange, cb.finalize());
     try t.expectEqual(@as(u8, 0x00), cb.code()[1]); // not patched

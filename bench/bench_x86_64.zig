@@ -178,7 +178,7 @@ pub fn main(init: std.process.Init) !void {
         if (comptime A.Hooks == x.CallbackHooks) if (attach_cb) std.debug.assert(cb_count == n * iters);
         if (dump) |d| {
             var pbuf: [512]u8 = undefined;
-            const p = try std.fmt.bufPrintZ(&pbuf, "{s}/pyrlyn_jit_{s}.bin", .{ d, name });
+            const p = try std.fmt.bufPrintSentinel(&pbuf, "{s}/pyrlyn_jit_{s}.bin", .{ d, name }, 0);
             const fp = std.c.fopen(p, "wb") orelse return error.OpenFailed;
             _ = std.c.fwrite(cb.code().ptr, 1, cb.code().len, fp);
             _ = std.c.fclose(fp);
