@@ -9,8 +9,6 @@ const std = @import("std");
 /// names marked "no LLVM feature" are kept for instructions LLVM assembles unconditionally or
 /// no longer supports (reasons in tools/gen_isa.zig).
 pub const Feature = enum {
-    @"3DNOW", // no LLVM feature
-    @"3DNOW2", // no LLVM feature
     ADX, // FeatureADX
     AESKLE, // no LLVM feature
     AESNI, // FeatureAES
@@ -64,7 +62,6 @@ pub const Feature = enum {
     FPU, // FeatureX87
     FSGSBASE, // FeatureFSGSBase
     FXSR, // FeatureFXSR
-    GEODE, // no LLVM feature
     GFNI, // FeatureGFNI
     HRESET, // FeatureHRESET
     I486, // no LLVM feature

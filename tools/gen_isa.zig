@@ -28,8 +28,6 @@ const FeatureMap = struct { []const u8, ?[]const u8 };
 
 /// x86 feature names (the spelling used by `Options.target_features` and the encoder tables).
 const x86_features = [_]FeatureMap{
-    .{ "3DNOW", null }, // removed from LLVM (3DNow! instructions are no longer assembled)
-    .{ "3DNOW2", null }, // removed from LLVM
     .{ "ADX", "FeatureADX" },
     .{ "AESKLE", null }, // LLVM folds AES Key Locker into FeatureKL
     .{ "AESNI", "FeatureAES" },
@@ -83,7 +81,6 @@ const x86_features = [_]FeatureMap{
     .{ "FPU", "FeatureX87" },
     .{ "FSGSBASE", "FeatureFSGSBase" },
     .{ "FXSR", "FeatureFXSR" },
-    .{ "GEODE", null }, // AMD Geode-only 3DNow! extensions; not in LLVM
     .{ "GFNI", "FeatureGFNI" },
     .{ "HRESET", "FeatureHRESET" },
     .{ "I486", null }, // baseline for every x86-64 CPU; LLVM has no feature for it

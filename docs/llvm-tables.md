@@ -91,7 +91,7 @@ tables. `tools/gen_isa.zig` reads, per encoder entry, the LLVM record that defin
 - `Feature` enums: the public names are unchanged (they are the API of `target_features` /
   `deny_features`, and `gp_table.zig`/`vec_table.zig` use them). Each name maps to an LLVM
   `SubtargetFeature` record (the generator fails if one is missing); names with no LLVM feature
-  (x86: 30, e.g. `MSR`, `RDTSC`, `VMX`, `3DNOW`; AArch64: 3, `DGH`, `RPRFM`, `TME`) are kept with
+  (x86: 27, e.g. `MSR`, `RDTSC`, `VMX`; AArch64: 3, `DGH`, `RPRFM`, `TME`) are kept with
   the reason next to them in `x86_features` / `a64_features`.
 
 Compared with the previous AsmJit-derived tables (`src/isa_tests.zig` checks this): every x86-64
