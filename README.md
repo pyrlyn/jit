@@ -54,4 +54,5 @@ Full build options, install, pkg-config, CMake and CPM: [docs/BUILDING.md](docs/
 - [docs/BUILDING.md](docs/BUILDING.md): building and using from C/C++.
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): benchmark vs AsmJit.
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md): current limitations and implemented features.
+- [docs/llvm-tables.md](docs/llvm-tables.md): x86-64 GP table generated from LLVM.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md).

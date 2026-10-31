@@ -1,5 +1,5 @@
-//! Table-driven x86-64 GP instruction encoder (forms generated from AsmJit's ISA database by
-//! scripts/gen_gp_tables.py). Covers 8/16/32/64-bit register, memory and immediate operands,
+//! Table-driven x86-64 GP instruction encoder (forms generated from LLVM's X86 target description
+//! by tools/gen_tables.zig, `zig build gen-tables`; see docs/llvm-tables.md). Covers 8/16/32/64-bit register, memory and immediate operands,
 //! including RIP-relative memory (raw displacement or label).
 //!
 //!     try gp.emit(&buf, .add, .{ gp.r32(.rcx), gp.dword(x.ptr(.rax, 8)) });
