@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(pyrlyn-jit VERSION 0.1.0 LANGUAGES C)
 
-find_program(PYRLYN_JIT_ZIG_EXECUTABLE zig REQUIRED DOC "Zig compiler (0.16) used to build pyrlyn-jit")
+find_program(PYRLYN_JIT_ZIG_EXECUTABLE zig REQUIRED DOC "Zig compiler (0.17) used to build pyrlyn-jit")
 set(PYRLYN_JIT_OPTIMIZE "" CACHE STRING "zig -Doptimize (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall); empty = from CMAKE_BUILD_TYPE")
 set(PYRLYN_JIT_TARGETS "x86_64,aarch64" CACHE STRING "Backends to compile in (-Dtargets)")
 option(PYRLYN_JIT_INSTALL "Install pyrlyn-jit with the CMake install step" ${PROJECT_IS_TOP_LEVEL})

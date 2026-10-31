@@ -21,7 +21,7 @@ fn cpuid(leaf: u32, sub: u32) [4]u32 {
 }
 
 fn detect() isa.Features {
-    var f: isa.Features = .initEmpty();
+    var f: isa.Features = .empty;
     const max = cpuid(0, 0)[0];
     const l1 = cpuid(1, 0);
     const bit = struct {

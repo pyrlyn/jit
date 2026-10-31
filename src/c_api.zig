@@ -133,9 +133,9 @@ export fn pjit_finalize(b: ?*Buffer) c_int {
 
 fn FormMap(comptime T: type, comptime F: type) type {
     @setEvalBranchQuota(2_000_000);
-    const decls = @typeInfo(T).@"struct".decls;
+    const decls = @typeInfo(T).@"struct".decl_names;
     var kvs: [decls.len]struct { []const u8, []const F } = undefined;
-    for (decls, 0..) |d, i| kvs[i] = .{ d.name, &@field(T, d.name) };
+    for (decls, 0..) |d, i| kvs[i] = .{ d, &@field(T, d) };
     const final = kvs;
     return struct {
         const map = std.StaticStringMap([]const F).initComptime(final);
@@ -143,9 +143,9 @@ fn FormMap(comptime T: type, comptime F: type) type {
 }
 const a64_map = std.StaticStringMap(a64.Mnemonic).initComptime(blk: {
     @setEvalBranchQuota(2_000_000);
-    const fs = @typeInfo(a64.Mnemonic).@"enum".fields;
+    const fs = @typeInfo(a64.Mnemonic).@"enum".field_names;
     var kvs: [fs.len]struct { []const u8, a64.Mnemonic } = undefined;
-    for (fs, 0..) |f, i| kvs[i] = .{ f.name, @enumFromInt(f.value) };
+    for (fs, 0..) |f, i| kvs[i] = .{ f, @field(a64.Mnemonic, f) };
     break :blk kvs;
 });
 const gp_map = FormMap(gp.tbl.table, gp.Form).map;
@@ -169,7 +169,7 @@ pub const A64Op = extern struct {
     ext_op: u8,
     ext_n: u8,
     has_ext: u8,
-    _pad: [5]u8 = .{0} ** 5,
+    _pad: [5]u8 = @splat(0),
     imm: i64,
     fimm: f64,
 };

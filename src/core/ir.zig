@@ -282,7 +282,7 @@ pub fn interpret(f: *const Func, args: []const i64, max_steps: usize) !i64 {
                 .load => |x| regs[x.dst] = @as(*const i64, @ptrFromInt(@as(usize, @bitCast(regs[x.base] +% x.disp)))).*,
                 .store => |x| @as(*i64, @ptrFromInt(@as(usize, @bitCast(regs[x.base] +% x.disp)))).* = regs[x.src],
                 .call => |x| {
-                    var a: [6]i64 = .{0} ** 6;
+                    var a: [6]i64 = @splat(0);
                     for (x.args, 0..) |v, i| a[i] = regs[v];
                     const F = *const fn (i64, i64, i64, i64, i64, i64) callconv(.c) i64;
                     regs[x.dst] = @as(F, @ptrFromInt(x.addr))(a[0], a[1], a[2], a[3], a[4], a[5]);

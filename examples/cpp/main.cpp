@@ -13,8 +13,15 @@ int main() {
         b.bind(done);
         b.a64("ret", {});
 #elif defined(__x86_64__)
-        b.x64("mov", {pjit_x64_reg(PJIT_RAX, 8), pjit_x64_reg(PJIT_RDI, 8)});
-        b.x64("add", {pjit_x64_reg(PJIT_RAX, 8), pjit_x64_reg(PJIT_RSI, 8)});
+#if defined(_WIN32) /* Win64 ABI: args in rcx, rdx */
+#define ARG0 PJIT_RCX
+#define ARG1 PJIT_RDX
+#else /* System V: args in rdi, rsi */
+#define ARG0 PJIT_RDI
+#define ARG1 PJIT_RSI
+#endif
+        b.x64("mov", {pjit_x64_reg(PJIT_RAX, 8), pjit_x64_reg(ARG0, 8)});
+        b.x64("add", {pjit_x64_reg(PJIT_RAX, 8), pjit_x64_reg(ARG1, 8)});
         b.x64Jump(-1, done);
         b.x64("int3", {});
         b.bind(done);

@@ -1,6 +1,6 @@
 # pyrlyn-jit
 
-A small AsmJit-style machine code generator in Zig 0.16 (stdlib only).
+A small AsmJit-style machine code generator in Zig 0.17 (stdlib only).
 
 - Backends are separate modules, picked at build time: **x86-64** and **AArch64**
   (32-bit x86, RISC-V, MIPS: see [TODO-ARCHES.md](TODO-ARCHES.md)).
@@ -192,7 +192,7 @@ When a layer is off it disappears at compile time: no checks, no branches, no ex
 ## Building
 
 Dependencies:
-- **Zig 0.16.0**, pinned in `mise.toml` (`mise install`, then `mise exec -- zig ...` or an activated shell).
+- **Zig 0.17.0**, pinned in `mise.toml` (`mise install`, then `mise exec -- zig ...` or an activated shell).
 - No other dependencies for the library, tests and examples (stdlib only, links libc).
 - Optional, only for the AsmJit benchmark and regenerating encoding tests: `clang` (Xcode
   command line tools), `objdump`, CMake + Ninja, Python 3, and an AsmJit checkout at `../asmjit-loc`.

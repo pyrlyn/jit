@@ -503,7 +503,7 @@ noinline fn emitSlow(buf: *CodeBuffer, all: []const Form, narrowed: []const Form
 }
 
 fn specializable(comptime Args: type) bool {
-    for (@typeInfo(Args).@"struct".fields) |fld| if (fld.type == Op) return false;
+    for (@typeInfo(Args).@"struct".field_types) |ft| if (ft == Op) return false;
     return true;
 }
 
@@ -513,7 +513,7 @@ fn prioritized(comptime all: []const Form, comptime Args: type) []const Form {
     @setEvalBranchQuota(1_000_000);
     const nar = narrow(all, Args);
     var regs = true;
-    for (@typeInfo(Args).@"struct".fields) |fld| if (fld.type == Mem) {
+    for (@typeInfo(Args).@"struct".field_types) |ft| if (ft == Mem) {
         regs = false;
     };
     var out: []const Form = &.{};
@@ -558,12 +558,12 @@ fn typeAccepts(comptime T: type, kd: Kind) bool {
 
 fn narrow(comptime all: []const Form, comptime Args: type) []const Form {
     @setEvalBranchQuota(1_000_000);
-    const fields = @typeInfo(Args).@"struct".fields;
+    const fields = @typeInfo(Args).@"struct".field_types;
     var out: []const Form = &.{};
     for (all) |f| {
         if (f.ops.len != fields.len) continue;
         var ok = true;
-        for (f.ops, fields) |kd, fld| ok = ok and typeAccepts(fld.type, kd.k);
+        for (f.ops, fields) |kd, ft| ok = ok and typeAccepts(ft, kd.k);
         if (ok) out = out ++ &[_]Form{f};
     }
     const final = out[0..out.len].*;

@@ -240,7 +240,7 @@ fn run(f: *const ir.Func, opts: Options, args: []const i64) !i64 {
     _ = try compile(t.allocator, f, &cb, opts);
     const fun = try JitRuntime.add(&cb);
     defer fun.release();
-    var a: [6]i64 = .{0} ** 6;
+    var a: [6]i64 = @splat(0);
     for (args, 0..) |v, i| a[i] = v;
     return fun.ptr(*const fn (i64, i64, i64, i64, i64, i64) callconv(.c) i64)(a[0], a[1], a[2], a[3], a[4], a[5]);
 }

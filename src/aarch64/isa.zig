@@ -81,7 +81,7 @@ pub const Features = std.EnumSet(Feature);
 /// Set of features from a list (comptime-friendly).
 pub fn featureSet(comptime list: []const Feature) Features {
     @setEvalBranchQuota(100_000);
-    var s: Features = .initEmpty();
+    var s: Features = .empty;
     for (list) |f| s.insert(f);
     return s;
 }

@@ -1,6 +1,7 @@
 //! Executable memory (AsmJit: JitRuntime + VirtMem, without the pooled JitAllocator).
 //! macOS/arm64: MAP_JIT + pthread_jit_write_protect_np + sys_icache_invalidate.
 //! Other POSIX hosts: mmap RW, copy, mprotect RX (W^X, never RWX).
+//! Windows: VirtualAlloc RW, copy, VirtualProtect RX (W^X, never RWX).
 const std = @import("std");
 const builtin = @import("builtin");
 const CodeBuffer = @import("code_buffer.zig").CodeBuffer;
@@ -11,6 +12,22 @@ extern "c" fn mprotect(addr: *anyopaque, len: usize, prot: c_int) c_int;
 extern "c" fn pthread_jit_write_protect_np(enabled: c_int) void;
 extern "c" fn sys_icache_invalidate(start: *anyopaque, len: usize) void;
 extern "c" fn __clear_cache(start: *anyopaque, end: *anyopaque) void;
+
+const is_windows = builtin.os.tag == .windows;
+const MEM_COMMIT = 0x1000;
+const MEM_RESERVE = 0x2000;
+const MEM_RELEASE = 0x8000;
+const PAGE_READWRITE = 0x04;
+const PAGE_EXECUTE_READ = 0x20;
+extern "kernel32" fn VirtualAlloc(addr: ?*anyopaque, size: usize, kind: u32, protect: u32) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn VirtualFree(addr: *anyopaque, size: usize, kind: u32) callconv(.winapi) i32;
+extern "kernel32" fn VirtualProtect(addr: *anyopaque, size: usize, protect: u32, old: *u32) callconv(.winapi) i32;
+extern "kernel32" fn FlushInstructionCache(process: *anyopaque, addr: ?*const anyopaque, size: usize) callconv(.winapi) i32;
+extern "kernel32" fn GetCurrentProcess() callconv(.winapi) *anyopaque;
+
+fn unmap(p: *anyopaque, len: usize) void {
+    if (is_windows) _ = VirtualFree(p, 0, MEM_RELEASE) else _ = munmap(p, len);
+}
 
 const PROT_READ = 1;
 const PROT_WRITE = 2;
@@ -30,7 +47,7 @@ pub const Function = struct {
         return @ptrCast(@alignCast(self.mem.ptr));
     }
     pub fn release(self: Function) void {
-        _ = munmap(self.mem.ptr, self.mem.len);
+        unmap(self.mem.ptr, self.mem.len);
     }
 };
 
@@ -41,6 +58,7 @@ const page = 16384;
 pub fn add(cb: *const CodeBuffer) Error!Function {
     const code = cb.code();
     const size = std.mem.alignForward(usize, @max(code.len, 1), page);
+    if (is_windows) return addWindows(code, size);
     const flags: c_int = MAP_PRIVATE | MAP_ANON | (if (use_map_jit) MAP_JIT else 0);
     const prot: c_int = if (use_map_jit) PROT_READ | PROT_WRITE | PROT_EXEC else PROT_READ | PROT_WRITE;
     const p = mmap(null, size, prot, flags, -1, 0) orelse return error.MapFailed;
@@ -65,6 +83,20 @@ pub fn add(cb: *const CodeBuffer) Error!Function {
         }
         if (builtin.cpu.arch == .aarch64) __clear_cache(mem.ptr, mem.ptr + code.len);
     }
+    return .{ .mem = mem };
+}
+
+fn addWindows(code: []const u8, size: usize) Error!Function {
+    const p = VirtualAlloc(null, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) orelse return error.MapFailed;
+    const mem: []align(4096) u8 = @as([*]align(4096) u8, @ptrCast(@alignCast(p)))[0..size];
+    @memcpy(mem[0..code.len], code);
+    fillTrap(mem[code.len..]);
+    var old: u32 = 0;
+    if (VirtualProtect(p, size, PAGE_EXECUTE_READ, &old) == 0) {
+        _ = VirtualFree(p, 0, MEM_RELEASE);
+        return error.ProtectFailed;
+    }
+    _ = FlushInstructionCache(GetCurrentProcess(), p, code.len);
     return .{ .mem = mem };
 }
 

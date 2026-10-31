@@ -32,7 +32,7 @@ pub const CpuCheck = enum { none, target, host };
 /// Converts feature names to a backend's `Features` set at compile time.
 pub fn featureSet(comptime Feature: type, comptime names: []const []const u8) std.EnumSet(Feature) {
     @setEvalBranchQuota(100_000);
-    var set: std.EnumSet(Feature) = .initEmpty();
+    var set: std.EnumSet(Feature) = .empty;
     for (names) |n| set.insert(std.meta.stringToEnum(Feature, n) orelse @compileError("unknown CPU feature: " ++ n));
     return set;
 }
