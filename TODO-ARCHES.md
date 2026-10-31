@@ -71,7 +71,7 @@ Builder, Compiler and register allocator: [docs/ROADMAP.md](docs/ROADMAP.md).
    - `0xFFFFFFFF` -> `mov r32` gives 0x00000000FFFFFFFF, while `mov r/m64, -1` gives all ones;
    - `-1` -> 7-byte `mov r/m64, imm32`; `or r64, -1` -> imm8 form.
 5. Size policy table (opt-in `.mov_policy = .size | .asmjit_default`): AsmJit's default emits
-   7-byte `mov r64, imm32` for positive values; ZigJIT keeps the 5-byte form by default.
+   7-byte `mov r64, imm32` for positive values; pyrlyn-jit keeps the 5-byte form by default.
    `xor r32, r32` for zero only through an explicit `zeroR` (it clobbers flags).
 6. Avoid redundant REX (already done for r/m without W; keep it when adding 32-bit forms).
 7. More forms: shifts (`shl/shr/sar` by 1, imm8, cl), `neg/not`, `div/idiv` (rdx:rax), `movzx/movsx`,

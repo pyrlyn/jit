@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Port AsmJit's AArch64 assembler tests (asmjit_test_assembler_a64.cpp) to ZigJIT's table-driven
+"""Port AsmJit's AArch64 assembler tests (asmjit_test_assembler_a64.cpp) to pyrlyn-jit's table-driven
 `a64` encoder. Output: src/asmjit_a64_tests.zig + bench/asmjit_a64_unsupported.txt.
 
     python3 scripts/gen_asmjit_a64_tests.py [path/to/asmjit]   # default ../asmjit-loc

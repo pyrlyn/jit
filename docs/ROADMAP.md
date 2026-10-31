@@ -28,7 +28,7 @@ to an Assembler. Users never write bytes or compute offsets.
 
 ### Design
 - `BuilderT(comptime Arch: type, comptime opts: Options)`. `Arch` is the backend module
-  (`zigjit.x86_64`), so `Arch.Inst`, `Arch.Ops`, `Arch.AssemblerT` are known at comptime.
+  (`pyrlyn_jit.x86_64`), so `Arch.Inst`, `Arch.Ops`, `Arch.AssemblerT` are known at comptime.
 - Node: `{ kind: enum { inst, label, align, embed, comment, func, sentinel }, inst: Arch.Inst,
   ops: Arch.Ops, next, prev }`, stored in an arena with indices (u32) instead of pointers.
 - API mirrors the Assembler (`b.movRR(...)`) but records nodes. It reuses the same `Inst`/`Ops`
@@ -86,7 +86,7 @@ Estimate: 3–4 weeks for x86-64, +1–2 weeks AArch64.
 - byte-exact for small functions with fixed register choices;
 - execution under Rosetta/native: arithmetic, loops, recursion (fact, fib), calls into Zig,
   many arguments (stack-passed), mixed i32/i64;
-- differential: same IR compiled by ZigJIT and an interpreter (or AsmJit Compiler via a
+- differential: same IR compiled by pyrlyn-jit and an interpreter (or AsmJit Compiler via a
   translator), compare results on random inputs.
 
 ## 3. Register allocator

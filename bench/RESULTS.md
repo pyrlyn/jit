@@ -1,15 +1,15 @@
 # x86-64 codegen benchmark (Apple M3 Max, native arm64 host, 2026-10-25)
 ns per emitted instruction; median of per-run averages / best single iteration; 9 runs x 5000 iterations.
-AsmJit 0464e1c Release (-O3), `kOptimizeForSize`; ZigJIT ReleaseFast. All outputs byte-identical.
+AsmJit 0464e1c Release (-O3), `kOptimizeForSize`; pyrlyn-jit ReleaseFast. All outputs byte-identical.
 
-| Scenario | instrs | bytes (both) | AsmJit median / min | ZigJIT median / min | speedup (median) |
+| Scenario | instrs | bytes (both) | AsmJit median / min | pyrlyn-jit median / min | speedup (median) |
 |---|--:|--:|--:|--:|--:|
 | straight | 1569 | 6834 | 9.75 / 7.67 | 2.23 / 1.96 | 4.4x |
 | calls | 1282 | 3330 | 10.45 / 8.61 | 2.51 / 2.15 | 4.2x |
 | loops | 1281 | 4865 | 14.58 / 11.74 | 2.98 / 2.60 | 4.9x |
 | mem | 1537 | 10112 | 10.90 / 9.14 | 2.35 / 2.06 | 4.6x |
 
-## Optimizations (ZigJIT medians, ns/instr: straight / calls / loops / mem)
+## Optimizations (pyrlyn-jit medians, ns/instr: straight / calls / loops / mem)
 | Version | change | result |
 |---|---|---|
 | v0 | byte-by-byte `put8` through `*CodeBuffer` (`assembler_v0_baseline.zig.txt`) | 5.22 / 5.36 / 6.60 / 11.80 |
@@ -42,7 +42,7 @@ nothing measurable on top. All configurations stay 4–7× faster than AsmJit.
 
 `before_*` = commit a4329b1, `after_*` = this change. 21 interleaved runs, median ns/instr.
 `off` = `-Dhooks=false`; `after_default` = default ReleaseFast build (hooks compiled in, none
-attached, attachment unknown at compile time); `+cb` = same binary with `ZJ_HOOK=1` (runtime
+attached, attachment unknown at compile time); `+cb` = same binary with `PJIT_HOOK=1` (runtime
 counting callback via function pointer); `counting` = comptime `CountingHooks` attached.
 
 | scenario | asmjit | before_off | after_off | after_default | after_default+cb | before_counting | after_counting |
@@ -86,11 +86,11 @@ Layers-off is unchanged. `loops`/default is +0.3 ns (newLabel limit compare); wi
 ReleaseFast, `bench/run.sh 7 5000`, median ns/instr, back-to-back on the same loaded Mac (load ~28–37).
 Baseline = 3a0ac27 bench binary run in between. Output bytes identical to AsmJit in every scenario.
 
-| Scenario | AsmJit | ZigJIT 3a0ac27 | ZigJIT 815e9af |
+| Scenario | AsmJit | pyrlyn-jit 3a0ac27 | pyrlyn-jit 815e9af |
 |---|--:|--:|--:|
 | straight | 10.63 | 2.57 | 2.36 |
 | calls | 11.41 | 2.57 | 2.21 |
 | loops | 15.72 | 2.44 | 2.11 |
 | mem | 12.16 | 2.66 | 2.28 |
 
-Min ns/instr is identical between the two ZigJIT builds (1.76–2.03): no regression.
+Min ns/instr is identical between the two pyrlyn-jit builds (1.76–2.03): no regression.
