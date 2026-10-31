@@ -1,7 +1,7 @@
-# ZigJIT architecture vs AsmJit
+# pyrlyn-jit architecture vs AsmJit
 
 Reference: AsmJit `0464e1c` (2026-10-16), read-only clone in `ref/asmjit` (~115k lines C++).
-ZigJIT: ~1.3k lines Zig 0.16, stdlib only.
+pyrlyn-jit: ~1.3k lines Zig 0.16, stdlib only.
 
 ## AsmJit, in brief
 | Layer | AsmJit | Notes |
@@ -17,14 +17,14 @@ ZigJIT: ~1.3k lines Zig 0.16, stdlib only.
 | Misc | `Environment`/`Arch`, `CpuInfo`, `Formatter`/`Logger`, `ConstPool`, `FuncFrame`/calling conventions, `ErrorHandler`, PAuth, `ujit` (portable SIMD compiler) | |
 | Backends | x86/x64, AArch64 (AArch32 DB only) | |
 
-## ZigJIT mapping
-| AsmJit | ZigJIT | Status |
+## pyrlyn-jit mapping
+| AsmJit | pyrlyn-jit | Status |
 |---|---|---|
 | `CodeHolder` + `CodeBuffer` (single .text) | `core/code_buffer.zig: CodeBuffer` (bytes, labels, fixups, `reset`, `finalize`) | done (one section) |
 | `Label`, `LabelEntry`, `Fixup` | `Label{id}`, `labels: ArrayList(u32)`, `Fixup{at,base,label,kind}` resolved in `finalize` | done: rel8/rel32 (x86), imm26/imm19 (a64) |
 | `RelocEntry`, base address, cross-section | — | todo |
 | `Environment`/`Arch` | `core/arch.zig` (host vs target kept separate) | done |
-| `BaseEmitter` virtual `_emit` | **none on purpose**: user calls `zigjit.x86_64.Assembler` methods; everything comptime, no vtable | by design |
+| `BaseEmitter` virtual `_emit` | **none on purpose**: user calls `pyrlyn_jit.x86_64.Assembler` methods; everything comptime, no vtable | by design |
 | `x86::Assembler` | `x86_64/assembler.zig` | subset (below) |
 | `a64::Assembler` | `aarch64/assembler.zig` | small subset |
 | x86 (32-bit) | — | planned as its own module `x86/` (shares encoder pieces with x86_64 via comptime) |
@@ -37,7 +37,7 @@ ZigJIT: ~1.3k lines Zig 0.16, stdlib only.
 
 ### Build-time selection
 `zig build -Dtargets=x86_64,aarch64` (default both). Disabled backends are `void` in
-`zigjit.zig`, so they are never analyzed or compiled. Hot path has no runtime dispatch:
+`pyrlyn_jit.zig`, so they are never analyzed or compiled. Hot path has no runtime dispatch:
 `Assembler` is a one-pointer struct, each method is a direct encoder that writes one
 instruction with a single 16-byte store into the pre-reserved buffer.
 
@@ -96,7 +96,7 @@ With both layers off the wrapper is the raw encoder, and the struct holds only t
 the benchmark (no slowdown, see bench/RESULTS.md).
 
 AsmJit does the same job at runtime: `BaseEmitter::_emit` always goes through a virtual call,
-checks `_diagnosticOptions` for validation, and calls the `Logger` if attached. ZigJIT moves
+checks `_diagnosticOptions` for validation, and calls the `Logger` if attached. pyrlyn-jit moves
 that choice to compile time.
 
 ### What is validated and why

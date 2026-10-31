@@ -1,6 +1,6 @@
-//! ZigJIT — a machine code generator in the spirit of AsmJit.
+//! pyrlyn-jit — a machine code generator in the spirit of AsmJit.
 //! Each target is a separate module compiled in only if enabled via `-Dtargets=`.
-const opts = @import("zigjit_options");
+const opts = @import("pyrlyn_jit_options");
 
 pub const CodeBuffer = @import("core/code_buffer.zig").CodeBuffer;
 pub const Label = @import("core/code_buffer.zig").Label;
@@ -12,11 +12,11 @@ pub const safety = @import("core/safety.zig");
 pub const build_options = opts;
 pub const JitRuntime = @import("core/jit_runtime.zig");
 
-/// `zigjit.x86_64.Assembler`, `.Gp`, `.ptr`, ... (void if disabled at build time)
+/// `pyrlyn_jit.x86_64.Assembler`, `.Gp`, `.ptr`, ... (void if disabled at build time)
 pub const x86_64 = if (opts.x86_64) @import("x86_64/assembler.zig") else void;
-/// `zigjit.aarch64.Assembler`, `.X`, ... (void if disabled at build time)
-/// `zigjit.x86_64_builder.Builder`: node-list layer over the x86-64 Assembler (void if disabled).
+/// `pyrlyn_jit.x86_64_builder.Builder`: node-list layer over the x86-64 Assembler (void if disabled).
 pub const x86_64_builder = if (opts.x86_64) @import("x86_64/builder.zig") else void;
+/// `pyrlyn_jit.aarch64.Assembler`, `.X`, ... (void if disabled at build time)
 pub const aarch64 = if (opts.aarch64) @import("aarch64/assembler.zig") else void;
 
 test {
