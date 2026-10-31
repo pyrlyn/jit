@@ -382,3 +382,12 @@ AArch64, `aarch64/neon.zig`: `add/sub/mul` (16b/8h/4s/2d), `fadd/fsub/fmul/fmla`
 ### Sticky errors and error handler
 
 Normal Zig style is `try a.addRR(...)`. For long generated sequences, `cb.keep(a.addRR(...))` records instead of returning. The first error is kept in `cb.sticky`, every error goes to `cb.error_handler` (`{ ctx, func(ctx, err, offset) }`), and `finalize` returns `EmitFailed` while a sticky error is set (`reset` clears it). The failing instruction emits nothing; later instructions are still emitted.
+
+## License
+
+You can use this project under **either** of the following licenses, at your choice:
+
+1. [GNU GPLv3](LICENSE): free for open source applications on any platform, including embedded systems.
+2. [Commercial license](PRICING.md): for proprietary applications, including embedded systems.
+
+These licenses cover pyrlyn-jit's own code only. AsmJit is used for tests and is not part of the pyrlyn-jit distribution; see [third_party/THIRD_PARTY.txt](third_party/THIRD_PARTY.txt).
