@@ -222,6 +222,58 @@ Tests:
 - `bench/bench_x86_64.zig` tests: every benchmark scenario is byte-identical to AsmJit's output
   (`bench/ref/*.bin`) with layers off, validate on, and validate + counting hook.
 
+## Using from C/C++ (install, pkg-config, CMake, CPM)
+
+`build.zig` is the primary build. `zig build install` installs the C ABI library:
+
+```sh
+zig build install -Doptimize=ReleaseFast --prefix /opt/zigjit
+# lib/libzigjit.a, lib/libzigjit.{dylib,so}, include/zigjit.h, include/zigjit.hpp,
+# lib/pkgconfig/zigjit.pc (relocatable; -Dversion=... sets its Version)
+```
+
+On macOS the installed `libzigjit.a` is re-packed with the system `ar`, so Apple `ld` accepts it.
+
+**pkg-config:**
+
+```sh
+export PKG_CONFIG_PATH=/opt/zigjit/lib/pkgconfig
+cc main.c $(pkg-config --cflags --libs zigjit) -Wl,-rpath,/opt/zigjit/lib   # shared
+cc main.c $(pkg-config --cflags zigjit) /opt/zigjit/lib/libzigjit.a          # static
+```
+
+**CMake** (3.20+, needs `zig` on `PATH` or `-DZIGJIT_ZIG_EXECUTABLE=...`). The top-level
+`CMakeLists.txt` is a thin adapter: it runs `zig build install` into the build directory and
+exposes IMPORTED targets `zigjit::zigjit` (static) and `zigjit::zigjit_shared`. `-Doptimize` follows
+`CMAKE_BUILD_TYPE` (Release/MinSizeRel → ReleaseFast, RelWithDebInfo/none → ReleaseSafe,
+Debug → Debug); override with `-DZIGJIT_OPTIMIZE=...`, backends with `-DZIGJIT_TARGETS=x86_64`.
+
+```cmake
+# add_subdirectory
+add_subdirectory(third_party/zig-jit)
+target_link_libraries(app PRIVATE zigjit::zigjit)
+
+# FetchContent
+include(FetchContent)
+FetchContent_Declare(zigjit GIT_REPOSITORY https://github.com/pyrlyn/jit.git GIT_TAG main)
+FetchContent_MakeAvailable(zigjit)
+
+# CPM
+CPMAddPackage(NAME zigjit GITHUB_REPOSITORY pyrlyn/jit GIT_TAG main)
+
+# installed (cmake --install, or zig-built prefix with the config files)
+find_package(zigjit 0.1 REQUIRED CONFIG)
+```
+
+Install via CMake: `cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/zigjit && cmake --build build && cmake --install build`
+(adds `lib/cmake/zigjit/zigjitConfig.cmake` and `zigjitConfigVersion.cmake`).
+`examples/cmake/` is a consumer project linking `examples/c/main.c` against both targets:
+
+```sh
+cmake -S examples/cmake -B build/example && cmake --build build/example && build/example/example_c
+cmake -S examples/cmake -B build/example-pkg -DZIGJIT_USE_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH=/opt/zigjit
+```
+
 ## Benchmark vs AsmJit
 
 ```sh

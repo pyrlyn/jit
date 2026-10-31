@@ -1,0 +1,19 @@
+@PACKAGE_INIT@
+# Installed zigjit: IMPORTED targets zigjit::zigjit (static) and zigjit::zigjit_shared.
+set(_zj_lib "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
+set(_zj_inc "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+if(NOT TARGET zigjit::zigjit)
+  add_library(zigjit::zigjit STATIC IMPORTED)
+  set_target_properties(zigjit::zigjit PROPERTIES
+    IMPORTED_LOCATION "${_zj_lib}/@CMAKE_STATIC_LIBRARY_PREFIX@zigjit@CMAKE_STATIC_LIBRARY_SUFFIX@"
+    INTERFACE_INCLUDE_DIRECTORIES "${_zj_inc}")
+endif()
+if(NOT TARGET zigjit::zigjit_shared)
+  add_library(zigjit::zigjit_shared SHARED IMPORTED)
+  set_target_properties(zigjit::zigjit_shared PROPERTIES
+    IMPORTED_LOCATION "${_zj_lib}/@CMAKE_SHARED_LIBRARY_PREFIX@zigjit@CMAKE_SHARED_LIBRARY_SUFFIX@"
+    INTERFACE_INCLUDE_DIRECTORIES "${_zj_inc}")
+endif()
+unset(_zj_lib)
+unset(_zj_inc)
+check_required_components(zigjit)
