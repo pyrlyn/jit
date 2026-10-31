@@ -24,7 +24,7 @@ coloring. Each layer is generic over the target with comptime parameters, like `
 ## 1. Builder
 
 **Status (feat/builder): x86-64 implemented** in `src/x86_64/builder.zig`
-(`zigjit.x86_64_builder.Builder`): index-linked node list (inst/label/align/embed/comment),
+(`pyrlyn_jit.x86_64_builder.Builder`): index-linked node list (inst/label/align/embed/comment),
 cursor insertion and removal, all typed x86-64 emitters, byte-identical serialization through
 any `AssemblerT(opts)` (validation and hooks unchanged), passes `removeDeadCode`,
 `removeJumpsToNext`, `shortenBranches` (iterative relaxation, rel8 forward and backward), and a
@@ -36,7 +36,7 @@ to an Assembler. Users never write bytes or compute offsets.
 
 ### Design
 - `BuilderT(comptime Arch: type, comptime opts: Options)`. `Arch` is the backend module
-  (`zigjit.x86_64`), so `Arch.Inst`, `Arch.Ops`, `Arch.AssemblerT` are known at comptime.
+  (`pyrlyn_jit.x86_64`), so `Arch.Inst`, `Arch.Ops`, `Arch.AssemblerT` are known at comptime.
 - Node: `{ kind: enum { inst, label, align, embed, comment, func, sentinel }, inst: Arch.Inst,
   ops: Arch.Ops, next, prev }`, stored in an arena with indices (u32) instead of pointers.
 - API mirrors the Assembler (`b.movRR(...)`) but records nodes. It reuses the same `Inst`/`Ops`
@@ -62,9 +62,9 @@ Estimate: ~2 weeks.
 
 ## 2. Compiler
 
-**Status (feat/compiler, x86-64): steps 1–3 done, simplified.** `src/core/ir.zig` (`zigjit.ir`):
+**Status (feat/compiler, x86-64): steps 1–3 done, simplified.** `src/core/ir.zig` (`pyrlyn_jit.ir`):
 i64 IR with mutable vregs (not SSA/block params), text parser, verifier, printer, reference
-interpreter. `src/x86_64/compiler.zig` (`zigjit.x86_64_compiler`): regalloc
+interpreter. `src/x86_64/compiler.zig` (`pyrlyn_jit.x86_64_compiler`): regalloc
 (`core/regalloc.zig`) -> Builder -> passes -> Assembler; host C ABI (SysV/Win64 shadow space),
 calls to absolute addresses, only-used callee-saved registers in prolog/epilog, spill slots.
 Tested by execution under Rosetta (fib, calls, memory, forced spills) and a differential fuzz
@@ -104,13 +104,13 @@ Estimate: 3–4 weeks for x86-64, +1–2 weeks AArch64.
 - byte-exact for small functions with fixed register choices;
 - execution under Rosetta/native: arithmetic, loops, recursion (fact, fib), calls into Zig,
   many arguments (stack-passed), mixed i32/i64;
-- differential: same IR compiled by ZigJIT and an interpreter (or AsmJit Compiler via a
+- differential: same IR compiled by pyrlyn-jit and an interpreter (or AsmJit Compiler via a
   translator), compare results on random inputs.
 
 ## 3. Register allocator
 
 **Status (feat/regalloc): milestone 1 + call clobbers + fixed registers** in
-`src/core/regalloc.zig` (`zigjit.regalloc`): arch-agnostic (register masks), bitset liveness
+`src/core/regalloc.zig` (`pyrlyn_jit.regalloc`): arch-agnostic (register masks), bitset liveness
 over the CFG, one interval per vreg, linear scan with furthest-end spilling and spill-slot
 reuse, callee-saved-only for call-crossing values, pre-colored vregs, and an interference
 checker (`verify`) exercised by a random-program fuzz test. Not yet: splitting, lifetime
