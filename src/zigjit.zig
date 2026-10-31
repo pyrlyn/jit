@@ -15,6 +15,8 @@ pub const JitRuntime = @import("core/jit_runtime.zig");
 /// `zigjit.x86_64.Assembler`, `.Gp`, `.ptr`, ... (void if disabled at build time)
 pub const x86_64 = if (opts.x86_64) @import("x86_64/assembler.zig") else void;
 /// `zigjit.aarch64.Assembler`, `.X`, ... (void if disabled at build time)
+/// `zigjit.riscv.Assembler`: RV64IM (always compiled; no host dependency).
+pub const riscv = @import("riscv/assembler.zig");
 pub const aarch64 = if (opts.aarch64) @import("aarch64/assembler.zig") else void;
 
 test {
@@ -31,5 +33,6 @@ test {
     if (opts.gp_fuzz) _ = @import("gp_fuzz.zig");
     _ = @import("fuzz.zig");
     if (opts.x86_64) _ = x86_64;
+    _ = riscv;
     if (opts.aarch64) _ = aarch64;
 }

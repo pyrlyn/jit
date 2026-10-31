@@ -14,6 +14,10 @@ pub const FixupKind = enum(u8) {
     a64_imm26,
     /// AArch64 B.cond/CBZ/CBNZ: imm19 * 4 at bits [23:5], relative to instruction start.
     a64_imm19,
+    /// RISC-V B-type (beq/bne/...): imm[12:1] scattered, ±4 KiB, relative to instruction start.
+    rv_b12,
+    /// RISC-V J-type (jal): imm[20:1] scattered, ±1 MiB, relative to instruction start.
+    rv_j20,
 };
 
 pub const Fixup = struct {
@@ -212,7 +216,7 @@ pub const CodeBuffer = struct {
             if (f.label >= self.labels.items.len) return error.InvalidLabel;
             const width: usize = switch (f.kind) {
                 .rel8 => 1,
-                .rel32, .a64_imm26, .a64_imm19 => 4,
+                .rel32, .a64_imm26, .a64_imm19, .rv_b12, .rv_j20 => 4,
             };
             if (@as(usize, f.at) + width > self.len or f.base > self.len) return error.InvalidFixup;
             const target = self.labels.items[f.label];
@@ -223,6 +227,8 @@ pub const CodeBuffer = struct {
                 .rel32 => std.math.cast(i32, disp) != null,
                 .a64_imm26 => @mod(disp, 4) == 0 and @divExact(disp, 4) >= -(1 << 25) and @divExact(disp, 4) < (1 << 25),
                 .a64_imm19 => @mod(disp, 4) == 0 and @divExact(disp, 4) >= -(1 << 18) and @divExact(disp, 4) < (1 << 18),
+                .rv_b12 => @mod(disp, 2) == 0 and disp >= -(1 << 12) and disp < (1 << 12),
+                .rv_j20 => @mod(disp, 2) == 0 and disp >= -(1 << 20) and disp < (1 << 20),
             };
             if (!ok) return error.DisplacementOutOfRange;
         }
@@ -234,6 +240,11 @@ pub const CodeBuffer = struct {
             switch (f.kind) {
                 .rel8 => p[0] = @bitCast(std.math.cast(i8, disp) orelse return error.DisplacementOutOfRange),
                 .rel32 => std.mem.writeInt(i32, p[0..4], std.math.cast(i32, disp) orelse return error.DisplacementOutOfRange, .little),
+                .rv_b12, .rv_j20 => {
+                    var w = std.mem.readInt(u32, p[0..4], .little);
+                    w = if (f.kind == .rv_b12) rvPatchB(w, disp) else rvPatchJ(w, disp);
+                    std.mem.writeInt(u32, p[0..4], w, .little);
+                },
                 .a64_imm26, .a64_imm19 => {
                     const words = @divExact(disp, 4);
                     var w = std.mem.readInt(u32, p[0..4], .little);
@@ -251,6 +262,19 @@ pub const CodeBuffer = struct {
         self.fixups.clearRetainingCapacity();
     }
 };
+
+/// Inserts a B-type offset (imm[12|10:5] at 31:25, imm[4:1|11] at 11:7).
+pub fn rvPatchB(w: u32, disp: i64) u32 {
+    const v: u32 = @truncate(@as(u64, @bitCast(disp)));
+    const enc = ((v >> 12) & 1) << 31 | ((v >> 5) & 0x3F) << 25 | ((v >> 1) & 0xF) << 8 | ((v >> 11) & 1) << 7;
+    return (w & 0x01FFF07F) | enc;
+}
+/// Inserts a J-type offset (imm[20|10:1|11|19:12] at 31:12).
+pub fn rvPatchJ(w: u32, disp: i64) u32 {
+    const v: u32 = @truncate(@as(u64, @bitCast(disp)));
+    const enc = ((v >> 20) & 1) << 31 | ((v >> 1) & 0x3FF) << 21 | ((v >> 11) & 1) << 20 | ((v >> 12) & 0xFF) << 12;
+    return (w & 0x00000FFF) | enc;
+}
 
 test "labels and rel32 fixup" {
     var cb = CodeBuffer.init(std.testing.allocator);
