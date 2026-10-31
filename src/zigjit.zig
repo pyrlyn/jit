@@ -10,6 +10,8 @@ pub const Environment = @import("core/arch.zig").Environment;
 pub const safety = @import("core/safety.zig");
 /// Build-time options (`validate`, `hooks`, enabled backends).
 pub const build_options = opts;
+/// Arch-agnostic linear-scan register allocator (vregs -> physical registers / spill slots).
+pub const regalloc = @import("core/regalloc.zig");
 pub const JitRuntime = @import("core/jit_runtime.zig");
 
 /// `zigjit.x86_64.Assembler`, `.Gp`, `.ptr`, ... (void if disabled at build time)
@@ -19,6 +21,7 @@ pub const aarch64 = if (opts.aarch64) @import("aarch64/assembler.zig") else void
 
 test {
     _ = @import("core/code_buffer.zig");
+    _ = @import("core/regalloc.zig");
     _ = @import("tests.zig");
     _ = @import("enc_tests.zig");
     _ = @import("gp_tests.zig");
