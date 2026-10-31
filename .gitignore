@@ -1,8 +1,8 @@
 # build output
 zig-out/
 .zig-cache/
-# local reference clone of AsmJit
-/ref/
+# local reference clone of AsmJit (third-party, not vendored; see third_party/THIRD_PARTY.txt)
+/third_party/asmjit
 # AsmJit build trees and benchmark outputs
 bench/asmjit-build/
 bench/build-asmjit/
