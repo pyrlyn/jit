@@ -26,6 +26,13 @@ wrapper, Builder/Compiler support, execution tests (no 32-bit host).
 - Estimate: 1–2 weeks after the instruction-DB generator.
 
 ## 2. RISC-V (RV64GC first, RV32 later)
+
+**Status (feat/riscv): RV64IM base implemented** in `src/riscv/assembler.zig` (`pyrlyn_jit.riscv`):
+R/I/S/U/B/J formats, RV64I + W forms, loads/stores, M extension, labels via new `rv_b12` /
+`rv_j20` fixups in `CodeBuffer`, pseudo `li` (any 64-bit constant), `mv/nop/ret/j/callAbs`,
+LP64 prolog/epilog. Tests: spec reference encodings and `li` checked by a small RV64
+interpreter on 20k values. Not yet: A, F/D, C, RV32, far branches, LLVM-generated
+byte-exact suite (no RISC-V-capable assembler on this machine), qemu execution.
 - Base RV64I + M + A, then F/D, then C (compressed, 16-bit) as an opt-in size mode.
 - Fixed 32-bit words like AArch64; immediates split across fields (I/S/B/U/J types).
 - `li` materialization (lui + addi, + slli chains for 64-bit), `auipc`+`jalr` for far calls.
