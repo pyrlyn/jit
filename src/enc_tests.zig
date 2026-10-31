@@ -5,7 +5,7 @@ const opts = @import("pyrlyn_jit_options");
 const CodeBuffer = @import("core/code_buffer.zig").CodeBuffer;
 
 /// Runs one case twice: plain assembler, and with validation (operand checks + the emitted
-/// bytes checked against the AsmJit database forms in isa.zig).
+/// bytes checked against the LLVM-derived forms in isa.zig).
 fn check(comptime A: type, expected: []const u8, comptime name: []const u8, args: anytype, asm_text: []const u8) !void {
     inline for (.{ A.Plain, A.Checked }) |T| {
         var cb = CodeBuffer.init(std.testing.allocator);

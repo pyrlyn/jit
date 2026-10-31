@@ -35,6 +35,7 @@ test {
     _ = @import("core/ir.zig");
     _ = @import("tests.zig");
     _ = @import("enc_tests.zig");
+    _ = @import("isa_tests.zig");
     _ = @import("gp_tests.zig");
     _ = @import("simd_tests.zig");
     _ = @import("a64_sve_tests.zig");

@@ -298,7 +298,7 @@ test "default options: hooks on in every mode, validation only in Debug/ReleaseS
 
 // ---- ISA database (AsmJit db) driven validation ------------------------------------------
 
-test "x86_64 isa: every instruction has AsmJit forms; matchForm accepts/rejects" {
+test "x86_64 isa: every instruction has LLVM forms; matchForm accepts/rejects" {
     if (!opts.x86_64) return error.SkipZigTest;
     const x = @import("x86_64/assembler.zig");
     inline for (@typeInfo(x.Inst).@"enum".field_values) |v| {
@@ -316,7 +316,7 @@ test "x86_64 isa: every instruction has AsmJit forms; matchForm accepts/rejects"
     try t.expect(x.matchForm(add_i8, &.{ 0x48, 0x83, 0xC0, 0x01 }));
     try t.expect(!x.matchForm(add_i8, &.{ 0x48, 0x83, 0xE8, 0x01 })); // /5 = sub
     try t.expect(!x.matchForm(x.isa.table.jmp[1], &.{ 0xE9, 0, 0 })); // rel32 too short
-    try t.expectEqualStrings("add x:rv/mv, imms8", add_i8.asmjit);
+    try t.expectEqualStrings("ADD64ri8", add_i8.llvm);
 }
 
 test "x86_64 cpu features: set check, target option, host detection" {
@@ -345,7 +345,7 @@ test "x86_64 cpu features: set check, target option, host detection" {
     }
 }
 
-test "aarch64 isa: forms match the encoder, DB register-31 rules, host features" {
+test "aarch64 isa: forms match the encoder, register-31 rules, host features" {
     if (!opts.aarch64) return error.SkipZigTest;
     const m = @import("aarch64/assembler.zig");
     const builtin = @import("builtin");
@@ -355,8 +355,8 @@ test "aarch64 isa: forms match the encoder, DB register-31 rules, host features"
     try t.expectEqual(@as(u8, 12), m.isa.table.ldr.imm_bits);
     try t.expectEqual(@as(u8, 8), m.isa.table.ldr.imm_scale);
     try t.expectEqual(@as(u8, 19), m.isa.table.cbz.imm_bits);
-    try t.expectEqual(@as(u32, 0xB4000000), m.isa.table.cbz.value); // DB fix-up (see generator)
-    try t.expectEqual(@as(u32, 0xD65F0000), m.isa.table.ret.value); // DB fix-up
+    try t.expectEqual(@as(u32, 0xB4000000), m.isa.table.cbz.value); // CBZ (AsmJit 0464e1c had the CBNZ bit)
+    try t.expectEqual(@as(u32, 0xD65F0000), m.isa.table.ret.value); // RET (AsmJit 0464e1c had bit 25 clear)
     if (builtin.cpu.arch == .aarch64 and builtin.os.tag == .macos) {
         try t.expect(m.cpu.host().?.contains(.ASIMD));
         var cb = CodeBuffer.init(t.allocator);

@@ -7,7 +7,7 @@ const core = @import("../core/code_buffer.zig");
 const CodeBuffer = core.CodeBuffer;
 pub const Label = core.Label;
 pub const Error = core.Error || error{ InvalidImmediate, InvalidOperand, InvalidLabel, UnsupportedCpuFeature, EncodingMismatch };
-/// Generated from AsmJit's `db/isa_aarch64.json` (scripts/gen_isa_tables.py).
+/// Generated from LLVM's AArch64.td (tools/gen_isa.zig, `zig build gen-tables`).
 pub const isa = @import("isa.zig");
 /// Host CPU feature detection.
 pub const cpu = @import("cpu.zig");

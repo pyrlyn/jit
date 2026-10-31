@@ -20,7 +20,7 @@ pub const Options = struct {
     /// - `.target`: required features must be in `target_features` (checked at compile time);
     /// - `.host`: required features must be present on the running CPU (CPUID / sysctl).
     cpu_check: CpuCheck = .none,
-    /// Feature names from AsmJit's database (`isa.Feature`), e.g. `&.{ "SSE4_2", "AVX2" }`.
+    /// Feature names (`isa.Feature`, mapped to LLVM `SubtargetFeature`s), e.g. `&.{ "SSE4_2", "AVX2" }`.
     target_features: []const []const u8 = &.{},
     /// Deny list (any mode, checked at compile time): an instruction that needs one of these
     /// features is a compile error, e.g. `&.{ "AVX512_F", "RTM" }`.

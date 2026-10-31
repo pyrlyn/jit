@@ -51,31 +51,40 @@ pub fn build(b: *std.Build) void {
         }.f;
         const gen_exe = b.addExecutable(.{ .name = "gen_tables", .root_module = host_mod(b, "tools/gen_tables.zig") });
         const cmp_exe = b.addExecutable(.{ .name = "compare_tables", .root_module = host_mod(b, "tools/compare_tables.zig") });
-        const gen_step = b.step("gen-tables", "Regenerate src/x86_64/gp_table.zig from LLVM's X86.td (-Dllvm-src=...)");
-        const check_step = b.step("check-tables", "Check that the committed gp_table.zig matches a fresh generation (-Dllvm-src=...)");
+        const gen_step = b.step("gen-tables", "Regenerate gp_table.zig and both isa.zig from LLVM's X86.td/AArch64.td (-Dllvm-src=...)");
+        const check_step = b.step("check-tables", "Check that the committed LLVM-generated tables match a fresh generation (-Dllvm-src=...)");
         if (llvm_src) |src| {
-            const tg = b.addSystemCommand(&.{ tblgen, "--dump-json" });
-            tg.addArgs(&.{ "-I", b.pathJoin(&.{ src, "llvm/include" }), "-I", b.pathJoin(&.{ src, "llvm/lib/Target/X86" }) });
-            tg.addArg(b.pathJoin(&.{ src, "llvm/lib/Target/X86/X86.td" }));
-            tg.addArg("-o");
-            const json = tg.addOutputFileArg("X86.json");
+            // One tblgen dump per target; gen_tables writes the tables of that target.
+            const llvm_targets = [_]struct { arg: []const u8, dir: []const u8, td: []const u8, files: []const []const u8 }{
+                .{ .arg = "x86", .dir = "X86", .td = "X86.td", .files = &.{ "src/x86_64/gp_table.zig", "src/x86_64/isa.zig" } },
+                .{ .arg = "a64", .dir = "AArch64", .td = "AArch64.td", .files = &.{"src/aarch64/isa.zig"} },
+            };
+            for (llvm_targets) |tgt| {
+                const tg = b.addSystemCommand(&.{ tblgen, "--dump-json" });
+                tg.addArgs(&.{ "-I", b.pathJoin(&.{ src, "llvm/include" }), "-I", b.pathJoin(&.{ src, "llvm/lib/Target", tgt.dir }) });
+                tg.addArg(b.pathJoin(&.{ src, "llvm/lib/Target", tgt.dir, tgt.td }));
+                tg.addArg("-o");
+                const json = tg.addOutputFileArg(b.fmt("{s}.json", .{tgt.dir}));
 
-            const gen = b.addRunArtifact(gen_exe);
-            gen.addArg("x86");
-            gen.addFileArg(json);
-            gen.addDirectoryArg(b.path("."));
-            gen.has_side_effects = true;
-            gen_step.dependOn(&gen.step);
+                const gen = b.addRunArtifact(gen_exe);
+                gen.addArg(tgt.arg);
+                gen.addFileArg(json);
+                gen.addDirectoryArg(b.path("."));
+                gen.has_side_effects = true;
+                gen_step.dependOn(&gen.step);
 
-            const tmp = b.addRunArtifact(gen_exe);
-            tmp.addArg("x86");
-            tmp.addFileArg(json);
-            const out_dir = tmp.addOutputDirectoryArg("gen");
-            const cmp = b.addRunArtifact(cmp_exe);
-            cmp.addArg("--exact");
-            cmp.addFileArg(b.path("src/x86_64/gp_table.zig"));
-            cmp.addFileArg(out_dir.path(b, "src/x86_64/gp_table.zig"));
-            check_step.dependOn(&cmp.step);
+                const tmp = b.addRunArtifact(gen_exe);
+                tmp.addArg(tgt.arg);
+                tmp.addFileArg(json);
+                const out_dir = tmp.addOutputDirectoryArg("gen");
+                for (tgt.files) |f| {
+                    const cmp = b.addRunArtifact(cmp_exe);
+                    cmp.addArg("--exact");
+                    cmp.addFileArg(b.path(f));
+                    cmp.addFileArg(out_dir.path(b, f));
+                    check_step.dependOn(&cmp.step);
+                }
+            }
         } else {
             const fail = b.addFail("gen-tables/check-tables need -Dllvm-src=PATH to an llvm-project checkout (llvmorg-23.1.4)");
             gen_step.dependOn(&fail.step);

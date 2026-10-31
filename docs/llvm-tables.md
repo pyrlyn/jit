@@ -1,7 +1,8 @@
 # Encoder tables from LLVM
 
-`src/x86_64/gp_table.zig` (x86-64 legacy-encoded general-purpose instructions) is generated from
-LLVM's X86 target description by a Zig tool, not from AsmJit. LLVM is a generation-time input
+`src/x86_64/gp_table.zig` (x86-64 legacy-encoded general-purpose instructions) and the validation
+tables `src/x86_64/isa.zig` and `src/aarch64/isa.zig` are generated from LLVM's X86 and AArch64
+target descriptions by a Zig tool, not from AsmJit. LLVM is a generation-time input
 only; the generated table is committed and a normal build needs neither LLVM nor the generator.
 
 | Table | Source | Status |
@@ -9,15 +10,15 @@ only; the generated table is committed and a normal build needs neither LLVM nor
 | `src/x86_64/gp_table.zig` | LLVM `X86.td` (llvmorg-23.1.4) via `tools/gen_tables.zig` | generated from LLVM |
 | `src/x86_64/vec_table.zig` | AsmJit `db/isa_x86.json` via `scripts/gen_vec_tables.py` | not yet ported |
 | `src/aarch64/a64_table.zig` | AsmJit `db/isa_aarch64.json` via `scripts/gen_a64_tables.py` | not yet ported |
-| `src/x86_64/isa.zig`, `src/aarch64/isa.zig` | AsmJit DB via `scripts/gen_isa_tables.py` | not yet ported |
+| `src/x86_64/isa.zig`, `src/aarch64/isa.zig` | LLVM `X86.td` / `AArch64.td` via `tools/gen_tables.zig` | generated from LLVM |
 
 ## Regenerating
 
 ```sh
 git clone --depth 1 --filter=blob:none --sparse -b llvmorg-23.1.4 https://github.com/llvm/llvm-project
-git -C llvm-project sparse-checkout set llvm/include llvm/lib/Target/X86
-zig build gen-tables   -Dllvm-src=$PWD/llvm-project -Dllvm-tblgen=/path/to/llvm-tblgen   # writes the table
-zig build check-tables -Dllvm-src=$PWD/llvm-project -Dllvm-tblgen=/path/to/llvm-tblgen   # committed == fresh
+git -C llvm-project sparse-checkout set llvm/include llvm/lib/Target/X86 llvm/lib/Target/AArch64
+zig build gen-tables   -Dllvm-src=$PWD/llvm-project -Dllvm-tblgen=/path/to/llvm-tblgen   # writes the tables
+zig build check-tables -Dllvm-src=$PWD/llvm-project -Dllvm-tblgen=/path/to/llvm-tblgen   # committed == fresh (byte-exact)
 python3 scripts/gen_gp_tests.py   # optional: regenerate src/gp_tests.zig (expected bytes from clang)
 ```
 
@@ -36,6 +37,7 @@ writes `scripts/.gp_forms.json` (git-ignored), read by `scripts/gen_gp_tests.py`
   operand roles (ModRM.reg / ModRM.rm / opcode register) from `Form` and the MI operand order, the
   immediate size from `ImmT`, the CPU mode from `In64BitMode`/`Not64BitMode`. Condition-code
   records (`cmov${cond}`, `set${cond}`) are expanded into the 16 mnemonics.
+- `gen_isa.zig`: `src/x86_64/isa.zig` and `src/aarch64/isa.zig` (see below).
 - `gen_tables.zig`: entry point (`zig build gen-tables`).
 - `compare_tables.zig`: form-by-form comparison of two tables (used for the migration below) and
   the `--exact` check behind `zig build check-tables`.
@@ -73,7 +75,47 @@ tie order differs 0, differing 2, only-OLD 0, only-NEW 0
   (3138 total, bytes from clang); `scripts/gen_gp_tests.py` now skips 32-bit-only forms (they
   have no 64-bit LLVM spelling).
 
+## Validation tables (`isa.zig`)
+
+`validate = true` checks every emitted instruction of the hand-written encoders against these
+tables. `tools/gen_isa.zig` reads, per encoder entry, the LLVM record that defines it:
+
+- x86-64: opcode bytes (`OpMap` + `Opcode`; the condition code is added for `AddCCFrm` records,
+  `JCC_1`/`JCC_4`), opcode-register form (`AddRegFrm`), ModRM use and `/digit` (`Form`), immediate
+  kind (`ImmT`), required features (`Predicates` naming a `SubtargetFeature`). `.llvm` is the
+  record name, `.syntax` its Intel-syntax assembly string.
+- AArch64: fixed bits from `Inst`; for an alias (`mov`, `mul`, `mneg`, `neg`, `cmp`, `cmp_imm`,
+  `cset`, `lsr_imm`, `asr_imm`) the fixed operands of the LLVM `InstAlias` (XZR -> 31, literals) are
+  applied to the fields of the underlying record. Rd/Rn accept SP when the operand class is
+  `GPR64sp`; immediate width/scale come from the operand class (`a64_imm_classes`).
+- `Feature` enums: the public names are unchanged (they are the API of `target_features` /
+  `deny_features`, and `gp_table.zig`/`vec_table.zig` use them). Each name maps to an LLVM
+  `SubtargetFeature` record (the generator fails if one is missing); names with no LLVM feature
+  (x86: 30, e.g. `MSR`, `RDTSC`, `VMX`, `3DNOW`; AArch64: 3, `DGH`, `RPRFM`, `TME`) are kept with
+  the reason next to them in `x86_features` / `a64_features`.
+
+Compared with the previous AsmJit-derived tables (`src/isa_tests.zig` checks this): every x86-64
+entry has the same opcode, `/digit`, immediate and features; every AArch64 entry has the same
+fixed bits, SP rules, immediate width/scale and features, except `add_imm`, `sub_imm` and
+`cmp_imm`: in LLVM the `addsub_shifted_imm64` operand owns bits 23:22 (shift), so bit 23 is no
+longer a fixed bit (mask `0xFF000000` instead of `0xFF800000`). The encoders still emit 0 there;
+a test checks it. `cbz` and `ret` no longer need the fix-ups the AsmJit database needed.
+
+## Plan for the remaining tables
+
+| Table | LLVM source | Measured gap (vs the AsmJit-derived table) | Handling |
+|---|---|---|---|
+| `vec_table.zig` (7131 forms) | `X86.td`, VEX/EVEX/XOP records (`OpEnc` = `EncVEX`/`EncEVEX`/`EncXOP`) and SSE/MMX legacy records | LLVM match for 6539; missing: 3DNow! (removed from LLVM), some SEV/TDX/SVM system instructions, AVX10.2 forms under their pre-rename names | Overrides file authored by us (`tools/x86_vec_overrides.zig`, SDM/APM references) for SEV/TDX/SVM; old AVX10.2 names kept as aliases of the renamed LLVM records; 3DNow! dropped (no current CPU, removed upstream) unless a user needs it. |
+| | | AsmJit-only flags `lowprio`, `late_vex`, `er`, `sae` | `er`/`sae` from `hasEVEX_RC` / `hasEVEX_B` + operand class; `lowprio`/`late_vex` are encoder-selection rules: recompute from LLVM (e.g. prefer the shorter VEX form over EVEX when both exist) and freeze any residue as a small commented list. |
+| `a64_table.zig` (3466 forms) | `AArch64.td` records + `InstAlias` | 2706 direct, 312 via aliases, 448 differ in field/immediate encoding | Map the 448 by operand class (immediate encoders: logical imm, `fpimm`, shifted/scaled offsets, SVE/SME index forms) so they come from LLVM; residue that LLVM encodes differently from Arm ARM is reviewed one by one and goes to an overrides file with the Arm ARM reference. |
+
+Each table is a separate PR with: `check-tables` byte-exact, `compare_tables` old vs new (same form
+set, or every difference listed), regenerated byte tests from clang, and tests for new or changed
+forms. When all tables are LLVM-derived, a final PR removes AsmJit as a build-time dependency
+(it stays only for the ported tests).
+
 ## Licensing
 
 LLVM is Apache-2.0 WITH LLVM-exception. The generated table carries an attribution header and
-`NOTICE` lists the derived file. AsmJit's license does not apply to `gp_table.zig` any more.
+`NOTICE` lists the derived files. AsmJit's license does not apply to `gp_table.zig` or the two
+`isa.zig` files any more.
