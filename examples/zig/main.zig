@@ -22,8 +22,10 @@ pub fn main() !void {
         },
         .x86_64 => {
             const a = pjit.x86_64.Assembler.init(&cb);
-            try a.movRR(.rax, .rdi);
-            try a.addRR(.rax, .rsi);
+            // Host C ABI argument registers: Win64 uses rcx/rdx, System V rdi/rsi.
+            const win = builtin.os.tag == .windows;
+            try a.movRR(.rax, if (win) .rcx else .rdi);
+            try a.addRR(.rax, if (win) .rdx else .rsi);
             try a.ret();
         },
         else => @compileError("unsupported host"),

@@ -17,8 +17,15 @@ int main(void) {
     CHECK(pjit_label_bind(b, done));
     CHECK(pjit_a64_emit(b, "ret", NULL, 0));
 #elif defined(__x86_64__)
-    pjit_x64_op mov[] = { pjit_x64_reg(PJIT_RAX, 8), pjit_x64_reg(PJIT_RDI, 8) };
-    pjit_x64_op add[] = { pjit_x64_reg(PJIT_RAX, 8), pjit_x64_reg(PJIT_RSI, 8) };
+#if defined(_WIN32) /* Win64 ABI: args in rcx, rdx */
+#define ARG0 PJIT_RCX
+#define ARG1 PJIT_RDX
+#else /* System V: args in rdi, rsi */
+#define ARG0 PJIT_RDI
+#define ARG1 PJIT_RSI
+#endif
+    pjit_x64_op mov[] = { pjit_x64_reg(PJIT_RAX, 8), pjit_x64_reg(ARG0, 8) };
+    pjit_x64_op add[] = { pjit_x64_reg(PJIT_RAX, 8), pjit_x64_reg(ARG1, 8) };
     CHECK(pjit_x64_emit(b, "mov", mov, 2));
     CHECK(pjit_x64_emit(b, "add", add, 2));
     CHECK(pjit_x64_jump(b, -1, done));              /* jmp done */

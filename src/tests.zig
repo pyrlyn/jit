@@ -769,7 +769,9 @@ fn runVec4(cb: *CodeBuffer, a: [4]u32, b: [4]u32) ![4]u32 {
     const f = try rt.add(cb);
     defer f.release();
     var out: [4]u32 = undefined;
-    f.ptr(*const fn (*const [4]u32, *const [4]u32, *[4]u32) callconv(.c) void)(&a, &b, &out);
+    // The test code takes its pointers in rdi/rsi/rdx (System V) on every x86-64 host.
+    const cc: std.builtin.CallingConvention = if (@import("builtin").cpu.arch == .x86_64) .{ .x86_64_sysv = .{} } else .c;
+    f.ptr(*const fn (*const [4]u32, *const [4]u32, *[4]u32) callconv(cc) void)(&a, &b, &out);
     return out;
 }
 
