@@ -71,7 +71,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = capi_mod })).step);
     // Plain object for foreign toolchains: Apple ld rejects Zig's archive members that are not
     // 8-byte aligned ("64-bit mach-o not 8-byte aligned"), so external linkers get the .o.
-    const lib_obj = b.addObject(.{ .name = "pyrlyn_jit", .root_module = capi_mod });
+    // Separate module without stack probes: x86_64 Debug code otherwise references Zig's
+    // __zig_probe_stack (compiler_rt), which foreign linkers (c++, rustc) cannot resolve.
+    const obj_mod = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .stack_check = false,
+    });
+    obj_mod.addOptions("pyrlyn_jit_options", opts);
+    const lib_obj = b.addObject(.{ .name = "pyrlyn_jit", .root_module = obj_mod });
 
     // Installed libpyrlyn-jit.a: on macOS the archive is re-packed with the system `ar` from the plain
     // object, because Apple ld ignores Zig's unaligned archive members (see lib_obj above).
@@ -97,6 +107,14 @@ pub fn build(b: *std.Build) void {
     // libc++ does not compile against current macOS SDKs.
     {
         const cxx = b.addSystemCommand(&.{ b.option([]const u8, "cxx", "examples: C++ compiler (default: c++)") orelse "c++", "-std=c++17", "-O1", "-Wl,-w" }); // -w: Zig stamps the .o with the patch-level macOS version
+        // Cross-arch on macOS (e.g. -Dtarget=x86_64-macos under Rosetta): link the example for the target arch.
+        if (target.result.os.tag == .macos and target.result.cpu.arch != @import("builtin").cpu.arch) {
+            cxx.addArgs(&.{ "-arch", switch (target.result.cpu.arch) {
+                .x86_64 => "x86_64",
+                .aarch64 => "arm64",
+                else => @panic("examples: unsupported macOS arch for c++"),
+            } });
+        }
         cxx.addPrefixedDirectoryArg("-I", b.path("include"));
         cxx.addFileArg(b.path("examples/cpp/main.cpp"));
         cxx.addFileArg(lib_obj.getEmittedBin());
