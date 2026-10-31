@@ -12,7 +12,8 @@
 
 - `third_party/` (local AsmJit clone, see [third_party/THIRD_PARTY.txt](third_party/THIRD_PARTY.txt)) and `bench/pre-safety/` (frozen snapshot)
 - AsmJit-ported tests: `src/asmjit_{x64,x86,a64}_tests.zig`
-- Tables generated from AsmJit's instruction database: `src/x86_64/{gp_table,vec_table,isa}.zig`, `src/aarch64/{a64_table,isa}.zig`
-- Tests generated from LLVM: `src/{gp,simd,enc,a64_sve,a64_sve_extra}_tests.zig`
+- Tables generated from AsmJit's instruction database: `src/x86_64/{vec_table,isa}.zig`, `src/aarch64/isa.zig`
+- Tables generated from LLVM by `tools/gen_tables.zig`: `src/x86_64/gp_table.zig`, `src/aarch64/a64_table.zig`
+- Tests generated from LLVM: `src/{gp,simd,enc,a64_sve,a64_sve_extra,a64_table}_tests.zig`
 
-Generated files are never edited or reformatted by hand; change the generator in `scripts/` instead.
+Generated files are never edited or reformatted by hand; change the generator in `scripts/` or `tools/` instead.

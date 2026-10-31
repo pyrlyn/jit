@@ -79,10 +79,10 @@ fn inList(l: []const []const u8, s: []const u8) bool {
 
 /// General-purpose register classes -> operand kind (`w`/`x`, `wsp`/`xsp` also accept SP).
 const gpr_classes = [_]KV{
-    .{ "GPR32", "w" },        .{ "GPR64", "x" },         .{ "GPR32z", "w" },       .{ "GPR64z", "x" },
-    .{ "GPR32sp", "wsp" },    .{ "GPR64sp", "xsp" },     .{ "GPR64common", "x" },  .{ "GPR64as32", "w" },
-    .{ "GPR32as64", "x" },    .{ "GPR64noip", "x" },     .{ "tcGPR64", "x" },      .{ "GPR32arg", "w" },
-    .{ "GPR64arg", "x" },     .{ "GPR64sponly", "xsp" }, .{ "GPR32sponly", "wsp" }, .{ "GPR64sp0", "xsp" },
+    .{ "GPR32", "w" },     .{ "GPR64", "x" },         .{ "GPR32z", "w" },        .{ "GPR64z", "x" },
+    .{ "GPR32sp", "wsp" }, .{ "GPR64sp", "xsp" },     .{ "GPR64common", "x" },   .{ "GPR64as32", "w" },
+    .{ "GPR32as64", "x" }, .{ "GPR64noip", "x" },     .{ "tcGPR64", "x" },       .{ "GPR32arg", "w" },
+    .{ "GPR64arg", "x" },  .{ "GPR64sponly", "xsp" }, .{ "GPR32sponly", "wsp" }, .{ "GPR64sp0", "xsp" },
 };
 /// Scalar FP/SIMD register classes (`FPR8`..`FPR128` and their `Op`/`asZPR`/`_lo` variants).
 fn fprKind(c: []const u8) ?[]const u8 {
@@ -1212,19 +1212,18 @@ const extra_names = [_][]const u8{ "!post", "M", "W", "bits", "log_imm", "rot1",
 
 /// Immediate conversions a64.zig implements (`ImmFn`).
 const imm_fns = [_][]const u8{
-    "ASimdFBitsHBImm", "ASimdFBitsScaleImm", "ASimdFMovImm", "ASimdLogicalImm",             "ASimdMovNImm",
-    "ASimdMovPImm",    "ASimdRotateImm_0_90_180_270",     "ASimdRotateImm_90_270",       "ASimdSHL",
-    "ASimdSHRN",       "ASimdShiftNImm",    "ASimdShiftPImm", "ASimdXtlImm",                 "FpHalfOrOneImm",
-    "FpHalfOrTwoImm",  "FpZeroOrOneImm",    "ImmAt",        "ImmBFIZ",                     "ImmBFM",
-    "ImmBFX",          "ImmBRB",            "ImmBTI",       "ImmDC",                       "ImmDataBarrier",
-    "ImmIC",           "ImmISB",            "ImmLDR",       "ImmLDRB",                     "ImmLDRB_STRB",
-    "ImmLDRH",         "ImmLDRH_STRH",      "ImmLDRW",      "ImmLDR_STR",                  "ImmLSL",
-    "ImmLogical",      "ImmMSR",            "ImmPRF",       "ImmPSB_TSB",                  "ImmRCTX",
-    "ImmRPRF",         "ImmSMEMode",        "ImmSysReg",    "ImmTLBI",                     "ImmTLBIP",
-    "ImmWide",         "ImmWideInv",        "LogicalImm",   "Rot1Imm",                     "Rot2Imm",
-    "ShiftImm",        "Sve8BitImm",        "SveDupImm",    "SveDupmImm",                  "SveLogicalImm",
-    "SvePatternImm",   "SveShiftImm6",      "SveShiftImm7", "SveXtImm",                    "VecVFPImm",
-    "none",
+    "ASimdFBitsHBImm", "ASimdFBitsScaleImm",          "ASimdFMovImm",          "ASimdLogicalImm", "ASimdMovNImm",
+    "ASimdMovPImm",    "ASimdRotateImm_0_90_180_270", "ASimdRotateImm_90_270", "ASimdSHL",        "ASimdSHRN",
+    "ASimdShiftNImm",  "ASimdShiftPImm",              "ASimdXtlImm",           "FpHalfOrOneImm",  "FpHalfOrTwoImm",
+    "FpZeroOrOneImm",  "ImmAt",                       "ImmBFIZ",               "ImmBFM",          "ImmBFX",
+    "ImmBRB",          "ImmBTI",                      "ImmDC",                 "ImmDataBarrier",  "ImmIC",
+    "ImmISB",          "ImmLDR",                      "ImmLDRB",               "ImmLDRB_STRB",    "ImmLDRH",
+    "ImmLDRH_STRH",    "ImmLDRW",                     "ImmLDR_STR",            "ImmLSL",          "ImmLogical",
+    "ImmMSR",          "ImmPRF",                      "ImmPSB_TSB",            "ImmRCTX",         "ImmRPRF",
+    "ImmSMEMode",      "ImmSysReg",                   "ImmTLBI",               "ImmTLBIP",        "ImmWide",
+    "ImmWideInv",      "LogicalImm",                  "Rot1Imm",               "Rot2Imm",         "ShiftImm",
+    "Sve8BitImm",      "SveDupImm",                   "SveDupmImm",            "SveLogicalImm",   "SvePatternImm",
+    "SveShiftImm6",    "SveShiftImm7",                "SveXtImm",              "VecVFPImm",       "none",
 };
 
 /// AsmJit mnemonics with no LLVM form here, kept in `Mnemonic` so existing code compiles (encoding
@@ -1232,13 +1231,13 @@ const imm_fns = [_][]const u8{
 /// family dropped from LLVM, `fcvtx2`) or spelled with a keyword operand (`gcsb dsync`,
 /// `psb csync`, `smstart sm`, `cfp rctx, Xt`) that this API has no operand for.
 const kept_mnemonics = [_][]const u8{
-    "brb",      "tlbip",     "gcsb",     "ld64b",     "st64b",    "st64bv0",   "st64bv",   "stadda",    "staddal",  "staddab",
-    "staddalb", "staddah",   "staddalh", "stclra",    "stclral",  "stclrab",   "stclralb", "stclrah",   "stclralh", "steora",
-    "steoral",  "steorab",   "steoralb", "steorah",   "steoralh", "stseta",    "stsetal",  "stsetab",   "stsetalb", "stsetah",
-    "stsetalh", "stsmaxa",   "stsmaxal", "stsmaxab",  "stsmaxalb", "stsmaxah", "stsmaxalh", "stsmina",  "stsminal", "stsminab",
-    "stsminalb", "stsminah", "stsminalh", "stumaxa",  "stumaxal", "stumaxab",  "stumaxalb", "stumaxah", "stumaxalh", "stumina",
-    "stuminal", "stuminab",  "stuminalb", "stuminah", "stuminalh", "psb",      "cfp",      "cpp",       "dvp",      "cosp",
-    "mrrs",     "msrr",      "tcancel",  "tcommit",   "tstart",   "ttest",     "tsb",      "fcvtx2",    "smstart",  "smstop",
+    "brb",       "tlbip",    "gcsb",      "ld64b",    "st64b",     "st64bv0",  "st64bv",    "stadda",   "staddal",   "staddab",
+    "staddalb",  "staddah",  "staddalh",  "stclra",   "stclral",   "stclrab",  "stclralb",  "stclrah",  "stclralh",  "steora",
+    "steoral",   "steorab",  "steoralb",  "steorah",  "steoralh",  "stseta",   "stsetal",   "stsetab",  "stsetalb",  "stsetah",
+    "stsetalh",  "stsmaxa",  "stsmaxal",  "stsmaxab", "stsmaxalb", "stsmaxah", "stsmaxalh", "stsmina",  "stsminal",  "stsminab",
+    "stsminalb", "stsminah", "stsminalh", "stumaxa",  "stumaxal",  "stumaxab", "stumaxalb", "stumaxah", "stumaxalh", "stumina",
+    "stuminal",  "stuminab", "stuminalb", "stuminah", "stuminalh", "psb",      "cfp",       "cpp",      "dvp",       "cosp",
+    "mrrs",      "msrr",     "tcancel",   "tcommit",  "tstart",    "ttest",    "tsb",       "fcvtx2",   "smstart",   "smstop",
 };
 
 fn manualForm(a: Allocator, db: lj.Db, m: Manual) Error!Form {
