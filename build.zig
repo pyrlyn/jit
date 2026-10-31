@@ -20,44 +20,70 @@ pub fn build(b: *std.Build) void {
     opts.addOption(bool, "gp_fuzz", b.option(bool, "gp-fuzz", "test: include src/gp_fuzz.zig (written by scripts/fuzz_gp.py)") orelse false);
     opts.addOption(bool, "bench_counting", b.option(bool, "bench-counting", "bench: use comptime CountingHooks (implies validate setting as given)") orelse false);
 
-    const zigjit = b.addModule("zigjit", .{
-        .root_source_file = b.path("src/zigjit.zig"),
+    const pyrlyn_jit = b.addModule("pyrlyn_jit", .{
+        .root_source_file = b.path("src/pyrlyn_jit.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    zigjit.addOptions("zigjit_options", opts);
+    pyrlyn_jit.addOptions("pyrlyn_jit_options", opts);
 
-    const tests = b.addTest(.{ .root_module = zigjit });
+    const tests = b.addTest(.{ .root_module = pyrlyn_jit });
     // Own fuzz driver: Zig 0.16.0's test runner does not build with `--fuzz` (see SECURITY.md).
-    const fuzz_exe = b.addExecutable(.{ .name = "zigjit_fuzz", .root_module = b.createModule(.{
+    const fuzz_exe = b.addExecutable(.{ .name = "pyrlyn_jit_fuzz", .root_module = b.createModule(.{
         .root_source_file = b.path("src/fuzz_main.zig"),
         .target = target,
         .optimize = if (optimize == .Debug) .ReleaseSafe else optimize,
         .link_libc = true,
     }) });
-    b.step("fuzz", "Fuzz the encoders/code buffer with random seeds (env: ZIGJIT_FUZZ_ROUNDS/SEED/ITERS)").dependOn(&b.addRunArtifact(fuzz_exe).step);
+    b.step("fuzz", "Fuzz the encoders/code buffer with random seeds (env: PYRLYN_JIT_FUZZ_ROUNDS/SEED/ITERS)").dependOn(&b.addRunArtifact(fuzz_exe).step);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
-    // ---- C ABI library (include/zigjit.h) + examples in C, C++, Rust, Zig ----------------
+    // ---- C ABI library (include/pyrlyn_jit.h) + examples in C, C++, Rust, Zig ----------------
     const capi_mod = b.createModule(.{
         .root_source_file = b.path("src/c_api.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    capi_mod.addOptions("zigjit_options", opts);
-    const lib_static = b.addLibrary(.{ .name = "zigjit", .linkage = .static, .root_module = capi_mod });
-    const lib_shared = b.addLibrary(.{ .name = "zigjit", .linkage = .dynamic, .root_module = capi_mod });
-    b.installArtifact(lib_static);
+    capi_mod.addOptions("pyrlyn_jit_options", opts);
+    const lib_static = b.addLibrary(.{ .name = "pyrlyn-jit", .linkage = .static, .root_module = capi_mod });
+    const lib_shared = b.addLibrary(.{ .name = "pyrlyn-jit", .linkage = .dynamic, .root_module = capi_mod });
     b.installArtifact(lib_shared);
     b.installDirectory(.{ .source_dir = b.path("include"), .install_dir = .header, .install_subdir = "" });
-    b.step("lib", "Build libzigjit (static + shared) and install include/").dependOn(&b.addInstallArtifact(lib_static, .{}).step);
+    // pkg-config file (zig-out/lib/pkgconfig/pyrlyn-jit.pc); prefix is relocatable via pcfiledir.
+    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.1.0";
+    const pc = b.addWriteFiles().add("pyrlyn-jit.pc", b.fmt(
+        \\prefix=${{pcfiledir}}/../..
+        \\libdir=${{prefix}}/lib
+        \\includedir=${{prefix}}/include
+        \\
+        \\Name: pyrlyn-jit
+        \\Description: pyrlyn-jit machine-code generator (C ABI)
+        \\Version: {s}
+        \\Libs: -L${{libdir}} -lpyrlyn-jit
+        \\Cflags: -I${{includedir}}
+        \\
+    , .{pc_version}));
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(pc, .lib, "pkgconfig/pyrlyn-jit.pc").step);
+    b.step("lib", "Build libpyrlyn-jit (static + shared) and install include/").dependOn(&b.addInstallArtifact(lib_static, .{}).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = capi_mod })).step);
     // Plain object for foreign toolchains: Apple ld rejects Zig's archive members that are not
     // 8-byte aligned ("64-bit mach-o not 8-byte aligned"), so external linkers get the .o.
-    const lib_obj = b.addObject(.{ .name = "zigjit", .root_module = capi_mod });
+    const lib_obj = b.addObject(.{ .name = "pyrlyn_jit", .root_module = capi_mod });
+
+    // Installed libpyrlyn-jit.a: on macOS the archive is re-packed with the system `ar` from the plain
+    // object, because Apple ld ignores Zig's unaligned archive members (see lib_obj above).
+    // Zig's own consumers (examples below) still link lib_static directly.
+    if (target.result.os.tag.isDarwin() and @import("builtin").os.tag.isDarwin()) {
+        const ar = b.addSystemCommand(&.{ "ar", "-rcs" });
+        const repacked = ar.addOutputFileArg("libpyrlyn-jit.a");
+        ar.addFileArg(lib_obj.getEmittedBin());
+        b.getInstallStep().dependOn(&b.addInstallFileWithDir(repacked, .lib, "libpyrlyn-jit.a").step);
+    } else {
+        b.installArtifact(lib_static);
+    }
 
     const examples_step = b.step("examples", "Build and run examples/{c,cpp,zig} (+ rust with -Drust=true)");
     {
@@ -85,7 +111,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "zigjit", .module = zigjit }},
+        .imports = &.{.{ .name = "pyrlyn_jit", .module = pyrlyn_jit }},
     }) });
     examples_step.dependOn(&b.addRunArtifact(zig_example).step);
     if (b.option(bool, "rust", "examples: also build and run examples/rust with rustc (no crates)") orelse false) {
@@ -110,7 +136,7 @@ pub fn build(b: *std.Build) void {
                     .target = target,
                     .optimize = optimize,
                     .link_libc = true,
-                    .imports = &.{.{ .name = "zigjit", .module = zigjit }},
+                    .imports = &.{.{ .name = "pyrlyn_jit", .module = pyrlyn_jit }},
                 }),
             });
             b.installArtifact(exe);

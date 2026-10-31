@@ -1,0 +1,19 @@
+@PACKAGE_INIT@
+# Installed pyrlyn-jit: IMPORTED targets pyrlyn-jit::pyrlyn-jit (static) and pyrlyn-jit::pyrlyn-jit_shared.
+set(_zj_lib "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
+set(_zj_inc "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+if(NOT TARGET pyrlyn-jit::pyrlyn-jit)
+  add_library(pyrlyn-jit::pyrlyn-jit STATIC IMPORTED)
+  set_target_properties(pyrlyn-jit::pyrlyn-jit PROPERTIES
+    IMPORTED_LOCATION "${_zj_lib}/@CMAKE_STATIC_LIBRARY_PREFIX@pyrlyn-jit@CMAKE_STATIC_LIBRARY_SUFFIX@"
+    INTERFACE_INCLUDE_DIRECTORIES "${_zj_inc}")
+endif()
+if(NOT TARGET pyrlyn-jit::pyrlyn-jit_shared)
+  add_library(pyrlyn-jit::pyrlyn-jit_shared SHARED IMPORTED)
+  set_target_properties(pyrlyn-jit::pyrlyn-jit_shared PROPERTIES
+    IMPORTED_LOCATION "${_zj_lib}/@CMAKE_SHARED_LIBRARY_PREFIX@pyrlyn-jit@CMAKE_SHARED_LIBRARY_SUFFIX@"
+    INTERFACE_INCLUDE_DIRECTORIES "${_zj_inc}")
+endif()
+unset(_zj_lib)
+unset(_zj_inc)
+check_required_components(pyrlyn-jit)

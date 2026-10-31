@@ -10,6 +10,13 @@ Rules that every new backend follows (same as x86-64 and AArch64):
 Builder, Compiler and register allocator: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## 1. x86 (32-bit)
+
+**Status (feat/x86-32): base implemented** in `src/x86/assembler.zig` (`pyrlyn_jit.x86`): typed
+GP API (mov/lea/ALU/test/imul/inc/dec/push/pop/ret imm16/call/jmp/jcc with labels, absolute
+moffs), cdecl/stdcall/fastcall/SysV-i386 data, prolog/epilog, generic `inst()` over the shared
+GP table in 32-bit mode (already covered by the 8310 AsmJit x86 cases). Tests byte-exact vs
+`clang -target i386`. Not yet: comptime mode instead of the global `gp.mode32`, hooks, SIMD
+wrapper, Builder/Compiler support, execution tests (no 32-bit host).
 - Module `src/x86/`; share REX-less encoder pieces with `x86_64` through a comptime
   `mode: enum { x86, x86_64 }` parameter, not a runtime flag.
 - Registers eax..edi only; no REX; `inc/dec r32` one-byte forms (0x40..0x4F) become legal.
@@ -20,7 +27,7 @@ Builder, Compiler and register allocator: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## 2. RISC-V (RV64GC first, RV32 later)
 
-**Status (feat/riscv): RV64IM base implemented** in `src/riscv/assembler.zig` (`zigjit.riscv`):
+**Status (feat/riscv): RV64IM base implemented** in `src/riscv/assembler.zig` (`pyrlyn_jit.riscv`):
 R/I/S/U/B/J formats, RV64I + W forms, loads/stores, M extension, labels via new `rv_b12` /
 `rv_j20` fixups in `CodeBuffer`, pseudo `li` (any 64-bit constant), `mv/nop/ret/j/callAbs`,
 LP64 prolog/epilog. Tests: spec reference encodings and `li` checked by a small RV64
@@ -78,7 +85,7 @@ byte-exact suite (no RISC-V-capable assembler on this machine), qemu execution.
    - `0xFFFFFFFF` -> `mov r32` gives 0x00000000FFFFFFFF, while `mov r/m64, -1` gives all ones;
    - `-1` -> 7-byte `mov r/m64, imm32`; `or r64, -1` -> imm8 form.
 5. Size policy table (opt-in `.mov_policy = .size | .asmjit_default`): AsmJit's default emits
-   7-byte `mov r64, imm32` for positive values; ZigJIT keeps the 5-byte form by default.
+   7-byte `mov r64, imm32` for positive values; pyrlyn-jit keeps the 5-byte form by default.
    `xor r32, r32` for zero only through an explicit `zeroR` (it clobbers flags).
 6. Avoid redundant REX (already done for r/m without W; keep it when adding 32-bit forms).
 7. More forms: shifts (`shl/shr/sar` by 1, imm8, cl), `neg/not`, `div/idiv` (rdx:rax), `movzx/movsx`,

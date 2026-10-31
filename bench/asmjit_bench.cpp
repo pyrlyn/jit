@@ -1,4 +1,4 @@
-// AsmJit side of the ZigJIT benchmark. Same instruction streams as bench_x86_64.zig.
+// AsmJit side of the pyrlyn-jit benchmark. Same instruction streams as bench_x86_64.zig.
 #include <asmjit/x86.h>
 #include <chrono>
 #include <cstdio>
