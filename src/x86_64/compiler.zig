@@ -25,7 +25,7 @@ const s0: Gp = .r10;
 const s1: Gp = .r11;
 
 fn bit(r: Gp) ra.RegMask {
-    return @as(ra.RegMask, 1) << @intFromEnum(r);
+    return @as(ra.RegMask, 1) << @backingInt(r);
 }
 
 pub const Options = struct {
@@ -96,7 +96,7 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
         /// Register holding `v` (loads spilled values into `scratch`).
         fn get(s: @This(), v: ir.VReg, scratch: Gp) !Gp {
             return switch (s.locs[v]) {
-                .reg => |r| @enumFromInt(r),
+                .reg => |r| @fromBackingInt(@intCast(r)),
                 .stack => |k| blk: {
                     try s.b.movRM(scratch, s.slot(k));
                     break :blk scratch;
@@ -109,7 +109,7 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
         }
         fn put(s: @This(), v: ir.VReg, src: Gp) !void {
             switch (s.locs[v]) {
-                .reg => |r| if (@as(Gp, @enumFromInt(r)) != src) try s.b.movRR(@enumFromInt(r), src),
+                .reg => |r| if (@as(Gp, @fromBackingInt(@intCast(r))) != src) try s.b.movRR(@fromBackingInt(@intCast(r)), src),
                 .stack => |k| try s.b.movMR(s.slot(k), src),
                 .none => {},
             }
@@ -134,7 +134,7 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
         try b.bind(labels[bi]);
         for (blk.ops.items) |o| switch (o) {
             .@"const" => |c| switch (res.locs[c.dst]) {
-                .reg => |r| try b.movRI(@enumFromInt(r), c.imm),
+                .reg => |r| try b.movRI(@fromBackingInt(@intCast(r)), c.imm),
                 else => {
                     try b.movRI(s0, c.imm);
                     try ctx.put(c.dst, s0);

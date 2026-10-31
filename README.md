@@ -12,6 +12,10 @@ A small AsmJit-style machine code generator in Zig 0.17 (stdlib only).
   comptime and cost nothing when off.
 
 Design and comparison with AsmJit: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Third-party notice: AsmJit (Zlib) is used only for tests and is not distributed, see [third_party/THIRD_PARTY.txt](third_party/THIRD_PARTY.txt).
+
+Contributing, formatting rules: [CONTRIBUTING.md](CONTRIBUTING.md).
 Roadmap (architectures, SIMD, Builder, Compiler, register allocator): [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start

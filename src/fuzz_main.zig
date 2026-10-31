@@ -1,6 +1,6 @@
-//! Standalone fuzz driver (`zig build fuzz`). Zig 0.16.0's test runner does not compile in
-//! `--fuzz` mode, so this runs the harnesses from src/fuzz.zig over fresh random seeds in a
-//! loop instead. Safety checks stay on (Debug/ReleaseSafe); a crash prints the seed, and
+//! Standalone fuzz driver (`zig build fuzz`). Runs the harnesses from src/fuzz.zig over fresh
+//! random seeds in a loop; an alternative to `zig build test --fuzz` (works since Zig 0.17.0)
+//! that needs no fuzzer UI and replays by seed. Safety checks stay on (Debug/ReleaseSafe); a crash prints the seed, and
 //! `PYRLYN_JIT_FUZZ_SEED=<seed> zig build fuzz` replays it.
 //!
 //! Environment: PYRLYN_JIT_FUZZ_ROUNDS (default 20; 0 = run forever), PYRLYN_JIT_FUZZ_SEED (start seed),

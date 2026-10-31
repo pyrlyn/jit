@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate ISA tables for pyrlyn-jit validation from AsmJit's instruction database.
 
-Reads ref/asmjit/db/isa_x86.json and isa_aarch64.json (AsmJit `db/`), picks the forms that
+Reads third_party/asmjit/db/isa_x86.json and isa_aarch64.json (AsmJit `db/`), picks the forms that
 pyrlyn-jit implements, and writes:
   src/x86_64/isa.zig   - per instruction: AsmJit signature, encoding, opcode bytes, ModRM digit,
                          immediate kind, required CPU features; full x86 feature enum.
@@ -14,7 +14,7 @@ The generator fails if a form pyrlyn-jit emits is missing from the database.
 import json, os, re, subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB = os.path.join(ROOT, "ref", "asmjit", "db")
+DB = os.path.join(ROOT, "third_party", "asmjit", "db")
 ALU = ["add", "or", "adc", "sbb", "and", "sub", "xor", "cmp"]
 CC = ["o", "no", "b", "ae", "e", "ne", "be", "a", "s", "ns", "p", "np", "l", "ge", "le", "g"]
 
@@ -110,7 +110,7 @@ def gen_x86():
             "/// Set of features from a list (comptime-friendly).",
             "pub fn featureSet(comptime list: []const Feature) Features {",
             "    @setEvalBranchQuota(100_000);",
-            "    var s: Features = .initEmpty();",
+            "    var s: Features = .empty;",
             "    for (list) |f| s.insert(f);",
             "    return s;",
             "}", "",
@@ -218,7 +218,7 @@ def gen_a64():
             "/// Set of features from a list (comptime-friendly).",
             "pub fn featureSet(comptime list: []const Feature) Features {",
             "    @setEvalBranchQuota(100_000);",
-            "    var s: Features = .initEmpty();",
+            "    var s: Features = .empty;",
             "    for (list) |f| s.insert(f);",
             "    return s;",
             "}", "",

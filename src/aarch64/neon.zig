@@ -24,18 +24,18 @@ fn fsz(a: Arr) Error!u32 {
     };
 }
 fn xid(r: X) u32 {
-    return @intFromEnum(r);
+    return @backingInt(r);
 }
 
 pub fn add(cb: *CodeBuffer, a: Arr, rd: V, rn: V, rm: V) Error!void {
-    return put(cb, rrr(0x4e208400 | @as(u32, @intFromEnum(a)) << 22, rd, rn, rm));
+    return put(cb, rrr(0x4e208400 | @as(u32, @backingInt(a)) << 22, rd, rn, rm));
 }
 pub fn sub(cb: *CodeBuffer, a: Arr, rd: V, rn: V, rm: V) Error!void {
-    return put(cb, rrr(0x6e208400 | @as(u32, @intFromEnum(a)) << 22, rd, rn, rm));
+    return put(cb, rrr(0x6e208400 | @as(u32, @backingInt(a)) << 22, rd, rn, rm));
 }
 pub fn mul(cb: *CodeBuffer, a: Arr, rd: V, rn: V, rm: V) Error!void {
     if (a == .d2) return error.InvalidOperand;
-    return put(cb, rrr(0x4e209c00 | @as(u32, @intFromEnum(a)) << 22, rd, rn, rm));
+    return put(cb, rrr(0x4e209c00 | @as(u32, @backingInt(a)) << 22, rd, rn, rm));
 }
 pub fn fadd(cb: *CodeBuffer, a: Arr, rd: V, rn: V, rm: V) Error!void {
     return put(cb, rrr(0x4e20d400 | try fsz(a), rd, rn, rm));
