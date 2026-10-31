@@ -328,7 +328,7 @@ Results: [bench/RESULTS.md](bench/RESULTS.md).
 
 ### Generated GP instruction set (x86-64)
 
-`scripts/gen_gp_tables.py` turns every legacy-encoded GP form in AsmJit's database into `src/x86_64/gp_table.zig` (1037 forms, 187 mnemonics: ALU, shifts/rotates, mul/div, bit ops, movzx/movsx, cmov/set, xchg, bswap, popcnt/lzcnt/tzcnt, crc32, movbe, ...). Use it through `Assembler.inst`:
+`zig build gen-tables` (tools/gen_tables.zig) turns the legacy-encoded GP instructions of LLVM's X86 target description into `src/x86_64/gp_table.zig` (1067 forms, 201 mnemonics: ALU, shifts/rotates, mul/div, bit ops, movzx/movsx, cmov/set, xchg, bswap, popcnt/lzcnt/tzcnt, crc32, movbe, ...); see [docs/llvm-tables.md](docs/llvm-tables.md). Use it through `Assembler.inst`:
 
 ```zig
 const gp = x.gp;
