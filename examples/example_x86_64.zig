@@ -1,13 +1,13 @@
 //! Build for x86_64-macos and run under Rosetta:
 //!   zig build -Dtarget=x86_64-macos run-example_x86_64
 const std = @import("std");
-const zj = @import("zigjit");
-const x = zj.x86_64;
+const pjit = @import("pyrlyn_jit");
+const x = pjit.x86_64;
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    var cb = zj.CodeBuffer.init(gpa.allocator());
+    var cb = pjit.CodeBuffer.init(gpa.allocator());
     defer cb.deinit();
     const a = x.Assembler.init(&cb);
 
@@ -59,9 +59,9 @@ pub fn main() !void {
     try show("fact(10)", &cb, fn (i64) callconv(.c) i64, .{10});
 }
 
-fn show(name: []const u8, cb: *zj.CodeBuffer, comptime F: type, args: anytype) !void {
+fn show(name: []const u8, cb: *pjit.CodeBuffer, comptime F: type, args: anytype) !void {
     try cb.finalize();
-    const f = try zj.JitRuntime.add(cb);
+    const f = try pjit.JitRuntime.add(cb);
     defer f.release();
     const r = @call(.auto, f.ptr(*const F), args);
     std.debug.print("{s:<14} = {d} bytes: {x}\n", .{ name, r, cb.code() });

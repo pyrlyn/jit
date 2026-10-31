@@ -11,8 +11,8 @@ for i in $(seq "$RUNS"); do
 done
 field() { sed -n "s/.* $1=\([^ ]*\).*/\1/p"; }
 for s in straight calls loops mem avx avx512; do
-  cmp -s out/asmjit_$s.bin out/zigjit_$s.bin && same=identical || same=DIFFERENT
-  for lib in asmjit zigjit; do
+  cmp -s out/asmjit_$s.bin out/pyrlyn_jit_$s.bin && same=identical || same=DIFFERENT
+  for lib in asmjit pyrlyn_jit; do
     L=$(grep "^$lib $s " out/raw.txt)
     med=$(echo "$L" | field avg_ns_per_instr | sort -n | awk '{a[NR]=$1} END{print (NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1])/2}')
     mn=$(echo "$L" | field min_ns_per_instr | sort -n | head -1)

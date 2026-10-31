@@ -1,6 +1,6 @@
 # Security
 
-ZigJIT generates and runs machine code, so memory-safety and W^X are treated as hard requirements.
+pyrlyn-jit generates and runs machine code, so memory-safety and W^X are treated as hard requirements.
 
 ## Executable memory (W^X)
 - Memory is never writable and executable for the same thread at the same time.
@@ -34,8 +34,8 @@ ZigJIT generates and runs machine code, so memory-safety and W^X are treated as 
   Zig 0.16.0's test runner fails to compile in `--fuzz` mode (`std.debug.writeStackTrace`
   type mismatch in `lib/compiler/test_runner.zig`), so `zig build fuzz` runs the same harnesses
   from a standalone driver (`src/fuzz_main.zig`, ReleaseSafe) over fresh random seeds:
-  `ZIGJIT_FUZZ_ROUNDS` (default 20, 0 = forever), `ZIGJIT_FUZZ_ITERS` (cases per harness per
-  round, default 100000), `ZIGJIT_FUZZ_SEED` (replay a failing seed, printed on failure).
+  `PYRLYN_JIT_FUZZ_ROUNDS` (default 20, 0 = forever), `PYRLYN_JIT_FUZZ_ITERS` (cases per harness per
+  round, default 100000), `PYRLYN_JIT_FUZZ_SEED` (replay a failing seed, printed on failure).
 - Builds used for testing keep Zig's safety checks (Debug/ReleaseSafe): overflow and bounds
   violations panic instead of being undefined behaviour.
 

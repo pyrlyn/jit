@@ -1,7 +1,7 @@
 //! Tests for the safety layer (validation + hooks) and label/branch encodings on both backends.
 //! Byte-exact per-form encodings are in the generated `enc_tests.zig`.
 const std = @import("std");
-const opts = @import("zigjit_options");
+const opts = @import("pyrlyn_jit_options");
 const CodeBuffer = @import("core/code_buffer.zig").CodeBuffer;
 const safety = @import("core/safety.zig");
 const t = std.testing;

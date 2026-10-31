@@ -12,7 +12,7 @@ pub const isa = @import("isa.zig");
 /// Host CPU feature detection.
 pub const cpu = @import("cpu.zig");
 const safety = @import("../core/safety.zig");
-const build_opts = @import("zigjit_options");
+const build_opts = @import("pyrlyn_jit_options");
 pub const Options = safety.Options;
 
 /// X0..X30; 31 is SP or XZR depending on the instruction.

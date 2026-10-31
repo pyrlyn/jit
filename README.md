@@ -1,4 +1,4 @@
-# ZigJIT
+# pyrlyn-jit
 
 A small AsmJit-style machine code generator in Zig 0.16 (stdlib only).
 
@@ -18,11 +18,11 @@ Roadmap (architectures, SIMD, Builder, Compiler, register allocator): [docs/ROAD
 
 ```zig
 const std = @import("std");
-const zj = @import("zigjit");
+const pjit = @import("pyrlyn_jit");
 
-var cb = zj.CodeBuffer.init(gpa);
+var cb = pjit.CodeBuffer.init(gpa);
 defer cb.deinit();
-const a = zj.x86_64.Assembler.init(&cb);
+const a = pjit.x86_64.Assembler.init(&cb);
 
 // fn add(a: i64, b: i64) i64   (SysV: rdi, rsi -> rax)
 try a.movRR(.rax, .rdi);
@@ -30,7 +30,7 @@ try a.addRR(.rax, .rsi);
 try a.ret();
 
 try cb.finalize();                       // resolve forward-label fixups
-const f = try zj.JitRuntime.add(&cb);    // copy into executable memory
+const f = try pjit.JitRuntime.add(&cb);    // copy into executable memory
 defer f.release();
 const add = f.ptr(*const fn (i64, i64) callconv(.c) i64);
 std.debug.print("{d}\n", .{add(40, 2)});
@@ -48,7 +48,7 @@ std.debug.print("{d}\n", .{add(40, 2)});
 | `a.newLabel()`, `a.bind(label)` | labels; backward branches resolve at once, forward ones in `finalize` |
 | `JitRuntime.add(&cb)` | map code executable (W^X; `MAP_JIT` on Apple arm64), `.ptr(T)`, `.release()` |
 
-### x86-64 (`zj.x86_64`)
+### x86-64 (`pjit.x86_64`)
 Registers `Gp` (`.rax`..`.r15`), memory `ptr(base, disp)`, `ptrIdx(base, index, scale, disp)`,
 or `Mem{ .index = .rcx, .scale = .x8, .disp = 16 }` (no base). All operands are 64-bit.
 
@@ -63,7 +63,7 @@ or `Mem{ .index = .rcx, .scale = .x8, .disp = 16 }` (no base). All operands are 
 | `push`, `pop`, `ret`, `nop` | |
 | `call(label)`, `callR(r)`, `callAbs(addr)`, `jmp(label)`, `jmpR(r)`, `jcc(cond, label)` | rel8 for near backward targets, else rel32 |
 
-### AArch64 (`zj.aarch64`)
+### AArch64 (`pjit.aarch64`)
 Registers `X` (`.x0`..`.x30`, `.zr_sp` = register 31, SP or XZR depending on the instruction).
 
 | Method | Instruction |
@@ -74,20 +74,20 @@ Registers `X` (`.x0`..`.x30`, `.zr_sp` = register 31, SP or XZR depending on the
 | `ldr`, `str` | `[xn, #off]`, `off` multiple of 8, < 32768 |
 | `b`, `bl`, `bcond`, `cbz`, `cbnz`, `blr`, `ret`, `word(u32)` | branches; `word` emits a raw instruction |
 
-### C / C++ / Rust (`include/zigjit.h`)
+### C / C++ / Rust (`include/pyrlyn_jit.h`)
 
-A stable C ABI with a header-only C++ RAII wrapper (`include/zigjit.hpp`). It is used from
+A stable C ABI with a header-only C++ RAII wrapper (`include/pyrlyn_jit.hpp`). It is used from
 Rust via plain `extern "C"`. Full reference: [docs/c-api.md](docs/c-api.md).
 
 ```c
-zj_buffer *b; zj_func *f;
-zj_buffer_new(&b);
-zj_a64_op ops[] = { zj_a64_x(0), zj_a64_x(0), zj_a64_x(1) };
-zj_a64_emit(b, "add", ops, 3);          /* any AsmJit mnemonic; errors are return codes */
-zj_a64_emit(b, "ret", NULL, 0);
-zj_finalize(b);
-zj_jit_add(b, &f);                      /* W^X executable copy */
-long r = ((long (*)(long, long))zj_func_ptr(f))(40, 2);
+pjit_buffer *b; pjit_func *f;
+pjit_buffer_new(&b);
+pjit_a64_op ops[] = { pjit_a64_x(0), pjit_a64_x(0), pjit_a64_x(1) };
+pjit_a64_emit(b, "add", ops, 3);          /* any AsmJit mnemonic; errors are return codes */
+pjit_a64_emit(b, "ret", NULL, 0);
+pjit_finalize(b);
+pjit_jit_add(b, &f);                      /* W^X executable copy */
+long r = ((long (*)(long, long))pjit_func_ptr(f))(40, 2);
 ```
 
 Examples for every language live in `examples/{c,cpp,rust,zig}`. Run them with `zig build examples`
@@ -100,11 +100,11 @@ Validation and emission hooks. Both are optional, chosen at comptime, and free w
 `Assembler` is `AssemblerT(default_options)`. Build your own variant with:
 
 ```zig
-const A = zj.x86_64.AssemblerT(.{
+const A = pjit.x86_64.AssemblerT(.{
     .validate = true,              // check operands before encoding
-    .Hooks = zj.x86_64.CountingHooks, // or void
+    .Hooks = pjit.x86_64.CountingHooks, // or void
 });
-var counter: zj.x86_64.CountingHooks = .{};
+var counter: pjit.x86_64.CountingHooks = .{};
 const a = A.initHooks(&cb, &counter);   // A.init(&cb) = hooks type set but no instance
 ```
 
@@ -125,8 +125,8 @@ Immediate widths are enforced by the types (`i32` for imm32, `u12`, `u16`, `u15`
 `shift`), so out-of-range literals fail to compile and runtime values must be cast.
 
 ```zig
-const a = zj.x86_64.AssemblerT(.{ .validate = true }).init(&cb);
-a.movRM(.rax, zj.x86_64.ptrIdx(.rdi, .rsp, .x1, 0)) catch |e| {
+const a = pjit.x86_64.AssemblerT(.{ .validate = true }).init(&cb);
+a.movRM(.rax, pjit.x86_64.ptrIdx(.rdi, .rsp, .x1, 0)) catch |e| {
     // e == error.InvalidOperand
 };
 ```
@@ -144,7 +144,7 @@ pub fn post(self: *H, ev: Event) void         // after encoding
 immediate, label, ALU op / condition; unused fields are null), `offset: u32`, and
 `bytes: []const u8` (the encoded instruction). `PreEvent` is the same without `bytes`.
 
-Ready-made hooks (in both backends and in `zj.safety`):
+Ready-made hooks (in both backends and in `pjit.safety`):
 
 | Hook | Purpose |
 |---|---|
@@ -227,51 +227,51 @@ Tests:
 `build.zig` is the primary build. `zig build install` installs the C ABI library:
 
 ```sh
-zig build install -Doptimize=ReleaseFast --prefix /opt/zigjit
-# lib/libzigjit.a, lib/libzigjit.{dylib,so}, include/zigjit.h, include/zigjit.hpp,
-# lib/pkgconfig/zigjit.pc (relocatable; -Dversion=... sets its Version)
+zig build install -Doptimize=ReleaseFast --prefix /opt/pyrlyn-jit
+# lib/libpyrlyn-jit.a, lib/libpyrlyn-jit.{dylib,so}, include/pyrlyn_jit.h, include/pyrlyn_jit.hpp,
+# lib/pkgconfig/pyrlyn-jit.pc (relocatable; -Dversion=... sets its Version)
 ```
 
-On macOS the installed `libzigjit.a` is re-packed with the system `ar`, so Apple `ld` accepts it.
+On macOS the installed `libpyrlyn-jit.a` is re-packed with the system `ar`, so Apple `ld` accepts it.
 
 **pkg-config:**
 
 ```sh
-export PKG_CONFIG_PATH=/opt/zigjit/lib/pkgconfig
-cc main.c $(pkg-config --cflags --libs zigjit) -Wl,-rpath,/opt/zigjit/lib   # shared
-cc main.c $(pkg-config --cflags zigjit) /opt/zigjit/lib/libzigjit.a          # static
+export PKG_CONFIG_PATH=/opt/pyrlyn-jit/lib/pkgconfig
+cc main.c $(pkg-config --cflags --libs pyrlyn-jit) -Wl,-rpath,/opt/pyrlyn-jit/lib   # shared
+cc main.c $(pkg-config --cflags pyrlyn-jit) /opt/pyrlyn-jit/lib/libpyrlyn-jit.a          # static
 ```
 
-**CMake** (3.20+, needs `zig` on `PATH` or `-DZIGJIT_ZIG_EXECUTABLE=...`). The top-level
+**CMake** (3.20+, needs `zig` on `PATH` or `-DPYRLYN_JIT_ZIG_EXECUTABLE=...`). The top-level
 `CMakeLists.txt` is a thin adapter: it runs `zig build install` into the build directory and
-exposes IMPORTED targets `zigjit::zigjit` (static) and `zigjit::zigjit_shared`. `-Doptimize` follows
+exposes IMPORTED targets `pyrlyn-jit::pyrlyn-jit` (static) and `pyrlyn-jit::pyrlyn-jit_shared`. `-Doptimize` follows
 `CMAKE_BUILD_TYPE` (Release/MinSizeRel → ReleaseFast, RelWithDebInfo/none → ReleaseSafe,
-Debug → Debug); override with `-DZIGJIT_OPTIMIZE=...`, backends with `-DZIGJIT_TARGETS=x86_64`.
+Debug → Debug); override with `-DPYRLYN_JIT_OPTIMIZE=...`, backends with `-DPYRLYN_JIT_TARGETS=x86_64`.
 
 ```cmake
 # add_subdirectory
 add_subdirectory(third_party/zig-jit)
-target_link_libraries(app PRIVATE zigjit::zigjit)
+target_link_libraries(app PRIVATE pyrlyn-jit::pyrlyn-jit)
 
 # FetchContent
 include(FetchContent)
-FetchContent_Declare(zigjit GIT_REPOSITORY https://github.com/pyrlyn/jit.git GIT_TAG main)
-FetchContent_MakeAvailable(zigjit)
+FetchContent_Declare(pyrlyn-jit GIT_REPOSITORY https://github.com/pyrlyn/jit.git GIT_TAG main)
+FetchContent_MakeAvailable(pyrlyn-jit)
 
 # CPM
-CPMAddPackage(NAME zigjit GITHUB_REPOSITORY pyrlyn/jit GIT_TAG main)
+CPMAddPackage(NAME pyrlyn-jit GITHUB_REPOSITORY pyrlyn/jit GIT_TAG main)
 
 # installed (cmake --install, or zig-built prefix with the config files)
-find_package(zigjit 0.1 REQUIRED CONFIG)
+find_package(pyrlyn-jit 0.1 REQUIRED CONFIG)
 ```
 
-Install via CMake: `cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/zigjit && cmake --build build && cmake --install build`
-(adds `lib/cmake/zigjit/zigjitConfig.cmake` and `zigjitConfigVersion.cmake`).
+Install via CMake: `cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/pyrlyn-jit && cmake --build build && cmake --install build`
+(adds `lib/cmake/pyrlyn-jit/pyrlyn-jitConfig.cmake` and `pyrlyn-jitConfigVersion.cmake`).
 `examples/cmake/` is a consumer project linking `examples/c/main.c` against both targets:
 
 ```sh
 cmake -S examples/cmake -B build/example && cmake --build build/example && build/example/example_c
-cmake -S examples/cmake -B build/example-pkg -DZIGJIT_USE_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH=/opt/zigjit
+cmake -S examples/cmake -B build/example-pkg -DPYRLYN_JIT_USE_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH=/opt/pyrlyn-jit
 ```
 
 ## Benchmark vs AsmJit
@@ -284,7 +284,7 @@ c++ -O2 -std=c++20 -DASMJIT_STATIC -I ../asmjit-loc bench/asmjit_bench.cpp bench
 zig build -Doptimize=ReleaseFast -Dhooks=false && bench/run.sh 9 5000             # layers off
 zig build -Doptimize=ReleaseFast -Dvalidate=true && bench/run.sh 9 5000          # validation
 zig build -Doptimize=ReleaseFast && bench/run.sh 9 5000                          # default: hooks compiled in, none attached
-ZJ_HOOK=1 bench/run.sh 9 5000                                                   # + runtime counting callback
+PJIT_HOOK=1 bench/run.sh 9 5000                                                   # + runtime counting callback
 zig build -Doptimize=ReleaseFast -Dbench-counting=true && bench/run.sh 9 5000    # comptime CountingHooks
 ```
 

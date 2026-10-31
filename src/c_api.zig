@@ -1,5 +1,5 @@
-//! Stable C ABI (see include/zigjit.h). Every entry point validates its arguments and returns a
-//! `zj_status`; no Zig panics or UB are reachable through bad input from C.
+//! Stable C ABI (see include/pyrlyn_jit.h). Every entry point validates its arguments and returns a
+//! `pjit_status`; no Zig panics or UB are reachable through bad input from C.
 const std = @import("std");
 const builtin = @import("builtin");
 const cbm = @import("core/code_buffer.zig");
@@ -51,11 +51,11 @@ const gpa = std.heap.c_allocator;
 
 const Buffer = struct { cb: cbm.CodeBuffer };
 
-export fn zj_version() u32 {
+export fn pjit_version() u32 {
     return version;
 }
 
-export fn zj_status_str(s: c_int) [*:0]const u8 {
+export fn pjit_status_str(s: c_int) [*:0]const u8 {
     const e = std.enums.fromInt(Status, s) orelse return "unknown status";
     return switch (e) {
         .ok => "ok",
@@ -77,7 +77,7 @@ export fn zj_status_str(s: c_int) [*:0]const u8 {
 
 // ---- buffer / labels ------------------------------------------------------------------------
 
-export fn zj_buffer_new(out: ?*?*Buffer) c_int {
+export fn pjit_buffer_new(out: ?*?*Buffer) c_int {
     const o = out orelse return EINVAL;
     const b = gpa.create(Buffer) catch return status(error.OutOfMemory);
     b.* = .{ .cb = cbm.CodeBuffer.init(gpa) };
@@ -85,23 +85,23 @@ export fn zj_buffer_new(out: ?*?*Buffer) c_int {
     return OK;
 }
 
-export fn zj_buffer_free(b: ?*Buffer) void {
+export fn pjit_buffer_free(b: ?*Buffer) void {
     const p = b orelse return;
     p.cb.deinit();
     gpa.destroy(p);
 }
 
-export fn zj_buffer_reset(b: ?*Buffer) void {
+export fn pjit_buffer_reset(b: ?*Buffer) void {
     if (b) |p| p.cb.reset();
 }
 
-export fn zj_buffer_code(b: ?*const Buffer, len: ?*usize) ?[*]const u8 {
+export fn pjit_buffer_code(b: ?*const Buffer, len: ?*usize) ?[*]const u8 {
     const p = b orelse return null;
     if (len) |l| l.* = p.cb.code().len;
     return p.cb.code().ptr;
 }
 
-export fn zj_buffer_emit_bytes(b: ?*Buffer, bytes: ?[*]const u8, n: usize) c_int {
+export fn pjit_buffer_emit_bytes(b: ?*Buffer, bytes: ?[*]const u8, n: usize) c_int {
     const p = b orelse return EINVAL;
     if (n == 0) return OK;
     const src = bytes orelse return EINVAL;
@@ -109,7 +109,7 @@ export fn zj_buffer_emit_bytes(b: ?*Buffer, bytes: ?[*]const u8, n: usize) c_int
     return OK;
 }
 
-export fn zj_label_new(b: ?*Buffer, out: ?*u32) c_int {
+export fn pjit_label_new(b: ?*Buffer, out: ?*u32) c_int {
     const p = b orelse return EINVAL;
     const o = out orelse return EINVAL;
     const l = p.cb.newLabel() catch |e| return status(e);
@@ -117,13 +117,13 @@ export fn zj_label_new(b: ?*Buffer, out: ?*u32) c_int {
     return OK;
 }
 
-export fn zj_label_bind(b: ?*Buffer, label: u32) c_int {
+export fn pjit_label_bind(b: ?*Buffer, label: u32) c_int {
     const p = b orelse return EINVAL;
     p.cb.bind(.{ .id = label }) catch |e| return status(e);
     return OK;
 }
 
-export fn zj_finalize(b: ?*Buffer) c_int {
+export fn pjit_finalize(b: ?*Buffer) c_int {
     const p = b orelse return EINVAL;
     p.cb.finalize() catch |e| return status(e);
     return OK;
@@ -204,7 +204,7 @@ fn a64Op(o: A64Op) ?a64.Op {
     };
 }
 
-export fn zj_a64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const A64Op, n: usize) c_int {
+export fn pjit_a64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const A64Op, n: usize) c_int {
     const p = b orelse return EINVAL;
     const mn = lookup(a64_map, mnemonic) orelse return @intFromEnum(Status.unknown_mnemonic);
     if (n > 8 or (n > 0 and ops == null)) return EINVAL;
@@ -217,7 +217,7 @@ export fn zj_a64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const A64O
 }
 
 /// `b label` (cond < 0) or `b.<cond> label` (cond 0..15).
-export fn zj_a64_branch(b: ?*Buffer, cond: c_int, label: u32) c_int {
+export fn pjit_a64_branch(b: ?*Buffer, cond: c_int, label: u32) c_int {
     const p = b orelse return EINVAL;
     if (cond > 15) return EINVAL;
     const at = p.cb.offset();
@@ -261,7 +261,7 @@ fn x64Op(o: X64Op) ?gp.Op {
     };
 }
 
-export fn zj_x64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const X64Op, n: usize) c_int {
+export fn pjit_x64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const X64Op, n: usize) c_int {
     const p = b orelse return EINVAL;
     const forms = lookup(gp_map, mnemonic) orelse return @intFromEnum(Status.unknown_mnemonic);
     if (n > 4 or (n > 0 and ops == null)) return EINVAL;
@@ -272,7 +272,7 @@ export fn zj_x64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const X64O
 }
 
 /// `jmp label` (cc < 0) or `j<cc> label` (cc 0..15, x86 condition code), rel32.
-export fn zj_x64_jump(b: ?*Buffer, cc: c_int, label: u32) c_int {
+export fn pjit_x64_jump(b: ?*Buffer, cc: c_int, label: u32) c_int {
     const p = b orelse return EINVAL;
     if (cc > 15) return EINVAL;
     p.cb.ensure(6) catch |e| return status(e);
@@ -292,7 +292,7 @@ export fn zj_x64_jump(b: ?*Buffer, cc: c_int, label: u32) c_int {
 const Func = struct { f: rt.Function };
 
 /// Copies finalized code into W^X executable memory.
-export fn zj_jit_add(b: ?*const Buffer, out: ?*?*Func) c_int {
+export fn pjit_jit_add(b: ?*const Buffer, out: ?*?*Func) c_int {
     const p = b orelse return EINVAL;
     const o = out orelse return EINVAL;
     if (p.cb.fixups.items.len != 0) return status(error.UnboundLabel); // not finalized
@@ -306,12 +306,12 @@ export fn zj_jit_add(b: ?*const Buffer, out: ?*?*Func) c_int {
     return OK;
 }
 
-export fn zj_func_ptr(f: ?*const Func) ?*const anyopaque {
+export fn pjit_func_ptr(f: ?*const Func) ?*const anyopaque {
     const p = f orelse return null;
     return p.f.mem.ptr;
 }
 
-export fn zj_func_free(f: ?*Func) void {
+export fn pjit_func_free(f: ?*Func) void {
     const p = f orelse return;
     p.f.release();
     gpa.destroy(p);
@@ -319,28 +319,28 @@ export fn zj_func_free(f: ?*Func) void {
 
 test "c api: a64 add + ret, labels, errors" {
     var b: ?*Buffer = null;
-    try std.testing.expectEqual(OK, zj_buffer_new(&b));
-    defer zj_buffer_free(b);
+    try std.testing.expectEqual(OK, pjit_buffer_new(&b));
+    defer pjit_buffer_free(b);
     const X = struct {
         fn r(id: u8) A64Op {
             return .{ .kind = 0, .reg = id, .sub = 1, .arr = 0, .et = 0, .idx = -1, .index = 0xFF, .index64 = 0, .ext_op = 0, .ext_n = 0, .has_ext = 0, .imm = 0, .fimm = 0 };
         }
     };
     const ops = [_]A64Op{ X.r(0), X.r(0), X.r(1) };
-    try std.testing.expectEqual(OK, zj_a64_emit(b, "add", &ops, 3));
-    try std.testing.expectEqual(@intFromEnum(Status.unknown_mnemonic), zj_a64_emit(b, "nope", &ops, 3));
+    try std.testing.expectEqual(OK, pjit_a64_emit(b, "add", &ops, 3));
+    try std.testing.expectEqual(@intFromEnum(Status.unknown_mnemonic), pjit_a64_emit(b, "nope", &ops, 3));
     var bad = X.r(0);
     bad.reg = 200;
-    try std.testing.expectEqual(EINVAL, zj_a64_emit(b, "add", &[_]A64Op{ bad, bad, bad }, 3));
+    try std.testing.expectEqual(EINVAL, pjit_a64_emit(b, "add", &[_]A64Op{ bad, bad, bad }, 3));
     var l: u32 = 0;
-    try std.testing.expectEqual(OK, zj_label_new(b, &l));
-    try std.testing.expectEqual(OK, zj_a64_branch(b, -1, l));
-    try std.testing.expectEqual(@intFromEnum(Status.unbound_label), zj_finalize(b));
-    try std.testing.expectEqual(OK, zj_label_bind(b, l));
-    try std.testing.expectEqual(OK, zj_finalize(b));
+    try std.testing.expectEqual(OK, pjit_label_new(b, &l));
+    try std.testing.expectEqual(OK, pjit_a64_branch(b, -1, l));
+    try std.testing.expectEqual(@intFromEnum(Status.unbound_label), pjit_finalize(b));
+    try std.testing.expectEqual(OK, pjit_label_bind(b, l));
+    try std.testing.expectEqual(OK, pjit_finalize(b));
     var n: usize = 0;
-    const c = zj_buffer_code(b, &n).?;
+    const c = pjit_buffer_code(b, &n).?;
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x01, 0x8B, 0x01, 0x00, 0x00, 0x14 }, c[0..n]);
-    try std.testing.expectEqual(EINVAL, zj_a64_branch(b, 99, l));
-    try std.testing.expectEqual(@intFromEnum(Status.invalid_label), zj_label_bind(b, 12345));
+    try std.testing.expectEqual(EINVAL, pjit_a64_branch(b, 99, l));
+    try std.testing.expectEqual(@intFromEnum(Status.invalid_label), pjit_label_bind(b, 12345));
 }

@@ -1,12 +1,12 @@
 //! Native on Apple Silicon:  zig build run-example_aarch64
 const std = @import("std");
-const zj = @import("zigjit");
-const A = zj.aarch64;
+const pjit = @import("pyrlyn_jit");
+const A = pjit.aarch64;
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    var cb = zj.CodeBuffer.init(gpa.allocator());
+    var cb = pjit.CodeBuffer.init(gpa.allocator());
     defer cb.deinit();
     const a = A.Assembler.init(&cb);
 
@@ -43,9 +43,9 @@ pub fn main() !void {
     try show("sum([1..10])", &cb, fn ([*]const i64, i64) callconv(.c) i64, .{ &arr, arr.len });
 }
 
-fn show(name: []const u8, cb: *zj.CodeBuffer, comptime F: type, args: anytype) !void {
+fn show(name: []const u8, cb: *pjit.CodeBuffer, comptime F: type, args: anytype) !void {
     try cb.finalize();
-    const f = try zj.JitRuntime.add(cb);
+    const f = try pjit.JitRuntime.add(cb);
     defer f.release();
     const r = @call(.auto, f.ptr(*const F), args);
     std.debug.print("{s:<14} = {d} bytes: {x}\n", .{ name, r, cb.code() });
