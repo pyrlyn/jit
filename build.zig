@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     pyrlyn_jit.addOptions("pyrlyn_jit_options", opts);
 
     const tests = b.addTest(.{ .root_module = pyrlyn_jit });
-    // Own fuzz driver: Zig 0.16.0's test runner does not build with `--fuzz` (see SECURITY.md).
+    // Standalone fuzz driver (seeded, replayable); `zig build test --fuzz` also works (see SECURITY.md).
     const fuzz_exe = b.addExecutable(.{ .name = "pyrlyn_jit_fuzz", .root_module = b.createModule(.{
         .root_source_file = b.path("src/fuzz_main.zig"),
         .target = target,
@@ -103,8 +103,8 @@ pub fn build(b: *std.Build) void {
         m.linkLibrary(lib_static);
         examples_step.dependOn(&b.addRunArtifact(b.addExecutable(.{ .name = "example_c", .root_module = m })).step);
     }
-    // C++ is built with the system compiler (`c++`, override with -Dcxx=...): Zig 0.16's bundled
-    // libc++ does not compile against current macOS SDKs.
+    // C++ is built with the system compiler (`c++`, override with -Dcxx=...). Zig 0.17's bundled
+    // `zig c++` also works (via a wrapper script, e.g. -Dcxx=./zigcxx); the default is unchanged.
     {
         const cxx = b.addSystemCommand(&.{ b.option([]const u8, "cxx", "examples: C++ compiler (default: c++)") orelse "c++", "-std=c++17", "-O1", "-Wl,-w" }); // -w: Zig stamps the .o with the patch-level macOS version
         // Cross-arch on macOS (e.g. -Dtarget=x86_64-macos under Rosetta): link the example for the target arch.
