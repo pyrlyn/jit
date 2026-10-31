@@ -21,9 +21,31 @@ const Gp = asm_.Gp;
 pub const Error = core.Error || error{ InvalidOperand, NoMatchingForm };
 
 pub const Kind = enum {
-    r8, r16, r32, r64, m8, m16, m32, m64, m,
-    i8, s8, u8, i16, u16, i32, s32, u32, i64, one,
-    al, ax, eax, rax, cl, dx,
+    r8,
+    r16,
+    r32,
+    r64,
+    m8,
+    m16,
+    m32,
+    m64,
+    m,
+    i8,
+    s8,
+    u8,
+    i16,
+    u16,
+    i32,
+    s32,
+    u32,
+    i64,
+    one,
+    al,
+    ax,
+    eax,
+    rax,
+    cl,
+    dx,
 };
 
 pub const Form = struct {
@@ -77,7 +99,7 @@ pub const Reg = struct { id: Gp, size: Size, high: bool = false };
 
 /// Register number in ModRM/opcode encoding (AH..BH are 4..7 without REX).
 fn num(r: Reg) u8 {
-    return if (r.high) @as(u8, @intFromEnum(r.id)) + 4 else @intFromEnum(r.id);
+    return if (r.high) @as(u8, @backingInt(r.id)) + 4 else @backingInt(r.id);
 }
 
 /// Sized memory operand. `rip`: [rip + disp] or [rip + label] (base/index must be null).
@@ -201,7 +223,7 @@ fn fits(v: i64, comptime T: type) bool {
 fn opSize(f: Form) u8 {
     for (f.ops) |k| {
         const s = regSize(k);
-        if (s != .none) return @intFromEnum(s);
+        if (s != .none) return @backingInt(s);
     }
     return 8;
 }
@@ -282,10 +304,10 @@ pub const Buf = struct {
 };
 
 fn rlo(g: Gp) u8 {
-    return @intFromEnum(g) & 7;
+    return @backingInt(g) & 7;
 }
 fn rhi(g: Gp) u8 {
-    return @intFromEnum(g) >> 3;
+    return @backingInt(g) >> 3;
 }
 
 /// Encodes `ops` with form `f` into `out`. Returns the offset of a RIP disp32 within `out`, if any.
@@ -295,9 +317,9 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
     var has_high = false;
     for (ops) |o| switch (o) {
         .reg => |r| if (r.high) {
-            if (@intFromEnum(r.id) >= 4 or r.size != .b) return error.InvalidOperand;
+            if (@backingInt(r.id) >= 4 or r.size != .b) return error.InvalidOperand;
             has_high = true;
-        } else if (r.size == .b and @intFromEnum(r.id) >= 4 and @intFromEnum(r.id) < 8) {
+        } else if (r.size == .b and @backingInt(r.id) >= 4 and @backingInt(r.id) < 8) {
             need_rex = true;
         },
         .mem => |m| try checkMem(m),
@@ -361,7 +383,7 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
                 const mod: u8 = if (m.disp == 0 and rlo(base) != 5) 0x00 else if (fits(m.disp, i8)) 0x40 else 0x80;
                 if (m.index != null or rlo(base) == 4) {
                     out.u8_(mod | r | 4);
-                    out.u8_(@as(u8, @intFromEnum(m.scale)) << 6 | (if (m.index) |x| rlo(x) else 4) << 3 | rlo(base));
+                    out.u8_(@as(u8, @backingInt(m.scale)) << 6 | (if (m.index) |x| rlo(x) else 4) << 3 | rlo(base));
                 } else out.u8_(mod | r | rlo(base));
                 if (mod == 0x40) out.int(m.disp, 1) else if (mod == 0x80) out.int(m.disp, 4);
             } else if (mode32 and m.index == null) {
@@ -369,7 +391,7 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
                 out.int(m.disp, 4);
             } else {
                 out.u8_(r | 4);
-                out.u8_(@as(u8, @intFromEnum(m.scale)) << 6 | (if (m.index) |x| rlo(x) else 4) << 3 | 5);
+                out.u8_(@as(u8, @backingInt(m.scale)) << 6 | (if (m.index) |x| rlo(x) else 4) << 3 | 5);
                 out.int(m.disp, 4);
             }
         }

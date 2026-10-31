@@ -40,10 +40,10 @@ pub const Gp = enum(u4) {
     r14,
     r15,
     inline fn lo(r: Gp) u8 {
-        return @intFromEnum(r) & 7;
+        return @backingInt(r) & 7;
     }
     inline fn hi(r: Gp) u8 {
-        return @intFromEnum(r) >> 3;
+        return @backingInt(r) >> 3;
     }
 };
 
@@ -132,7 +132,7 @@ const Enc = struct {
         const base = m.base orelse {
             const idx: u8 = if (m.index) |i| i.lo() else 4;
             e.u8_(0x04 | r);
-            e.u8_(@as(u8, @intFromEnum(m.scale)) << 6 | idx << 3 | 5);
+            e.u8_(@as(u8, @backingInt(m.scale)) << 6 | idx << 3 | 5);
             e.u32_(@bitCast(m.disp));
             return;
         };
@@ -141,7 +141,7 @@ const Enc = struct {
         if (m.index != null or base.lo() == 4) {
             const idx: u8 = if (m.index) |i| i.lo() else 4;
             e.u8_(mod | r | 4);
-            e.u8_(@as(u8, @intFromEnum(m.scale)) << 6 | idx << 3 | base.lo());
+            e.u8_(@as(u8, @backingInt(m.scale)) << 6 | idx << 3 | base.lo());
         } else e.u8_(mod | r | base.lo());
         switch (mod) {
             0x40 => e.i8_(m.disp),
@@ -193,7 +193,7 @@ pub fn Logger(comptime cap: usize) type {
             if (ev.ops.mem) |m| {
                 self.operand(&first, "[", .{});
                 if (m.base) |b| self.print("{s}", .{@tagName(b)});
-                if (m.index) |i| self.print("{s}{s}*{d}", .{ if (m.base != null) "+" else "", @tagName(i), @as(u8, 1) << @intFromEnum(m.scale) });
+                if (m.index) |i| self.print("{s}{s}*{d}", .{ if (m.base != null) "+" else "", @tagName(i), @as(u8, 1) << @backingInt(m.scale) });
                 if (m.disp != 0 or (m.base == null and m.index == null)) self.print("{s}{d}", .{ if (m.disp >= 0 and (m.base != null or m.index != null)) "+" else "", m.disp });
                 self.print("]", .{});
             }
@@ -292,8 +292,8 @@ pub fn validateMem(m: Mem) Error!void {
 /// AsmJit forms for one emitted instruction (ALU ops and conditions select a sub-table).
 pub fn formsFor(comptime id: Inst, ops: Ops) []const isa.Form {
     return switch (id) {
-        .alu_rr, .alu_rm, .alu_mr, .alu_ri => @field(isa.table, @tagName(id))[@intFromEnum(ops.alu.?)],
-        .jcc => isa.table.jcc[@intFromEnum(ops.cond.?)],
+        .alu_rr, .alu_rm, .alu_mr, .alu_ri => @field(isa.table, @tagName(id))[@backingInt(ops.alu.?)],
+        .jcc => isa.table.jcc[@backingInt(ops.cond.?)],
         else => &@field(isa.table, @tagName(id)),
     };
 }
@@ -487,9 +487,9 @@ pub fn AssemblerT(comptime opts: Options) type {
         inline fn opRR(a: Self, comptime op: u8, reg: Gp, rm: Gp) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
-            e.rexRR(true, @intFromEnum(reg), rm);
+            e.rexRR(true, @backingInt(reg), rm);
             e.u8_(op);
-            e.modrmRR(@intFromEnum(reg), rm);
+            e.modrmRR(@backingInt(reg), rm);
             a.commit(&e);
         }
 
@@ -509,17 +509,17 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.opRR(0x89, src, dst);
         }
         inline fn rawMovRM(a: Self, dst: Gp, src: Mem) Error!void {
-            return a.opRM(0x8B, @intFromEnum(dst), src, null, 0);
+            return a.opRM(0x8B, @backingInt(dst), src, null, 0);
         }
         inline fn rawMovMR(a: Self, dst: Mem, src: Gp) Error!void {
-            return a.opRM(0x89, @intFromEnum(src), dst, null, 0);
+            return a.opRM(0x89, @backingInt(src), dst, null, 0);
         }
         /// mov qword [m], imm32 (sign-extended)
         inline fn rawMovMI(a: Self, dst: Mem, imm: i32) Error!void {
             return a.opRM(0xC7, 0, dst, {}, imm);
         }
         inline fn rawLea(a: Self, dst: Gp, src: Mem) Error!void {
-            return a.opRM(0x8D, @intFromEnum(dst), src, null, 0);
+            return a.opRM(0x8D, @backingInt(dst), src, null, 0);
         }
 
         /// Shortest encoding: u32 => `mov r32, imm32` (zero-extends), i32 => `mov r/m64, imm32`
@@ -557,13 +557,13 @@ pub fn AssemblerT(comptime opts: Options) type {
         // ---- ALU ----------------------------------------------------------------------
 
         inline fn rawAluRR(a: Self, comptime op: Alu, dst: Gp, src: Gp) Error!void {
-            return a.opRR(@as(u8, @intFromEnum(op)) * 8 + 1, src, dst);
+            return a.opRR(@as(u8, @backingInt(op)) * 8 + 1, src, dst);
         }
         inline fn rawAluRM(a: Self, comptime op: Alu, dst: Gp, src: Mem) Error!void {
-            return a.opRM(@as(u8, @intFromEnum(op)) * 8 + 3, @intFromEnum(dst), src, null, 0);
+            return a.opRM(@as(u8, @backingInt(op)) * 8 + 3, @backingInt(dst), src, null, 0);
         }
         inline fn rawAluMR(a: Self, comptime op: Alu, dst: Mem, src: Gp) Error!void {
-            return a.opRM(@as(u8, @intFromEnum(op)) * 8 + 1, @intFromEnum(src), dst, null, 0);
+            return a.opRM(@as(u8, @backingInt(op)) * 8 + 1, @backingInt(src), dst, null, 0);
         }
         inline fn rawAluRI(a: Self, comptime op: Alu, dst: Gp, imm: i32) Error!void {
             try a.buf.ensure(max_inst);
@@ -571,14 +571,14 @@ pub fn AssemblerT(comptime opts: Options) type {
             e.rexRR(true, 0, dst);
             if (fitsI8(imm)) {
                 e.u8_(0x83);
-                e.modrmRR(@intFromEnum(op), dst);
+                e.modrmRR(@backingInt(op), dst);
                 e.i8_(imm);
             } else if (dst == .rax) {
-                e.u8_(@as(u8, @intFromEnum(op)) * 8 + 5); // accumulator short form
+                e.u8_(@as(u8, @backingInt(op)) * 8 + 5); // accumulator short form
                 e.i32_(imm);
             } else {
                 e.u8_(0x81);
-                e.modrmRR(@intFromEnum(op), dst);
+                e.modrmRR(@backingInt(op), dst);
                 e.i32_(imm);
             }
             a.commit(&e);
@@ -613,27 +613,27 @@ pub fn AssemblerT(comptime opts: Options) type {
         inline fn rawImulRR(a: Self, dst: Gp, src: Gp) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
-            e.rexRR(true, @intFromEnum(dst), src);
+            e.rexRR(true, @backingInt(dst), src);
             e.u8_(0x0F);
             e.u8_(0xAF);
-            e.modrmRR(@intFromEnum(dst), src);
+            e.modrmRR(@backingInt(dst), src);
             a.commit(&e);
         }
         inline fn rawImulRM(a: Self, dst: Gp, src: Mem) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
-            e.rexRM(true, @intFromEnum(dst), src);
+            e.rexRM(true, @backingInt(dst), src);
             e.u8_(0x0F);
             e.u8_(0xAF);
-            e.modrmM(@intFromEnum(dst), src);
+            e.modrmM(@backingInt(dst), src);
             a.commit(&e);
         }
         inline fn rawImulRRI(a: Self, dst: Gp, src: Gp, imm: i32) Error!void {
             try a.buf.ensure(max_inst);
             var e: Enc = .{};
-            e.rexRR(true, @intFromEnum(dst), src);
+            e.rexRR(true, @backingInt(dst), src);
             e.u8_(if (fitsI8(imm)) 0x6B else 0x69);
-            e.modrmRR(@intFromEnum(dst), src);
+            e.modrmRR(@backingInt(dst), src);
             if (fitsI8(imm)) e.i8_(imm) else e.i32_(imm);
             a.commit(&e);
         }
@@ -714,7 +714,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.branch(&.{}, &.{0xE8}, l);
         }
         inline fn rawJcc(a: Self, comptime c: Cond, l: Label) Error!void {
-            const cc: u8 = @intFromEnum(c);
+            const cc: u8 = @backingInt(c);
             return a.branch(&.{0x70 + cc}, &.{ 0x0F, 0x80 + cc }, l);
         }
 

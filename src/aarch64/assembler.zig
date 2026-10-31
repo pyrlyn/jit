@@ -52,7 +52,7 @@ pub const X = enum(u5) {
     pub const fp: X = .x29;
     pub const lr: X = .x30;
     inline fn n(r: X) u32 {
-        return @intFromEnum(r);
+        return @backingInt(r);
     }
 };
 
@@ -249,11 +249,11 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.put(base | rm.n() << 16 | ra.n() << 10 | rn.n() << 5 | rd.n());
         }
         fn rawCsel(a: Self, rd: X, rn: X, rm: X, c: Cond) Error!void {
-            return a.put(0x9A800000 | rm.n() << 16 | @as(u32, @intFromEnum(c)) << 12 | rn.n() << 5 | rd.n());
+            return a.put(0x9A800000 | rm.n() << 16 | @as(u32, @backingInt(c)) << 12 | rn.n() << 5 | rd.n());
         }
         fn rawCset(a: Self, rd: X, c: Cond) Error!void {
             // csinc Xd, xzr, xzr, invert(c)
-            return a.put(0x9A9F07E0 | @as(u32, @intFromEnum(c) ^ 1) << 12 | rd.n());
+            return a.put(0x9A9F07E0 | @as(u32, @backingInt(c) ^ 1) << 12 | rd.n());
         }
         fn rawShiftImm(a: Self, comptime base: u32, rd: X, rn: X, immr: u6, imms: u6) Error!void {
             return a.put(base | @as(u32, immr) << 16 | @as(u32, imms) << 10 | rn.n() << 5 | rd.n());
@@ -312,7 +312,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.branch(0x94000000, .a64_imm26, l);
         }
         fn rawBcond(a: Self, comptime c: Cond, l: Label) Error!void {
-            return a.branch(0x54000000 | @as(u32, @intFromEnum(c)), .a64_imm19, l);
+            return a.branch(0x54000000 | @as(u32, @backingInt(c)), .a64_imm19, l);
         }
         fn rawCbz(a: Self, rt: X, l: Label) Error!void {
             return a.branch(0xB4000000 | rt.n(), .a64_imm19, l);
@@ -349,29 +349,29 @@ pub fn AssemblerT(comptime opts: Options) type {
         pub fn prolog(a: Self, saved: []const X, locals: u32) Error!u12 {
             const n = std.mem.alignForward(u32, locals, 16);
             if (n > 4080) return error.InvalidOperand;
-            for (saved) |r| if (@intFromEnum(r) >= 29) return error.InvalidOperand;
+            for (saved) |r| if (@backingInt(r) >= 29) return error.InvalidOperand;
             try a.word(0xA9BF7BFD); // stp x29, x30, [sp, #-16]!
             try a.word(0x910003FD); // mov x29, sp
             var i: usize = 0;
             while (i < saved.len) : (i += 2) {
-                const r0: u32 = @intFromEnum(saved[i]);
+                const r0: u32 = @backingInt(saved[i]);
                 if (i + 1 < saved.len) {
-                    try a.word(0xA9BF03E0 | @as(u32, @intFromEnum(saved[i + 1])) << 10 | r0); // stp r0, r1, [sp, #-16]!
+                    try a.word(0xA9BF03E0 | @as(u32, @backingInt(saved[i + 1])) << 10 | r0); // stp r0, r1, [sp, #-16]!
                 } else try a.word(0xF81F0FE0 | r0); // str r0, [sp, #-16]!
             }
-            if (n != 0) try a.subImm(@enumFromInt(31), @enumFromInt(31), @intCast(n));
+            if (n != 0) try a.subImm(@fromBackingInt(@intCast(31)), @fromBackingInt(@intCast(31)), @intCast(n));
             return @intCast(n);
         }
         /// Frame epilog matching `prolog(saved, ...)`: `add sp, sp, n`, restore `saved` in reverse,
         /// `ldp x29, x30, [sp], #16; ret`.
         pub fn epilog(a: Self, saved: []const X, n: u12) Error!void {
-            if (n != 0) try a.addImm(@enumFromInt(31), @enumFromInt(31), n);
+            if (n != 0) try a.addImm(@fromBackingInt(@intCast(31)), @fromBackingInt(@intCast(31)), n);
             var i: usize = (saved.len + 1) / 2 * 2;
             while (i > 0) {
                 i -= 2;
-                const r0: u32 = @intFromEnum(saved[i]);
+                const r0: u32 = @backingInt(saved[i]);
                 if (i + 1 < saved.len) {
-                    try a.word(0xA8C103E0 | @as(u32, @intFromEnum(saved[i + 1])) << 10 | r0); // ldp r0, r1, [sp], #16
+                    try a.word(0xA8C103E0 | @as(u32, @backingInt(saved[i + 1])) << 10 | r0); // ldp r0, r1, [sp], #16
                 } else try a.word(0xF84107E0 | r0); // ldr r0, [sp], #16
             }
             try a.word(0xA8C17BFD); // ldp x29, x30, [sp], #16
@@ -611,9 +611,9 @@ test "a64 data processing (LLVM words; matches the AsmJit-parity encoder)" {
         .{ .@"and", &.{ a64.x(0), a64.x(1), a64.x(2) } },
         .{ .orr, &.{ a64.x(3), a64.x(4), a64.x(5) } },
         .{ .eor, &.{ a64.x(6), a64.x(7), a64.x(8) } },
-        .{ .csel, &.{ a64.x(0), a64.x(1), a64.x(2), a64.cond(@intFromEnum(Cond.lt)) } },
-        .{ .cset, &.{ a64.x(3), a64.cond(@intFromEnum(Cond.eq)) } },
-        .{ .cset, &.{ a64.x(4), a64.cond(@intFromEnum(Cond.hi)) } },
+        .{ .csel, &.{ a64.x(0), a64.x(1), a64.x(2), a64.cond(@backingInt(Cond.lt)) } },
+        .{ .cset, &.{ a64.x(3), a64.cond(@backingInt(Cond.eq)) } },
+        .{ .cset, &.{ a64.x(4), a64.cond(@backingInt(Cond.hi)) } },
         .{ .lsl, &.{ a64.x(5), a64.x(6), a64.imm(3) } },
         .{ .lsl, &.{ a64.x(5), a64.x(6), a64.imm(63) } },
         .{ .lsr, &.{ a64.x(7), a64.x(8), a64.imm(1) } },

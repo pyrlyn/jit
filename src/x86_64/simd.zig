@@ -111,7 +111,7 @@ const Buf = struct {
 fn rexBits(rm: Rm) struct { x: u1, b: u1 } {
     return switch (rm) {
         .reg => |v| .{ .x = 0, .b = @intCast(v.id >> 3) },
-        .mem => |mm| .{ .x = if (mm.index) |i| @intCast(@intFromEnum(i) >> 3) else 0, .b = if (mm.base) |b| @intCast(@intFromEnum(b) >> 3) else 0 },
+        .mem => |mm| .{ .x = if (mm.index) |i| @intCast(@backingInt(i) >> 3) else 0, .b = if (mm.base) |b| @intCast(@backingInt(b) >> 3) else 0 },
     };
 }
 
@@ -122,16 +122,16 @@ fn modrm(o: *Buf, reg: u4, rm: Rm) Error!void {
         .mem => |mm| {
             if (mm.index == .rsp) return error.InvalidOperand;
             if (mm.base) |base| {
-                const lo = @intFromEnum(base) & 7;
+                const lo = @backingInt(base) & 7;
                 const mod: u8 = if (mm.disp == 0 and lo != 5) 0 else if (std.math.cast(i8, mm.disp) != null) 0x40 else 0x80;
                 if (mm.index != null or lo == 4) {
                     o.put(mod | rf | 4);
-                    o.put(@as(u8, @intFromEnum(mm.scale)) << 6 | (if (mm.index) |i| @as(u8, @intFromEnum(i) & 7) else 4) << 3 | lo);
+                    o.put(@as(u8, @backingInt(mm.scale)) << 6 | (if (mm.index) |i| @as(u8, @backingInt(i) & 7) else 4) << 3 | lo);
                 } else o.put(mod | rf | lo);
                 if (mod == 0x40) o.put(@bitCast(@as(i8, @intCast(mm.disp)))) else if (mod == 0x80) disp32(o, mm.disp);
             } else {
                 o.put(rf | 4);
-                o.put(@as(u8, @intFromEnum(mm.scale)) << 6 | (if (mm.index) |i| @as(u8, @intFromEnum(i) & 7) else 4) << 3 | 5);
+                o.put(@as(u8, @backingInt(mm.scale)) << 6 | (if (mm.index) |i| @as(u8, @backingInt(i) & 7) else 4) << 3 | 5);
                 disp32(o, mm.disp);
             }
         },

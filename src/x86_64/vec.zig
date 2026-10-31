@@ -221,9 +221,9 @@ fn fitsN(v: i64, bytes: u16) bool {
 fn regNum(o: Op) u8 {
     return switch (o) {
         .v => |v| v.id,
-        .r => |r| if (r.high) @as(u8, @intFromEnum(r.id)) + 4 else @intFromEnum(r.id),
+        .r => |r| if (r.high) @as(u8, @backingInt(r.id)) + 4 else @backingInt(r.id),
         // enqcmd/movdir64b: the destination `es:[reg]` is encoded as the register in ModRM.reg.
-        .m => |m| if (m.base) |b| @intFromEnum(b) else 0,
+        .m => |m| if (m.base) |b| @backingInt(b) else 0,
         .imm => 0,
     };
 }
@@ -234,7 +234,7 @@ fn matches(f: *const Form, ops: []const Op, e: Extra) bool {
     if (gp.mode32) {
         if (f.rexw) return false;
         for (ops) |o| switch (o) {
-            .r => |r| if (r.size == .q or @intFromEnum(r.id) >= 8) return false,
+            .r => |r| if (r.size == .q or @backingInt(r.id) >= 8) return false,
             .v => |v| if (v.id >= 8 and v.cls != .cr and v.cls != .dr) return false,
             .m => |m| if (m.rip) return false,
             else => {},
@@ -292,10 +292,10 @@ inline fn modrmMem(out: anytype, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
         out.int(m.disp, 4);
         return at;
     }
-    const idx: ?u8 = if (m.vindex) |vi| vi.id else if (m.index) |g| @intFromEnum(g) else null;
-    const sc: u8 = @as(u8, @intFromEnum(m.scale)) << 6;
+    const idx: ?u8 = if (m.vindex) |vi| vi.id else if (m.index) |g| @backingInt(g) else null;
+    const sc: u8 = @as(u8, @backingInt(m.scale)) << 6;
     if (m.base) |base| {
-        const b: u8 = @intFromEnum(base);
+        const b: u8 = @backingInt(base);
         var disp8: ?i64 = null;
         if (m.disp == 0 and (b & 7) != 5) {
             disp8 = null;
@@ -324,7 +324,7 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error
     var rm_mem: ?Mem = null;
     if (f.rm) |i| switch (ops[i]) {
         .m => |m| if (f.ops[i].k == .maddr) {
-            rm_reg = @intFromEnum(m.base.?);
+            rm_reg = @backingInt(m.base.?);
         } else {
             rm_mem = m;
         },
@@ -350,8 +350,8 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error
         b3 = (rr >> 3) & 1;
         x3 = (rr >> 4) & 1;
     } else if (rm_mem) |m| {
-        if (m.base) |bb| b3 = (@intFromEnum(bb) >> 3) & 1;
-        if (m.index) |ii| x3 = (@intFromEnum(ii) >> 3) & 1;
+        if (m.base) |bb| b3 = (@backingInt(bb) >> 3) & 1;
+        if (m.index) |ii| x3 = (@backingInt(ii) >> 3) & 1;
         if (m.vindex) |vi| {
             x3 = (vi.id >> 3) & 1;
             v4 = (vi.id >> 4) & 1;
@@ -367,7 +367,7 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error
             var need_rex = false;
             var has_high = false;
             for (ops) |o| if (o == .r) {
-                if (o.r.high) has_high = true else if (o.r.size == .b and @intFromEnum(o.r.id) >= 4 and @intFromEnum(o.r.id) < 8) need_rex = true;
+                if (o.r.high) has_high = true else if (o.r.size == .b and @backingInt(o.r.id) >= 4 and @backingInt(o.r.id) < 8) need_rex = true;
             };
             var rexv: u8 = (if (f.rexw) @as(u8, 8) else 0) | r3 << 2 | (if (rm_mem != null) x3 else 0) << 1 | b3;
             if (rm_reg != null) rexv &= 0b1101;
@@ -419,7 +419,7 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error
             out.u8_((~r3 & 1) << 7 | (~x3 & 1) << 6 | (~b3 & 1) << 5 | (~r4 & 1) << 4 | (f.map & 7));
             out.u8_(w << 7 | (~vvvv & 15) << 3 | 4 | f.pp);
             // {er}: L'L carries the rounding mode; {sae} alone: AsmJit writes L'L = 0.
-            const ll: u8 = if (e.rc) |rc| @intFromEnum(rc) else if (e.sae) 0 else f.l;
+            const ll: u8 = if (e.rc) |rc| @backingInt(rc) else if (e.sae) 0 else f.l;
             const bbit: u8 = if (bcst_elem != 0 or e.rc != null or e.sae) 1 else 0;
             out.u8_((if (e.z) @as(u8, 0x80) else 0) | ll << 5 | bbit << 4 | (~v4 & 1) << 3 | e.k);
         },

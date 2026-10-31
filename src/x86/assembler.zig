@@ -24,7 +24,7 @@ pub const Gp = enum(u3) {
     esi,
     edi,
     inline fn wide(r: Gp) x64.Gp {
-        return @enumFromInt(@intFromEnum(r));
+        return @fromBackingInt(@intCast(@backingInt(r)));
     }
 };
 pub const Scale = x64.Scale;
@@ -126,7 +126,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             if (i < std.math.minInt(i32) or i > std.math.maxInt(u32)) return error.InvalidOperand;
             const v: u32 = @truncate(@as(u64, @bitCast(i)));
             try a.buf.ensure(5);
-            a.buf.put8(0xB8 + @as(u8, @intFromEnum(d)));
+            a.buf.put8(0xB8 + @as(u8, @backingInt(d)));
             a.buf.put32(v);
         }
         pub fn lea(a: Self, d: Gp, s: Mem) Error!void {
@@ -170,16 +170,16 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// One-byte `inc r32` (0x40+r), legal only in 32-bit mode.
         pub fn inc(a: Self, d: Gp) Error!void {
-            try a.buf.emitBytes(&.{0x40 + @as(u8, @intFromEnum(d))});
+            try a.buf.emitBytes(&.{0x40 + @as(u8, @backingInt(d))});
         }
         pub fn dec(a: Self, d: Gp) Error!void {
-            try a.buf.emitBytes(&.{0x48 + @as(u8, @intFromEnum(d))});
+            try a.buf.emitBytes(&.{0x48 + @as(u8, @backingInt(d))});
         }
         pub fn push(a: Self, g: Gp) Error!void {
-            try a.buf.emitBytes(&.{0x50 + @as(u8, @intFromEnum(g))});
+            try a.buf.emitBytes(&.{0x50 + @as(u8, @backingInt(g))});
         }
         pub fn pop(a: Self, g: Gp) Error!void {
-            try a.buf.emitBytes(&.{0x58 + @as(u8, @intFromEnum(g))});
+            try a.buf.emitBytes(&.{0x58 + @as(u8, @backingInt(g))});
         }
         pub fn pushI(a: Self, i: i32) Error!void {
             if (std.math.cast(i8, i)) |b| return a.buf.emitBytes(&.{ 0x6A, @bitCast(b) });
@@ -202,10 +202,10 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.buf.emitBytes(&.{0xCC});
         }
         pub fn callR(a: Self, g: Gp) Error!void {
-            return a.buf.emitBytes(&.{ 0xFF, 0xD0 + @as(u8, @intFromEnum(g)) });
+            return a.buf.emitBytes(&.{ 0xFF, 0xD0 + @as(u8, @backingInt(g)) });
         }
         pub fn jmpR(a: Self, g: Gp) Error!void {
-            return a.buf.emitBytes(&.{ 0xFF, 0xE0 + @as(u8, @intFromEnum(g)) });
+            return a.buf.emitBytes(&.{ 0xFF, 0xE0 + @as(u8, @backingInt(g)) });
         }
         fn branch(a: Self, short_op: []const u8, long_op: []const u8, l: Label) Error!void {
             if (!a.buf.isValidLabel(l)) return error.InvalidLabel;
@@ -233,7 +233,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.branch(&.{}, &.{0xE8}, l);
         }
         pub fn jcc(a: Self, c: Cond, l: Label) Error!void {
-            const cc: u8 = @intFromEnum(c);
+            const cc: u8 = @backingInt(c);
             return a.branch(&.{0x70 + cc}, &.{ 0x0F, 0x80 + cc }, l);
         }
         /// `mov eax, addr; call eax` (eax is caller-saved in every 32-bit convention).
@@ -307,11 +307,11 @@ test "x86: byte-exact vs LLVM (clang -target i386)" {
     try a.movRM(.ecx, abs(0x1000));
     const want = [_]u8{
         0x89, 0xc8, 0x8b, 0x7c, 0x24, 0x04, 0x89, 0x75, 0xf8, 0xc7, 0x44, 0x83, 0x10, 0x07, 0x00, 0x00, 0x00,
-        0x8d, 0x54, 0x51, 0x64, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xb9, 0xff, 0xff, 0xff, 0xff, 0x01, 0xc8,
-        0x83, 0xec, 0x0c, 0x05, 0xe8, 0x03, 0x00, 0x00, 0x3b, 0x55, 0x08, 0x31, 0xdb, 0x21, 0x10, 0x85,
-        0xc0, 0x0f, 0xaf, 0xca, 0x6b, 0xc1, 0x0a, 0x40, 0x4f, 0x55, 0x5d, 0x6a, 0x01, 0x68, 0xe8, 0x03,
-        0x00, 0x00, 0xc3, 0xc2, 0x08, 0x00, 0x90, 0xcc, 0xff, 0xd0, 0xff, 0xe1, 0xa1, 0x00, 0x10, 0x00,
-        0x00, 0x8b, 0x0d, 0x00, 0x10, 0x00, 0x00,
+        0x8d, 0x54, 0x51, 0x64, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xb9, 0xff, 0xff, 0xff, 0xff, 0x01, 0xc8, 0x83,
+        0xec, 0x0c, 0x05, 0xe8, 0x03, 0x00, 0x00, 0x3b, 0x55, 0x08, 0x31, 0xdb, 0x21, 0x10, 0x85, 0xc0, 0x0f,
+        0xaf, 0xca, 0x6b, 0xc1, 0x0a, 0x40, 0x4f, 0x55, 0x5d, 0x6a, 0x01, 0x68, 0xe8, 0x03, 0x00, 0x00, 0xc3,
+        0xc2, 0x08, 0x00, 0x90, 0xcc, 0xff, 0xd0, 0xff, 0xe1, 0xa1, 0x00, 0x10, 0x00, 0x00, 0x8b, 0x0d, 0x00,
+        0x10, 0x00, 0x00,
     };
     try t.expectEqualSlices(u8, &want, cb.code());
     try t.expectEqual(mode_before, gp.mode32); // mode restored

@@ -180,11 +180,11 @@ const Ctx = struct {
     }
 
     fn put(c: *Ctx, n: Name, v: i64) void {
-        c.vals[@intFromEnum(n)] = v;
-        c.set.set(@intFromEnum(n));
+        c.vals[@backingInt(n)] = v;
+        c.set.set(@backingInt(n));
     }
     fn get(c: *const Ctx, n: Name) ?i64 {
-        return if (c.set.isSet(@intFromEnum(n))) c.vals[@intFromEnum(n)] else null;
+        return if (c.set.isSet(@backingInt(n))) c.vals[@backingInt(n)] else null;
     }
 };
 
@@ -1070,7 +1070,7 @@ const all_forms = blk: {
 };
 
 pub fn formsOf(mn: Mnemonic) []const Form {
-    return all_forms[@intFromEnum(mn)];
+    return all_forms[@backingInt(mn)];
 }
 
 /// Encodes `mn`, applying AsmJit's assembler-level aliases when no form matches directly:
