@@ -22,6 +22,8 @@ pub const x86_64 = if (opts.x86_64) @import("x86_64/assembler.zig") else void;
 pub const x86_64_builder = if (opts.x86_64) @import("x86_64/builder.zig") else void;
 /// `pyrlyn_jit.x86_64_compiler.compile`: IR -> regalloc -> Builder -> machine code (void if disabled).
 pub const x86_64_compiler = if (opts.x86_64) @import("x86_64/compiler.zig") else void;
+/// `pyrlyn_jit.x86.Assembler`: 32-bit x86 (part of the x86_64 backend's encoder; void if disabled).
+pub const x86 = if (opts.x86_64) @import("x86/assembler.zig") else void;
 /// `pyrlyn_jit.aarch64.Assembler`, `.X`, ... (void if disabled at build time)
 pub const aarch64 = if (opts.aarch64) @import("aarch64/assembler.zig") else void;
 
@@ -43,5 +45,6 @@ test {
     if (opts.x86_64) _ = x86_64;
     if (opts.x86_64) _ = x86_64_builder;
     if (opts.x86_64) _ = x86_64_compiler;
+    if (opts.x86_64) _ = x86;
     if (opts.aarch64) _ = aarch64;
 }

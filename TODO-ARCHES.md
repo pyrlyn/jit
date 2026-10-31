@@ -10,6 +10,13 @@ Rules that every new backend follows (same as x86-64 and AArch64):
 Builder, Compiler and register allocator: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## 1. x86 (32-bit)
+
+**Status (feat/x86-32): base implemented** in `src/x86/assembler.zig` (`pyrlyn_jit.x86`): typed
+GP API (mov/lea/ALU/test/imul/inc/dec/push/pop/ret imm16/call/jmp/jcc with labels, absolute
+moffs), cdecl/stdcall/fastcall/SysV-i386 data, prolog/epilog, generic `inst()` over the shared
+GP table in 32-bit mode (already covered by the 8310 AsmJit x86 cases). Tests byte-exact vs
+`clang -target i386`. Not yet: comptime mode instead of the global `gp.mode32`, hooks, SIMD
+wrapper, Builder/Compiler support, execution tests (no 32-bit host).
 - Module `src/x86/`; share REX-less encoder pieces with `x86_64` through a comptime
   `mode: enum { x86, x86_64 }` parameter, not a runtime flag.
 - Registers eax..edi only; no REX; `inc/dec r32` one-byte forms (0x40..0x4F) become legal.
