@@ -12,18 +12,23 @@ pub const safety = @import("core/safety.zig");
 pub const build_options = opts;
 /// Arch-agnostic linear-scan register allocator (vregs -> physical registers / spill slots).
 pub const regalloc = @import("core/regalloc.zig");
+/// Compiler IR: text parser, verifier, printer, reference interpreter.
+pub const ir = @import("core/ir.zig");
 pub const JitRuntime = @import("core/jit_runtime.zig");
 
 /// `pyrlyn_jit.x86_64.Assembler`, `.Gp`, `.ptr`, ... (void if disabled at build time)
 pub const x86_64 = if (opts.x86_64) @import("x86_64/assembler.zig") else void;
 /// `pyrlyn_jit.x86_64_builder.Builder`: node-list layer over the x86-64 Assembler (void if disabled).
 pub const x86_64_builder = if (opts.x86_64) @import("x86_64/builder.zig") else void;
+/// `pyrlyn_jit.x86_64_compiler.compile`: IR -> regalloc -> Builder -> machine code (void if disabled).
+pub const x86_64_compiler = if (opts.x86_64) @import("x86_64/compiler.zig") else void;
 /// `pyrlyn_jit.aarch64.Assembler`, `.X`, ... (void if disabled at build time)
 pub const aarch64 = if (opts.aarch64) @import("aarch64/assembler.zig") else void;
 
 test {
     _ = @import("core/code_buffer.zig");
     _ = @import("core/regalloc.zig");
+    _ = @import("core/ir.zig");
     _ = @import("tests.zig");
     _ = @import("enc_tests.zig");
     _ = @import("gp_tests.zig");
@@ -37,5 +42,6 @@ test {
     _ = @import("fuzz.zig");
     if (opts.x86_64) _ = x86_64;
     if (opts.x86_64) _ = x86_64_builder;
+    if (opts.x86_64) _ = x86_64_compiler;
     if (opts.aarch64) _ = aarch64;
 }

@@ -62,6 +62,16 @@ Estimate: ~2 weeks.
 
 ## 2. Compiler
 
+**Status (feat/compiler, x86-64): steps 1–3 done, simplified.** `src/core/ir.zig` (`pyrlyn_jit.ir`):
+i64 IR with mutable vregs (not SSA/block params), text parser, verifier, printer, reference
+interpreter. `src/x86_64/compiler.zig` (`pyrlyn_jit.x86_64_compiler`): regalloc
+(`core/regalloc.zig`) -> Builder -> passes -> Assembler; host C ABI (SysV/Win64 shadow space),
+calls to absolute addresses, only-used callee-saved registers in prolog/epilog, spill slots.
+Tested by execution under Rosetta (fib, calls, memory, forced spills) and a differential fuzz
+vs the interpreter. This branch carries copies of `builder.zig` and `regalloc.zig` from
+feat/builder and feat/regalloc (uncommitted dependency). Not yet: shifts/div, stack-passed
+args, immediate/memory folding, AArch64 lowering.
+
 Goal: compile a minimal IR to machine code through the Builder.
 
 ### IR
