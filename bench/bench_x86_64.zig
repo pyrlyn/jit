@@ -1,14 +1,14 @@
-//! ZigJIT side of the codegen benchmark; mirrors asmjit_bench.cpp instruction-for-instruction.
+//! pyrlyn-jit side of the codegen benchmark; mirrors asmjit_bench.cpp instruction-for-instruction.
 //! usage: bench_x86_64 [iters] [dump_dir]
 const std = @import("std");
-const zj = @import("zigjit");
-const x = zj.x86_64;
+const pjit = @import("pyrlyn_jit");
+const x = pjit.x86_64;
 /// Safety layer follows build options: `-Dvalidate` turns on operand validation, `-Dhooks`
 /// attaches a CountingHooks instance (the cheapest useful hook) to measure hook overhead.
-const bo = zj.build_options;
+const bo = pjit.build_options;
 /// Configurations:
 /// - default build options: `x.Assembler` (hooks = runtime `CallbackHooks`, none attached unless
-///   env `ZJ_HOOK=1`, which attaches a counting callback through the function pointer);
+///   env `PJIT_HOOK=1`, which attaches a counting callback through the function pointer);
 /// - `-Dbench-counting=true`: comptime `CountingHooks`, always attached (inlined hook).
 const A = if (bo.bench_counting) x.AssemblerT(.{ .validate = bo.validate, .Hooks = x.CountingHooks }) else x.Assembler;
 
@@ -151,11 +151,11 @@ pub fn main(init: std.process.Init) !void {
     // Scenarios are inlined into the timing loop (as LLVM did on its own before the safety
     // layer); this keeps the comparison with the earlier baseline like-for-like.
     inline for (names, fns) |name, f| {
-        var cb = zj.CodeBuffer.init(gpa);
+        var cb = pjit.CodeBuffer.init(gpa);
         defer cb.deinit();
         var counter: x.CountingHooks = .{};
         var cbh: x.CallbackHooks = .{ .post_fn = countCb };
-        const attach_cb = std.c.getenv("ZJ_HOOK") != null;
+        const attach_cb = std.c.getenv("PJIT_HOOK") != null;
         const a = if (comptime bo.bench_counting) A.initHooks(&cb, &counter) else if (comptime A.Hooks == x.CallbackHooks) (if (attach_cb) A.initHooks(&cb, &cbh) else A.init(&cb)) else A.init(&cb);
         cb_count = 0;
         var n: u32 = 0;
@@ -171,14 +171,14 @@ pub fn main(init: std.process.Init) !void {
             best = @min(best, ns);
         }
         const nf: f64 = @floatFromInt(n);
-        std.debug.print("zigjit {s:<9} instrs={d} bytes={d} avg_ns_per_instr={d:.2} min_ns_per_instr={d:.2}\n", .{
+        std.debug.print("pyrlyn_jit {s:<9} instrs={d} bytes={d} avg_ns_per_instr={d:.2} min_ns_per_instr={d:.2}\n", .{
             name, n, cb.code().len, @as(f64, @floatFromInt(total)) / @as(f64, @floatFromInt(iters)) / nf, @as(f64, @floatFromInt(best)) / nf,
         });
         if (comptime bo.bench_counting) std.debug.assert(counter.instructions == n * iters);
         if (comptime A.Hooks == x.CallbackHooks) if (attach_cb) std.debug.assert(cb_count == n * iters);
         if (dump) |d| {
             var pbuf: [512]u8 = undefined;
-            const p = try std.fmt.bufPrintZ(&pbuf, "{s}/zigjit_{s}.bin", .{ d, name });
+            const p = try std.fmt.bufPrintZ(&pbuf, "{s}/pyrlyn_jit_{s}.bin", .{ d, name });
             const fp = std.c.fopen(p, "wb") orelse return error.OpenFailed;
             _ = std.c.fwrite(cb.code().ptr, 1, cb.code().len, fp);
             _ = std.c.fclose(fp);
@@ -194,7 +194,7 @@ inline fn now() u64 {
 // ---- tests: the harness emits exactly what AsmJit emits (golden files from asmjit_bench) ----
 
 fn expectScenario(comptime Asm: type, f: anytype, golden: []const u8, n_expected: ?u32) !void {
-    var cb = zj.CodeBuffer.init(std.testing.allocator);
+    var cb = pjit.CodeBuffer.init(std.testing.allocator);
     defer cb.deinit();
     var counter: x.CountingHooks = .{};
     const a = if (comptime Asm.Hooks != void) Asm.initHooks(&cb, &counter) else Asm.init(&cb);

@@ -2,9 +2,9 @@
 //! Generates x86-64 and AArch64 code on any host (nothing is executed).
 //!   zig build run-example_hooks
 const std = @import("std");
-const zj = @import("zigjit");
-const x = zj.x86_64;
-const a64 = zj.aarch64;
+const pjit = @import("pyrlyn_jit");
+const x = pjit.x86_64;
+const a64 = pjit.aarch64;
 
 /// A custom hook: counts instructions per id and logs them through LogHooks.
 const Stats = struct {
@@ -19,7 +19,7 @@ const Stats = struct {
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    var cb = zj.CodeBuffer.init(gpa.allocator());
+    var cb = pjit.CodeBuffer.init(gpa.allocator());
     defer cb.deinit();
 
     // x86-64 with validation and a custom hook.
