@@ -7,7 +7,9 @@
 //! list of forms (one `.{ ... },` line each; comment lines are ignored). Reports mnemonics only in
 //! one file, forms only in one file, and mnemonics whose forms match as a set but not in order
 //! (order decides ties between equally long encodings). `.mode = .x64` on REX.W forms is ignored
-//! (such forms are rejected outside 64-bit mode anyway). Exit code 1 if anything differs.
+//! (such forms are rejected outside 64-bit mode anyway). In vec_table.zig forms, `.w = 2` (WIG) is
+//! read as `.w = 0` (both encode W0) and `.n` (disp8*N) is ignored on forms without a memory
+//! operand (only a displacement uses it). Exit code 1 if anything differs.
 const std = @import("std");
 
 const Table = std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8));
@@ -88,11 +90,26 @@ fn staticLen(f: []const u8) usize {
 }
 
 /// REX.W forms cannot be encoded outside 64-bit mode, so `.mode = .x64` on them is redundant.
-fn normalize(gpa: std.mem.Allocator, f: []const u8) ![]const u8 {
+fn normalize(gpa: std.mem.Allocator, f0: []const u8) ![]const u8 {
+    const f = try normalizeVec(gpa, f0);
     if (std.mem.indexOf(u8, f, ".rexw = true") == null) return f;
     const tag = ", .mode = .x64";
     const at = std.mem.indexOf(u8, f, tag) orelse return f;
     return std.mem.concat(gpa, u8, &.{ f[0..at], f[at + tag.len ..] });
+}
+
+/// vec_table.zig: W-ignored encodes as W0; disp8*N only matters with a memory operand.
+fn normalizeVec(gpa: std.mem.Allocator, f: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, f, ".enc = .") == null) return f;
+    var out = try std.mem.replaceOwned(u8, gpa, f, ".w = 2,", ".w = 0,");
+    const has_mem = for ([_][]const u8{ ".k = .mem,", ".k = .vx,", ".k = .vy,", ".k = .vz," }) |k| {
+        if (std.mem.indexOf(u8, out, k) != null) break true;
+    } else false;
+    if (!has_mem) if (std.mem.indexOf(u8, out, ".n = ")) |at| {
+        const end = std.mem.indexOfScalarPos(u8, out, at, ',') orelse return out;
+        out = try std.mem.concat(gpa, u8, &.{ out[0..at], ".n = 1", out[end..] });
+    };
+    return out;
 }
 
 /// Forms are tried in order and the shortest encoding wins, the earlier form on a tie, so only the
