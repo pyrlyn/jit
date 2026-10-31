@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hand-written LLVM-oracle cases for the SVE/SME forms whose DB syntax the generic generator
 (scripts/gen_sve_tests.py) cannot spell in a way LLVM accepts (bench/a64_sve_coverage.txt).
-Each case is real LLVM syntax plus the matching ZigJit operands; the expected word comes from
+Each case is real LLVM syntax plus the matching pyrlyn-jit operands; the expected word comes from
 the system clang + objdump. Writes src/a64_sve_extra_tests.zig.
 
     python3 scripts/gen_sve_extra_tests.py

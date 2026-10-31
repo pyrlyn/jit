@@ -465,7 +465,7 @@ fn withSize(ops: []const Op, s: Size, out: []Op) []const Op {
     return out[0..ops.len];
 }
 
-/// AsmJit spellings that ZigJIT's table writes differently:
+/// AsmJit spellings that pyrlyn-jit's table writes differently:
 /// - explicit implicit operands: `mul(rdx, rax, rcx)`, `div(ax, cl)`, `cqo(rdx, rax)`,
 ///   `rdmsr(edx, eax, ecx)`, `xsaves(m, edx, eax)`, `monitor(ptr(rax), ecx, edx)`;
 ///   the implicit `dx:ax` pair / `ax` also fixes the size of an unsized memory operand;
