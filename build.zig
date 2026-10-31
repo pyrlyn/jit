@@ -50,14 +50,40 @@ pub fn build(b: *std.Build) void {
     capi_mod.addOptions("pyrlyn_jit_options", opts);
     const lib_static = b.addLibrary(.{ .name = "pyrlyn-jit", .linkage = .static, .root_module = capi_mod });
     const lib_shared = b.addLibrary(.{ .name = "pyrlyn-jit", .linkage = .dynamic, .root_module = capi_mod });
-    b.installArtifact(lib_static);
     b.installArtifact(lib_shared);
     b.installDirectory(.{ .source_dir = b.path("include"), .install_dir = .header, .install_subdir = "" });
+    // pkg-config file (zig-out/lib/pkgconfig/pyrlyn-jit.pc); prefix is relocatable via pcfiledir.
+    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.1.0";
+    const pc = b.addWriteFiles().add("pyrlyn-jit.pc", b.fmt(
+        \\prefix=${{pcfiledir}}/../..
+        \\libdir=${{prefix}}/lib
+        \\includedir=${{prefix}}/include
+        \\
+        \\Name: pyrlyn-jit
+        \\Description: pyrlyn-jit machine-code generator (C ABI)
+        \\Version: {s}
+        \\Libs: -L${{libdir}} -lpyrlyn-jit
+        \\Cflags: -I${{includedir}}
+        \\
+    , .{pc_version}));
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(pc, .lib, "pkgconfig/pyrlyn-jit.pc").step);
     b.step("lib", "Build libpyrlyn-jit (static + shared) and install include/").dependOn(&b.addInstallArtifact(lib_static, .{}).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = capi_mod })).step);
     // Plain object for foreign toolchains: Apple ld rejects Zig's archive members that are not
     // 8-byte aligned ("64-bit mach-o not 8-byte aligned"), so external linkers get the .o.
     const lib_obj = b.addObject(.{ .name = "pyrlyn_jit", .root_module = capi_mod });
+
+    // Installed libpyrlyn-jit.a: on macOS the archive is re-packed with the system `ar` from the plain
+    // object, because Apple ld ignores Zig's unaligned archive members (see lib_obj above).
+    // Zig's own consumers (examples below) still link lib_static directly.
+    if (target.result.os.tag.isDarwin() and @import("builtin").os.tag.isDarwin()) {
+        const ar = b.addSystemCommand(&.{ "ar", "-rcs" });
+        const repacked = ar.addOutputFileArg("libpyrlyn-jit.a");
+        ar.addFileArg(lib_obj.getEmittedBin());
+        b.getInstallStep().dependOn(&b.addInstallFileWithDir(repacked, .lib, "libpyrlyn-jit.a").step);
+    } else {
+        b.installArtifact(lib_static);
+    }
 
     const examples_step = b.step("examples", "Build and run examples/{c,cpp,zig} (+ rust with -Drust=true)");
     {

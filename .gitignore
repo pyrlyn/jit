@@ -18,3 +18,9 @@ bench/asmjit_bench
 *.exe
 scripts/.gp_forms.json
 scripts/__pycache__/
+# CMake adapter build trees / local install prefix
+/_install/
+/_b/
+/_c/
+/_d/
+/build/

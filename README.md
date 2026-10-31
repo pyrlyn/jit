@@ -222,6 +222,58 @@ Tests:
 - `bench/bench_x86_64.zig` tests: every benchmark scenario is byte-identical to AsmJit's output
   (`bench/ref/*.bin`) with layers off, validate on, and validate + counting hook.
 
+## Using from C/C++ (install, pkg-config, CMake, CPM)
+
+`build.zig` is the primary build. `zig build install` installs the C ABI library:
+
+```sh
+zig build install -Doptimize=ReleaseFast --prefix /opt/pyrlyn-jit
+# lib/libpyrlyn-jit.a, lib/libpyrlyn-jit.{dylib,so}, include/pyrlyn_jit.h, include/pyrlyn_jit.hpp,
+# lib/pkgconfig/pyrlyn-jit.pc (relocatable; -Dversion=... sets its Version)
+```
+
+On macOS the installed `libpyrlyn-jit.a` is re-packed with the system `ar`, so Apple `ld` accepts it.
+
+**pkg-config:**
+
+```sh
+export PKG_CONFIG_PATH=/opt/pyrlyn-jit/lib/pkgconfig
+cc main.c $(pkg-config --cflags --libs pyrlyn-jit) -Wl,-rpath,/opt/pyrlyn-jit/lib   # shared
+cc main.c $(pkg-config --cflags pyrlyn-jit) /opt/pyrlyn-jit/lib/libpyrlyn-jit.a          # static
+```
+
+**CMake** (3.20+, needs `zig` on `PATH` or `-DPYRLYN_JIT_ZIG_EXECUTABLE=...`). The top-level
+`CMakeLists.txt` is a thin adapter: it runs `zig build install` into the build directory and
+exposes IMPORTED targets `pyrlyn-jit::pyrlyn-jit` (static) and `pyrlyn-jit::pyrlyn-jit_shared`. `-Doptimize` follows
+`CMAKE_BUILD_TYPE` (Release/MinSizeRel → ReleaseFast, RelWithDebInfo/none → ReleaseSafe,
+Debug → Debug); override with `-DPYRLYN_JIT_OPTIMIZE=...`, backends with `-DPYRLYN_JIT_TARGETS=x86_64`.
+
+```cmake
+# add_subdirectory
+add_subdirectory(third_party/zig-jit)
+target_link_libraries(app PRIVATE pyrlyn-jit::pyrlyn-jit)
+
+# FetchContent
+include(FetchContent)
+FetchContent_Declare(pyrlyn-jit GIT_REPOSITORY https://github.com/pyrlyn/jit.git GIT_TAG main)
+FetchContent_MakeAvailable(pyrlyn-jit)
+
+# CPM
+CPMAddPackage(NAME pyrlyn-jit GITHUB_REPOSITORY pyrlyn/jit GIT_TAG main)
+
+# installed (cmake --install, or zig-built prefix with the config files)
+find_package(pyrlyn-jit 0.1 REQUIRED CONFIG)
+```
+
+Install via CMake: `cmake -S . -B build -DCMAKE_INSTALL_PREFIX=/opt/pyrlyn-jit && cmake --build build && cmake --install build`
+(adds `lib/cmake/pyrlyn-jit/pyrlyn-jitConfig.cmake` and `pyrlyn-jitConfigVersion.cmake`).
+`examples/cmake/` is a consumer project linking `examples/c/main.c` against both targets:
+
+```sh
+cmake -S examples/cmake -B build/example && cmake --build build/example && build/example/example_c
+cmake -S examples/cmake -B build/example-pkg -DPYRLYN_JIT_USE_FIND_PACKAGE=ON -DCMAKE_PREFIX_PATH=/opt/pyrlyn-jit
+```
+
 ## Benchmark vs AsmJit
 
 ```sh
