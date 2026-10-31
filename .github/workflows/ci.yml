@@ -25,6 +25,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
       - run: zig version
+      - run: zig build fmt-check
       - run: zig build test --summary all
       - name: Cancel whole run on failure
         if: failure()

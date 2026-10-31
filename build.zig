@@ -168,4 +168,29 @@ pub fn build(b: *std.Build) void {
             b.step("run-" ++ name, "Run " ++ name).dependOn(&run.step);
         }
     }
+
+    // zig fmt: our sources only. AsmJit-derived and other generated files are excluded so they
+    // stay byte-identical to their generators (see CONTRIBUTING.md).
+    const fmt_paths: []const std.Build.LazyPath = &.{ b.path("build.zig"), b.path("src"), b.path("examples"), b.path("bench") };
+    const fmt_exclude: []const std.Build.LazyPath = &.{
+        b.path("third_party"),
+        b.path("bench/pre-safety"),
+        // AsmJit-derived: ported tests and tables generated from AsmJit's instruction database
+        b.path("src/asmjit_x64_tests.zig"),
+        b.path("src/asmjit_x86_tests.zig"),
+        b.path("src/asmjit_a64_tests.zig"),
+        b.path("src/x86_64/gp_table.zig"),
+        b.path("src/x86_64/vec_table.zig"),
+        b.path("src/aarch64/a64_table.zig"),
+        b.path("src/x86_64/isa.zig"),
+        b.path("src/aarch64/isa.zig"),
+        // generated from LLVM by scripts/gen_*_tests.py
+        b.path("src/gp_tests.zig"),
+        b.path("src/simd_tests.zig"),
+        b.path("src/enc_tests.zig"),
+        b.path("src/a64_sve_tests.zig"),
+        b.path("src/a64_sve_extra_tests.zig"),
+    };
+    b.step("fmt", "Format sources with zig fmt (generated/AsmJit-derived files excluded)").dependOn(&b.addFmt(.{ .paths = fmt_paths, .exclude_paths = fmt_exclude }).step);
+    b.step("fmt-check", "Check formatting with zig fmt --check (same exclusions as fmt)").dependOn(&b.addFmt(.{ .paths = fmt_paths, .exclude_paths = fmt_exclude, .check = true }).step);
 }
