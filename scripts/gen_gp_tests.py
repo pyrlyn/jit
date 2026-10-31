@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/gp_tests.zig: byte-exact tests for every generated GP form (scripts/gen_gp_tables.py).
+"""Generate src/gp_tests.zig: byte-exact tests for every generated GP form (`zig build gen-tables`).
 
 For each form, a few operand instances (low/high registers, SIB/RBP/RIP memory, immediates) are
 written as Intel-syntax assembly, assembled by LLVM (clang -c + objdump) and paired with the
@@ -101,6 +101,8 @@ def main():
     cases = []
     for mn in sorted(fs):
         for f in fs[mn]:
+            if f.get("mode") == "x86":
+                continue  # 32-bit-mode-only forms: covered by the x86-32 tests, not by 64-bit LLVM output
             has_mem = any(k.startswith("m") for k in f["ops"])
             for v in range(4 if has_mem else 3):
                 zs, ts = instances(f, v)

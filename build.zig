@@ -37,6 +37,52 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     }) });
     b.step("fuzz", "Fuzz the encoders/code buffer with random seeds (env: PYRLYN_JIT_FUZZ_ROUNDS/SEED/ITERS)").dependOn(&b.addRunArtifact(fuzz_exe).step);
+
+    // ---- encoder tables from LLVM (tools/gen_tables.zig; docs/llvm-tables.md) -------------------
+    // Not part of a normal build: the generated tables are committed. Needs an llvm-project
+    // checkout (llvmorg-23.1.4) and llvm-tblgen.
+    {
+        const llvm_src = b.option([]const u8, "llvm-src", "gen-tables/check-tables: llvm-project checkout (llvmorg-23.1.4)");
+        const tblgen = b.option([]const u8, "llvm-tblgen", "gen-tables/check-tables: llvm-tblgen binary (default: llvm-tblgen on PATH)") orelse "llvm-tblgen";
+        const host_mod = struct {
+            fn f(bb: *std.Build, path: []const u8) *std.Build.Module {
+                return bb.createModule(.{ .root_source_file = bb.path(path), .target = bb.graph.host, .optimize = .ReleaseSafe });
+            }
+        }.f;
+        const gen_exe = b.addExecutable(.{ .name = "gen_tables", .root_module = host_mod(b, "tools/gen_tables.zig") });
+        const cmp_exe = b.addExecutable(.{ .name = "compare_tables", .root_module = host_mod(b, "tools/compare_tables.zig") });
+        const gen_step = b.step("gen-tables", "Regenerate src/x86_64/gp_table.zig from LLVM's X86.td (-Dllvm-src=...)");
+        const check_step = b.step("check-tables", "Check that the committed gp_table.zig matches a fresh generation (-Dllvm-src=...)");
+        if (llvm_src) |src| {
+            const tg = b.addSystemCommand(&.{ tblgen, "--dump-json" });
+            tg.addArgs(&.{ "-I", b.pathJoin(&.{ src, "llvm/include" }), "-I", b.pathJoin(&.{ src, "llvm/lib/Target/X86" }) });
+            tg.addArg(b.pathJoin(&.{ src, "llvm/lib/Target/X86/X86.td" }));
+            tg.addArg("-o");
+            const json = tg.addOutputFileArg("X86.json");
+
+            const gen = b.addRunArtifact(gen_exe);
+            gen.addArg("x86");
+            gen.addFileArg(json);
+            gen.addDirectoryArg(b.path("."));
+            gen.has_side_effects = true;
+            gen_step.dependOn(&gen.step);
+
+            const tmp = b.addRunArtifact(gen_exe);
+            tmp.addArg("x86");
+            tmp.addFileArg(json);
+            const out_dir = tmp.addOutputDirectoryArg("gen");
+            const cmp = b.addRunArtifact(cmp_exe);
+            cmp.addArg("--exact");
+            cmp.addFileArg(b.path("src/x86_64/gp_table.zig"));
+            cmp.addFileArg(out_dir.path(b, "src/x86_64/gp_table.zig"));
+            check_step.dependOn(&cmp.step);
+        } else {
+            const fail = b.addFail("gen-tables/check-tables need -Dllvm-src=PATH to an llvm-project checkout (llvmorg-23.1.4)");
+            gen_step.dependOn(&fail.step);
+            check_step.dependOn(&fail.step);
+        }
+    }
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
