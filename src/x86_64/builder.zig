@@ -360,7 +360,7 @@ pub const Builder = struct {
             .jcc => |o| if (size == .auto) switch (o[0]) {
                 inline else => |c| try a.jcc(c, labels[o[1].id]),
             } else {
-                const cc: u8 = @intFromEnum(o[0]);
+                const cc: u8 = @backingInt(o[0]);
                 try rawBranch(a.buf, &.{0x70 + cc}, &.{ 0x0F, 0x80 + cc }, size, labels[o[1].id]);
             },
         }
@@ -406,7 +406,7 @@ fn fmtMem(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Mem) !void {
     }
     if (m.index) |r| {
         if (!first) try out.append(gpa, '+');
-        try out.print(gpa, "{s}*{d}", .{ @tagName(r), @as(u8, 1) << @intFromEnum(m.scale) });
+        try out.print(gpa, "{s}*{d}", .{ @tagName(r), @as(u8, 1) << @backingInt(m.scale) });
         first = false;
     }
     if (m.disp != 0 or first) {

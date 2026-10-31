@@ -23,7 +23,7 @@ known = []
 
 def _predicates():
     """Predicate::<NS>::k<Name> values from AsmJit's a64_globals.h (AT/DC/IC/TLBI/BTI/SysReg/...)."""
-    hdr = (root / "ref/asmjit/asmjit/arm/a64_globals.h")
+    hdr = (root / "third_party/asmjit/asmjit/arm/a64_globals.h")
     if not hdr.exists(): hdr = pathlib.Path.home() / "Grok/asmjit-loc/asmjit/arm/a64_globals.h"
     out, ns = {}, None
     for line in hdr.read_text().splitlines():

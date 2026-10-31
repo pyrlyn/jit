@@ -14,10 +14,40 @@ pub const Error = core.Error || error{InvalidOperand};
 
 /// x0..x31 with ABI names.
 pub const X = enum(u5) {
-    zero, ra, sp, gp, tp, t0, t1, t2, s0, s1, a0, a1, a2, a3, a4, a5,
-    a6, a7, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, t3, t4, t5, t6,
+    zero,
+    ra,
+    sp,
+    gp,
+    tp,
+    t0,
+    t1,
+    t2,
+    s0,
+    s1,
+    a0,
+    a1,
+    a2,
+    a3,
+    a4,
+    a5,
+    a6,
+    a7,
+    s2,
+    s3,
+    s4,
+    s5,
+    s6,
+    s7,
+    s8,
+    s9,
+    s10,
+    s11,
+    t3,
+    t4,
+    t5,
+    t6,
     inline fn n(r: X) u32 {
-        return @intFromEnum(r);
+        return @backingInt(r);
     }
 };
 
@@ -193,7 +223,7 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// `b<cond> rs1, rs2, label` (±4 KiB).
         pub fn b(a: Self, c: Cond, rs1: X, rs2: X, l: Label) Error!void {
-            return a.branchTo(rs2.n() << 20 | rs1.n() << 15 | @as(u32, @intFromEnum(c)) << 12 | 0x63, .rv_b12, l);
+            return a.branchTo(rs2.n() << 20 | rs1.n() << 15 | @as(u32, @backingInt(c)) << 12 | 0x63, .rv_b12, l);
         }
         fn branchTo(a: Self, w: u32, comptime kind: core.FixupKind, l: Label) Error!void {
             if (!a.buf.isValidLabel(l)) return error.InvalidLabel;
@@ -382,7 +412,7 @@ test "riscv: li materializes any 64-bit constant (interpreter check, 20000 value
         cb.reset();
         try Assembler.init(&cb).li(.a0, v);
         try t.expect(words(&cb).len <= 8);
-        try t.expectEqual(v, evalLi(words(&cb), @intFromEnum(X.a0)));
+        try t.expectEqual(v, evalLi(words(&cb), @backingInt(X.a0)));
     }
 }
 

@@ -42,10 +42,10 @@ fn status(e: anyerror) c_int {
         error.ProtectFailed => .protect_failed,
         else => .other,
     };
-    return @intFromEnum(s);
+    return @backingInt(s);
 }
 const OK: c_int = 0;
-const EINVAL: c_int = @intFromEnum(Status.invalid_argument);
+const EINVAL: c_int = @backingInt(Status.invalid_argument);
 
 const gpa = std.heap.c_allocator;
 
@@ -206,7 +206,7 @@ fn a64Op(o: A64Op) ?a64.Op {
 
 export fn pjit_a64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const A64Op, n: usize) c_int {
     const p = b orelse return EINVAL;
-    const mn = lookup(a64_map, mnemonic) orelse return @intFromEnum(Status.unknown_mnemonic);
+    const mn = lookup(a64_map, mnemonic) orelse return @backingInt(Status.unknown_mnemonic);
     if (n > 8 or (n > 0 and ops == null)) return EINVAL;
     var conv: [8]a64.Op = undefined;
     for (0..n) |i| conv[i] = a64Op(ops.?[i]) orelse return EINVAL;
@@ -263,7 +263,7 @@ fn x64Op(o: X64Op) ?gp.Op {
 
 export fn pjit_x64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const X64Op, n: usize) c_int {
     const p = b orelse return EINVAL;
-    const forms = lookup(gp_map, mnemonic) orelse return @intFromEnum(Status.unknown_mnemonic);
+    const forms = lookup(gp_map, mnemonic) orelse return @backingInt(Status.unknown_mnemonic);
     if (n > 4 or (n > 0 and ops == null)) return EINVAL;
     var conv: [4]gp.Op = undefined;
     for (0..n) |i| conv[i] = x64Op(ops.?[i]) orelse return EINVAL;
@@ -328,19 +328,19 @@ test "c api: a64 add + ret, labels, errors" {
     };
     const ops = [_]A64Op{ X.r(0), X.r(0), X.r(1) };
     try std.testing.expectEqual(OK, pjit_a64_emit(b, "add", &ops, 3));
-    try std.testing.expectEqual(@intFromEnum(Status.unknown_mnemonic), pjit_a64_emit(b, "nope", &ops, 3));
+    try std.testing.expectEqual(@backingInt(Status.unknown_mnemonic), pjit_a64_emit(b, "nope", &ops, 3));
     var bad = X.r(0);
     bad.reg = 200;
     try std.testing.expectEqual(EINVAL, pjit_a64_emit(b, "add", &[_]A64Op{ bad, bad, bad }, 3));
     var l: u32 = 0;
     try std.testing.expectEqual(OK, pjit_label_new(b, &l));
     try std.testing.expectEqual(OK, pjit_a64_branch(b, -1, l));
-    try std.testing.expectEqual(@intFromEnum(Status.unbound_label), pjit_finalize(b));
+    try std.testing.expectEqual(@backingInt(Status.unbound_label), pjit_finalize(b));
     try std.testing.expectEqual(OK, pjit_label_bind(b, l));
     try std.testing.expectEqual(OK, pjit_finalize(b));
     var n: usize = 0;
     const c = pjit_buffer_code(b, &n).?;
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x01, 0x8B, 0x01, 0x00, 0x00, 0x14 }, c[0..n]);
     try std.testing.expectEqual(EINVAL, pjit_a64_branch(b, 99, l));
-    try std.testing.expectEqual(@intFromEnum(Status.invalid_label), pjit_label_bind(b, 12345));
+    try std.testing.expectEqual(@backingInt(Status.invalid_label), pjit_label_bind(b, 12345));
 }
