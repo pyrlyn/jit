@@ -19,7 +19,7 @@ pub const gp = @import("gp.zig");
 /// Table-driven SIMD/VEX/EVEX/x87/... encoder (all non-GP forms of AsmJit's ISA database).
 pub const vec = @import("vec.zig");
 const safety = @import("../core/safety.zig");
-const build_opts = @import("zigjit_options");
+const build_opts = @import("pyrlyn_jit_options");
 pub const Options = safety.Options;
 
 pub const Gp = enum(u4) {

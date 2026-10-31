@@ -150,7 +150,7 @@ pub fn allocDual(min_size: usize) Error!DualFunction {
         }
         rx = asSlice(@ptrFromInt(addr), size);
     } else {
-        const fd = memfd_create("zigjit", 1); // MFD_CLOEXEC
+        const fd = memfd_create("pyrlyn_jit", 1); // MFD_CLOEXEC
         if (fd < 0) return error.MapFailed;
         defer _ = close(fd);
         if (ftruncate(fd, @intCast(size)) != 0) return error.MapFailed;
