@@ -100,7 +100,7 @@ Estimate: 3–4 weeks for x86-64, +1–2 weeks AArch64.
 ## 3. Register allocator
 
 **Status (feat/regalloc): milestone 1 + call clobbers + fixed registers** in
-`src/core/regalloc.zig` (`zigjit.regalloc`): arch-agnostic (register masks), bitset liveness
+`src/core/regalloc.zig` (`pyrlyn_jit.regalloc`): arch-agnostic (register masks), bitset liveness
 over the CFG, one interval per vreg, linear scan with furthest-end spilling and spill-slot
 reuse, callee-saved-only for call-crossing values, pre-colored vregs, and an interference
 checker (`verify`) exercised by a random-program fuzz test. Not yet: splitting, lifetime
