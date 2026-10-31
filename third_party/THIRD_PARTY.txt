@@ -2,7 +2,8 @@ Third-party software: AsmJit
 ============================
 
 AsmJit is third-party code written by Petr Kobalicek and contributors. It is
-not pyrlyn-jit code.
+not pyrlyn-jit code. AsmJit is not part of the pyrlyn-jit distribution, and
+the pyrlyn-jit license (GPLv3 or commercial) does not apply to it.
 
 Source:  https://github.com/asmjit/asmjit
 Pinned:  commit 0464e1c (2026-10-16)

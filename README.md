@@ -56,3 +56,12 @@ Full build options, install, pkg-config, CMake and CPM: [docs/BUILDING.md](docs/
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md): current limitations and implemented features.
 - [docs/llvm-tables.md](docs/llvm-tables.md): x86-64 GP table generated from LLVM.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## License
+
+You can use this project under **either** of the following licenses, at your choice:
+
+1. [GNU GPLv3](LICENSE): free for open source applications on any platform, including embedded systems.
+2. [Commercial license](PRICING.md): for proprietary applications, including embedded systems.
+
+These licenses cover pyrlyn-jit's own code only. AsmJit is used for tests and is not part of the pyrlyn-jit distribution; see [third_party/THIRD_PARTY.txt](third_party/THIRD_PARTY.txt).
