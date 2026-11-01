@@ -51,7 +51,7 @@ pub fn build(b: *std.Build) void {
         }.f;
         const gen_exe = b.addExecutable(.{ .name = "gen_tables", .root_module = host_mod(b, "tools/gen_tables.zig") });
         const cmp_exe = b.addExecutable(.{ .name = "compare_tables", .root_module = host_mod(b, "tools/compare_tables.zig") });
-        const gen_step = b.step("gen-tables", "Regenerate src/x86_64/gp_table.zig and src/aarch64/a64_table.zig from LLVM (-Dllvm-src=...)");
+        const gen_step = b.step("gen-tables", "Regenerate src/x86_64/{gp,vec}_table.zig and src/aarch64/a64_table.zig from LLVM (-Dllvm-src=...)");
         const check_step = b.step("check-tables", "Check that the committed LLVM-generated tables match a fresh generation (-Dllvm-src=...)");
         if (llvm_src) |src| {
             // target, LLVM target dir, top-level .td, generated table
@@ -82,6 +82,13 @@ pub fn build(b: *std.Build) void {
                 cmp.addFileArg(b.path(t[3]));
                 cmp.addFileArg(out_dir.path(b, t[3]));
                 check_step.dependOn(&cmp.step);
+                if (std.mem.eql(u8, t[0], "x86")) {
+                    const cmp_vec = b.addRunArtifact(cmp_exe);
+                    cmp_vec.addArg("--exact");
+                    cmp_vec.addFileArg(b.path("src/x86_64/vec_table.zig"));
+                    cmp_vec.addFileArg(out_dir.path(b, "src/x86_64/vec_table.zig"));
+                    check_step.dependOn(&cmp_vec.step);
+                }
             }
         } else {
             const fail = b.addFail("gen-tables/check-tables need -Dllvm-src=PATH to an llvm-project checkout (llvmorg-23.1.4)");
@@ -232,11 +239,11 @@ pub fn build(b: *std.Build) void {
         b.path("src/asmjit_x64_tests.zig"),
         b.path("src/asmjit_x86_tests.zig"),
         b.path("src/asmjit_a64_tests.zig"),
-        b.path("src/x86_64/vec_table.zig"),
         b.path("src/x86_64/isa.zig"),
         b.path("src/aarch64/isa.zig"),
         // generated from LLVM: tables by tools/gen_tables.zig, tests by scripts/gen_*_tests.py
         b.path("src/x86_64/gp_table.zig"),
+        b.path("src/x86_64/vec_table.zig"),
         b.path("src/aarch64/a64_table.zig"),
         b.path("src/a64_table_tests.zig"),
         b.path("src/gp_tests.zig"),

@@ -1,14 +1,16 @@
 # Encoder tables from LLVM
 
-`src/x86_64/gp_table.zig` (x86-64 legacy-encoded general-purpose instructions) and
-`src/aarch64/a64_table.zig` (AArch64 base, NEON, SVE/SME) are generated from LLVM's target
-descriptions by a Zig tool, not from AsmJit. LLVM is a generation-time input
+`src/x86_64/gp_table.zig` (x86-64 legacy-encoded general-purpose instructions),
+`src/x86_64/vec_table.zig` (every other x86-64 form: SSE, AVX, AVX-512, AVX10.2, MMX/3DNow!,
+x87, AMX, mask, crypto and system instructions) and `src/aarch64/a64_table.zig` (AArch64 base,
+NEON, SVE/SME) are generated from LLVM's target descriptions by a Zig tool, not from AsmJit.
+LLVM is a generation-time input
 only; the generated table is committed and a normal build needs neither LLVM nor the generator.
 
 | Table | Source | Status |
 |---|---|---|
 | `src/x86_64/gp_table.zig` | LLVM `X86.td` (llvmorg-23.1.4) via `tools/gen_tables.zig` | generated from LLVM |
-| `src/x86_64/vec_table.zig` | AsmJit `db/isa_x86.json` via `scripts/gen_vec_tables.py` | not yet ported |
+| `src/x86_64/vec_table.zig` | LLVM `X86.td` (llvmorg-23.1.4) via `tools/gen_tables.zig` | generated from LLVM |
 | `src/aarch64/a64_table.zig` | LLVM `AArch64.td` (llvmorg-23.1.4) via `tools/gen_tables.zig` | generated from LLVM |
 | `src/x86_64/isa.zig`, `src/aarch64/isa.zig` | AsmJit DB via `scripts/gen_isa_tables.py` | not yet ported |
 
@@ -21,6 +23,8 @@ zig build gen-tables   -Dllvm-src=$PWD/llvm-project -Dllvm-tblgen=/path/to/llvm-
 zig build check-tables -Dllvm-src=$PWD/llvm-project -Dllvm-tblgen=/path/to/llvm-tblgen   # committed == fresh
 python3 scripts/gen_gp_tests.py   # optional: regenerate src/gp_tests.zig (expected bytes from clang)
 python3 scripts/gen_a64_table_tests.py --verify   # optional: src/a64_table_tests.zig (llvm-mc on PATH)
+git show b5e4608:src/x86_64/vec_table.zig > /tmp/vec_table_asmjit.zig
+python3 scripts/gen_vec_tests.py /tmp/vec_table_asmjit.zig /path/to/llvm-mc   # optional: src/testdata/vec_cases.txt
 ```
 
 Any `llvm-tblgen` that reads the pinned `.td` files works (tested with 23.1.4). `gen-tables` also
@@ -38,6 +42,17 @@ writes `scripts/.gp_forms.json` (git-ignored), read by `scripts/gen_gp_tests.py`
   operand roles (ModRM.reg / ModRM.rm / opcode register) from `Form` and the MI operand order, the
   immediate size from `ImmT`, the CPU mode from `In64BitMode`/`Not64BitMode`. Condition-code
   records (`cmov${cond}`, `set${cond}`) are expanded into the 16 mnemonics.
+- `gen_x86_vec.zig`: every other `X86Inst` record (VEX/XOP/EVEX, and legacy records whose
+  mnemonic is not in the GP table): operand kinds in Intel order (`VR128X` -> `xmm`, `VK*` -> `k`,
+  `f128mem` -> `mem` 16, `vx64mem` -> VSIB, `RSTi` -> `st(i)`, ...), prefixes, map, opcode,
+  VEX/EVEX `pp`/`W` (`IgnoresW` -> WIG)/`L`, ModRM roles (reg, rm, vvvv, is4, opcode register) from
+  `Form`, the immediate size, EVEX `CD8_Scale` (disp8*N) and the mode. LLVM lists an EVEX
+  instruction once per masking/broadcast/rounding variant (`rr`, `rrk`, `rrkz`, `rmb`, `rrb`, ...);
+  these are merged into one form with the opmask (`{k}`/`{z}`), broadcast element size and
+  `{er}`/`{sae}` flags. `{er}`/`{sae}` and disp8*N are copied between the register and memory
+  forms of one encoding. x87 `st(i)` forms get the `C0+8*digit+i` opcode byte, x87 InstAliases
+  (`fxch` = `fxch st(1)`, `faddp st(i)` = `faddp st(i), st`) and the `fwait` aliases (`fstsw` =
+  `9B` + `fnstsw`) are added, `${cond}` records (`cmp${cond}xadd`) are expanded.
 - `gen_a64.zig`: every AArch64 `Instruction` record with a 32-bit encoding (no pseudo /
   codegen-only) and every default-variant `InstAlias`. Fixed bits and operand field positions
   come from the record's `Inst` bit layout, operand kinds from the operand classes (the class ->
@@ -56,7 +71,21 @@ which mnemonics this table offers (the rest is in `vec_table.zig`), the CPU feat
 `xchg` in both operand orders, the 16-bit-code-only variants that are left out, and a few manual
 forms LLVM does not define (see below).
 
-## Comparison with the previous (AsmJit-derived) table
+Project decisions for `vec_table.zig` live at the end of `gen_x86_vec.zig`, commented: the
+mnemonic spellings kept from the previous table (the AVX10.2 BF16/FP8 names of the earlier ISE
+revision such as `vaddnepbf16`, `fcomip`, `popa`, the string-op mnemonics), mnemonics not offered
+(prefixes, Xeon Phi AVX512ER/PF/4FMAPS/4VNNIW, VIA PadLock, Key Locker wide forms, SGX leaf
+functions, FRED, `wrpkru`, a few new extensions such as AVX512BMM), the GP-table mnemonics with
+forms here (segment/control/debug `mov`/`push`/`pop`, `clzero`/`monitor`/`monitorx`/`pbndkb`),
+the selection hints (`lowprio` for AVX10.2-only EVEX forms and GP `r/m` alternatives, `late_vex`
+for AVX-VNNI/IFMA/NE-CONVERT), the form order for stack/far-branch forms (default operand size
+first), a few SDM fixes (`rstorssp`/`clrssbsy` m64, `vmovw` m16), `cmpccxadd` kept in every mode
+(the AsmJit x86 tests encode it in 32-bit mode) and manual forms (`vmgexit`, `pfrcpv`,
+`pfrsqrtv`, `tmmultf32ps`, `invlpga` with the 67 prefix, `mov m16, sreg` with 66).
+
+## Comparison with the previous (AsmJit-derived) tables
+
+### gp_table.zig
 
 `zig run tools/compare_tables.zig -- OLD NEW` against the table at `8d3de80`:
 
@@ -82,6 +111,48 @@ tie order differs 0, differing 2, only-OLD 0, only-NEW 0
 - `src/gp_tests.zig` regenerated from the new forms: all 3126 previous cases are kept, 12 new
   (3138 total, bytes from clang); `scripts/gen_gp_tests.py` now skips 32-bit-only forms (they
   have no 64-bit LLVM spelling).
+
+### vec_table.zig
+
+`zig run tools/compare_tables.zig -- OLD NEW` against the table at `b5e4608` (the comparison
+reads `.w = 2` (WIG) as `.w = 0` and ignores `.n` on forms without a memory operand: both are
+encoded identically):
+
+```
+OLD: 1537 mnemonics / 7131 forms, NEW: 1537 / 6895; identical 309, reordered (ties kept) 868,
+tie order differs 18, differing 342, only-OLD 0, only-NEW 0
+```
+
+The tool's tie-order check is the GP encoder's rule (shortest encoding); `vec.zig` picks the first
+matching form by preference level instead, so the order is checked by encoding instead:
+`src/vec_table_tests.zig` runs 15747 cases (every form of both tables: plain, `{k}`, `{k}{z}`,
+broadcast, `{er}`/`{sae}`, `{evex}`, and 32-bit mode for mode-independent legacy forms):
+
+- 14842 `asmjit` cases: the bytes the old table produced, frozen; the new table gives the same.
+- 147 `llvm` cases: the new table encodes differently or has a new form; the bytes equal llvm-mc
+  23.1.4's.
+- 758 `removed` cases: old forms LLVM does not define; they now fail with `NoMatchingForm`.
+
+The AsmJit test suites (`-Dasmjit-tests`) and all other tests pass unchanged. What changed:
+
+- Removed (not valid per the SDM/APM, not in LLVM): `{er}` on 128/256-bit forms (AVX10.2-256
+  embedded rounding, dropped from the AVX10 spec) and `{sae}` likewise; `{z}` on memory-destination
+  stores (`vmovups m, xmm {k}{z}`, `vpmov*`, `vcompress*`, `vextract*`, `vcvtps2ph`); masking on
+  `vpinsr*` and `vmovw`; mixed-size BMI/TBM/`cmpccxadd`/RAO-INT forms (`andn r32, r64, ...`);
+  `vpconflictq` with a 4-byte broadcast; one-operand `fcmov*`; SEAM instructions in 32-bit mode;
+  `call r16`/`m16` in 32-bit mode; REX.W `mov sreg`/`sldt`/`smsw`/`str` memory forms and other
+  operand-size variants AsmJit listed twice.
+- Fixed encodings: `vcomx*`/`vucomx*` (`pp`), `vmpsadbw` EVEX (F3), `vgetexppbf16` (map 6, no
+  prefix), `fsqrt` (D9 FA), x87 `st(i)` forms (`fadd`, `fcomi`, `fcmov*`, ...: `st(0), st(i)`
+  operand order), `vgf2p8affine*qb`, `bextr` (TBM, XOP imm32), `vreduce*` with `{sae}`,
+  `invlpgb`, `urdmsr`/`uwrmsr`.
+- New forms: 16-bit `push`/`pop` of segment registers (66; picked only after the default form),
+  `popa`/`pusha` with 66, `movss`/`movsd` reg-reg store forms, `maskmovdqu`, `vmovw r64`.
+- Unsized memory where the old table had a size: `aes*kl`, `clflushopt`, `lds`/`les`/`lfs`/
+  `lgs`/`lss`, `ldtilecfg`/`sttilecfg` (any size still matches; the size was not encoded).
+- 3DNow! (including the Cyrix EMMI `pfrcpv`/`pfrsqrtv`, manual) stays in this table.
+
+`scripts/gen_vec_tables.py` (the AsmJit generator) is no longer used for `vec_table.zig`.
 
 ## AArch64 (`a64_table.zig`)
 
@@ -131,4 +202,6 @@ The upstream AsmJit tests (`zig build test -Dasmjit-tests`) and the SVE/SME test
 
 LLVM is Apache-2.0 WITH LLVM-exception. The generated tables carry an attribution header and
 `NOTICE` lists the derived files. AsmJit's license does not apply to `gp_table.zig` and
-`a64_table.zig` any more.
+`vec_table.zig` and `a64_table.zig` any more (the frozen `asmjit` expected bytes in
+`src/testdata/vec_cases.txt` and `src/testdata/a64_table_cases.txt` are encodings, recorded from
+the previous tables).

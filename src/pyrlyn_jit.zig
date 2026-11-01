@@ -37,6 +37,7 @@ test {
     _ = @import("enc_tests.zig");
     _ = @import("gp_tests.zig");
     _ = @import("simd_tests.zig");
+    _ = @import("vec_table_tests.zig");
     _ = @import("a64_sve_tests.zig");
     _ = @import("a64_sve_extra_tests.zig");
     _ = @import("a64_table_tests.zig");
