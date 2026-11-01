@@ -359,9 +359,11 @@ fn matchOps(f: *const Form, ops: []const Op, c: *Ctx) bool {
                             .zta => f.zta,
                             else => f.ztb,
                         };
-                        const i = indexOfEt(list, e) orelse return false;
-                        if (c.sz) |z| if (z != i) return false;
-                        c.sz = i;
+                        // Once an operand fixed the size index, check this list at that index
+                        // (lists may repeat an element, e.g. SDOT `Zn.tb` = {B, B, H}).
+                        if (c.sz) |z| {
+                            if (z >= list.len or list[z] != e) return false;
+                        } else c.sz = indexOfEt(list, e) orelse return false;
                     },
                 }
                 if (s.k != .zfix or f.zt.len == 0) c.el(etLog2(e));
@@ -378,9 +380,9 @@ fn matchOps(f: *const Form, ops: []const Op, c: *Ctx) bool {
             },
             .zelemt => {
                 if (o != .z or o.z.idx == null) return false;
-                const i = indexOfEt(f.zt, o.z.et) orelse return false;
-                if (c.sz) |z| if (z != i) return false;
-                c.sz = i;
+                if (c.sz) |z| {
+                    if (z >= f.zt.len or f.zt[z] != o.z.et) return false;
+                } else c.sz = indexOfEt(f.zt, o.z.et) orelse return false;
                 c.el(etLog2(o.z.et));
                 c.put(.idx, o.z.idx.?);
                 c.put(s.f.?, o.z.id);
@@ -405,9 +407,9 @@ fn matchOps(f: *const Form, ops: []const Op, c: *Ctx) bool {
                 if (s.k == .pfix) {
                     if (o.p.et != s.et) return false;
                 } else {
-                    const i = indexOfEt(f.zt, o.p.et) orelse return false;
-                    if (c.sz) |z| if (z != i) return false;
-                    c.sz = i;
+                    if (c.sz) |z| {
+                        if (z >= f.zt.len or f.zt[z] != o.p.et) return false;
+                    } else c.sz = indexOfEt(f.zt, o.p.et) orelse return false;
                     c.el(etLog2(o.p.et));
                 }
                 c.put(s.f.?, o.p.id);

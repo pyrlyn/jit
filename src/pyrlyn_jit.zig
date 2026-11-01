@@ -40,6 +40,7 @@ test {
     _ = @import("vec_table_tests.zig");
     _ = @import("a64_sve_tests.zig");
     _ = @import("a64_sve_extra_tests.zig");
+    _ = @import("a64_table_tests.zig");
     if (opts.asmjit_tests) _ = @import("asmjit_x64_tests.zig");
     if (opts.asmjit_tests) _ = @import("asmjit_x86_tests.zig");
     if (opts.asmjit_tests) _ = @import("asmjit_a64_tests.zig");
