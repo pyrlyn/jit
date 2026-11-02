@@ -40,7 +40,7 @@ pub const Stats = struct { spills: u32 = 0, slots: u32 = 0, nodes: usize = 0 };
 pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: Options) !Stats {
     try f.verify();
     const cc = x.CallConv.host;
-    if (f.params > cc.args.len) return error.TooManyParams;
+    if (f.params > ir.max_args) return error.TooManyParams;
 
     // ---- register allocation input ----
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -56,7 +56,7 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
             insts[0] = .{ .defs = params };
         }
         for (blk.ops.items, 0..) |o, i| {
-            var buf: [8]ir.VReg = undefined;
+            var buf: [ir.max_args]ir.VReg = undefined;
             const u = try A.dupe(ra.VReg, o.uses(&buf));
             const d: []const ra.VReg = if (o.def()) |dv| try A.dupe(ra.VReg, &.{dv}) else &.{};
             insts[i + extra] = .{ .uses = u, .defs = d, .is_call = o == .call };
@@ -123,7 +123,14 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
     try b.movRR(.rbp, .rsp);
     for (saved.items) |r| try b.push(r);
     if (adj != 0) try b.subRI(.rsp, @intCast(adj));
-    for (0..f.params) |i| try ctx.put(@intCast(i), cc.args[i]);
+    for (0..f.params) |i| {
+        if (i < cc.args.len) {
+            try ctx.put(@intCast(i), cc.args[i]);
+        } else {
+            try b.movRM(s0, cc.stackArg(i));
+            try ctx.put(@intCast(i), s0);
+        }
+    }
 
     const labels = try gpa.alloc(bld.Label, f.blocks.items.len);
     defer gpa.free(labels);
@@ -167,13 +174,24 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
             },
             .call => |c| {
                 // Argument registers are never allocated: plain moves, no parallel-move cycles.
-                for (c.args, 0..) |a, i| {
+                // Stack arguments: pushed right to left, padded so rsp stays 16-aligned.
+                const nreg = @min(c.args.len, cc.args.len);
+                const nstack = c.args.len - nreg;
+                const pad: u32 = if (nstack % 2 == 1) 8 else 0;
+                if (pad != 0) try b.subRI(.rsp, @intCast(pad));
+                var k = c.args.len;
+                while (k > nreg) {
+                    k -= 1;
+                    try b.push(try ctx.get(c.args[k], s0));
+                }
+                for (c.args[0..nreg], 0..) |a, i| {
                     const r = try ctx.get(a, s0);
                     if (r != cc.args[i]) try b.movRR(cc.args[i], r);
                 }
                 if (cc.shadow != 0) try b.subRI(.rsp, @intCast(cc.shadow));
                 try b.callAbs(c.addr);
-                if (cc.shadow != 0) try b.addRI(.rsp, @intCast(cc.shadow));
+                const pop: u32 = cc.shadow + pad + 8 * @as(u32, @intCast(nstack));
+                if (pop != 0) try b.addRI(.rsp, @intCast(pop));
                 try ctx.put(c.dst, .rax);
             },
             .br => |tg| try b.jmp(labels[tg]),
@@ -292,6 +310,41 @@ test "compiler: execution - fib, loops, calls, memory, spills" {
     const p: i64 = @bitCast(@intFromPtr(&mem));
     try t.expectEqual(@as(i64, 3 * 4 * 4 + 3), try run(&g, .{}, &.{ 3, 4, p }));
     try t.expectEqual(@as(i64, 51), mem[1]);
+}
+
+test "compiler: stack-passed parameters and call arguments" {
+    if (!can_run) return error.SkipZigTest;
+    const Helper = struct {
+        fn sum9(a: i64, b: i64, c: i64, d: i64, e: i64, f_: i64, g: i64, h: i64, i: i64) callconv(.c) i64 {
+            return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f_ + 7 * g + 8 * h + 9 * i;
+        }
+        fn sum8(a: i64, b: i64, c: i64, d: i64, e: i64, f_: i64, g: i64, h: i64) callconv(.c) i64 {
+            return a - b + c - d + e - f_ + g - h;
+        }
+    };
+    // 8 parameters (2+ on the stack), calls with 9 (odd: padding) and 8 stack-heavy args.
+    var g = ir.Func.init(t.allocator);
+    defer g.deinit();
+    g.params = 8;
+    const e = try g.addBlock("e");
+    const a9 = try g.alloc().dupe(ir.VReg, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 7 });
+    try g.emit(e, .{ .call = .{ .dst = 8, .addr = @intFromPtr(&Helper.sum9), .args = a9 } });
+    const a8 = try g.alloc().dupe(ir.VReg, &.{ 8, 7, 6, 5, 4, 3, 2, 1 });
+    try g.emit(e, .{ .call = .{ .dst = 9, .addr = @intFromPtr(&Helper.sum8), .args = a8 } });
+    try g.emit(e, .{ .arith = .{ .op = .add, .dst = 10, .a = 9, .b = 0 } }); // v0 live across both calls
+    try g.emit(e, .{ .ret = 10 });
+    const p = [_]i64{ 1, 20, 300, 4000, 50000, 600000, 7000000, 80000000 };
+    const s9 = Helper.sum9(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[7]);
+    const want = Helper.sum8(s9, p[7], p[6], p[5], p[4], p[3], p[2], p[1]) + p[0];
+    for ([_]ra.RegMask{ allocatable, bit(.rbx) }) |mask| {
+        var cb = CodeBuffer.init(t.allocator);
+        defer cb.deinit();
+        _ = try compile(t.allocator, &g, &cb, .{ .allocatable = mask });
+        const fun = try JitRuntime.add(&cb);
+        defer fun.release();
+        const F = *const fn (i64, i64, i64, i64, i64, i64, i64, i64) callconv(.c) i64;
+        try t.expectEqual(want, fun.ptr(F)(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]));
+    }
 }
 
 test "compiler: differential vs interpreter on random programs" {
