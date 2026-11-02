@@ -10,6 +10,7 @@ const t = std.testing;
 
 test {
     _ = @import("riscv/compiler.zig"); // Compiler execution tests
+    _ = @import("riscv/builder.zig");
 }
 
 const can_run = builtin.cpu.arch == .riscv64;
