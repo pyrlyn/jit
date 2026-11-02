@@ -39,6 +39,9 @@ pub const Options = struct {
     /// saving/restoring them around each call (`regalloc.Config.split_at_calls`).
     split_at_calls: bool = true,
     shorten_branches: bool = true,
+    algo: ra.Algo = .linear,
+    /// Per-block register segments for spilled values (`regalloc.Config.split`).
+    split: bool = true,
 };
 
 pub const Stats = struct {
@@ -49,6 +52,10 @@ pub const Stats = struct {
     folded_imm: u32 = 0,
     /// Spilled right-hand operands used directly as memory (`add r, [rbp-off]`).
     folded_mem: u32 = 0,
+    /// Register segments given to spilled values (live-range splitting).
+    segments: u32 = 0,
+    /// Copies removed by coalescing (`.graph`).
+    coalesced: u32 = 0,
 };
 
 /// Compiles `f` into `b` (a Builder). Run passes and serialize separately, or use `compile`.
@@ -78,7 +85,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
             var buf: [ir.max_args]ir.VReg = undefined;
             const u = try A.dupe(ra.VReg, o.uses(&buf));
             const d: []const ra.VReg = if (o.def()) |dv| try A.dupe(ra.VReg, &.{dv}) else &.{};
-            insts[i + extra] = .{ .uses = u, .defs = d, .is_call = o == .call };
+            insts[i + extra] = .{ .uses = u, .defs = d, .is_call = o == .call, .is_copy = o == .copy };
         }
         const succs: []const u32 = switch (blk.ops.items[blk.ops.items.len - 1]) {
             .br => |tg| try A.dupe(u32, &.{tg}),
@@ -88,16 +95,13 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
         blocks[bi] = .{ .insts = insts, .succs = succs };
     }
     const rf: ra.Func = .{ .blocks = blocks, .num_vregs = @max(f.num_vregs, 1) };
-    const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls };
+    const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls, .algo = opts.algo, .split = opts.split };
     var res = try ra.allocate(gpa, rf, rcfg);
     defer res.deinit(gpa);
     std.debug.assert(ra.verify(rf, rcfg, res));
 
     // ---- frame ----
-    var used: ra.RegMask = 0;
-    for (res.locs) |l| if (l == .reg) {
-        used |= @as(ra.RegMask, 1) << @intCast(l.reg);
-    };
+    const used = res.usedRegs();
     var saved: std.ArrayList(Gp) = .empty;
     defer saved.deinit(gpa);
     for ([_]Gp{ .rbx, .r12, .r13, .r14, .r15 }) |r| if (used & bit(r) != 0) try saved.append(gpa, r);
@@ -107,6 +111,8 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
 
     const L = struct {
         locs: []const ra.Loc,
+        res: *const ra.Result,
+        pos: *const u32,
         nsaved: u32,
         b: *bld.Builder,
         fn slot(s: @This(), k: u32) x.Mem {
@@ -117,6 +123,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
             return switch (s.locs[v]) {
                 .reg => |r| @fromBackingInt(@intCast(r)),
                 .stack => |k| blk: {
+                    if (s.res.regAt(v, s.pos.*)) |r| break :blk @fromBackingInt(@intCast(r));
                     try s.b.emit(.movRM, .{ scratch, s.slot(k) });
                     break :blk scratch;
                 },
@@ -126,15 +133,23 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                 },
             };
         }
+        fn load(s: @This(), v: ir.VReg, r: u8) !void {
+            try s.b.emit(.movRM, .{ @fromBackingInt(@intCast(r)), s.slot(s.locs[v].stack) });
+        }
         fn put(s: @This(), v: ir.VReg, src: Gp) !void {
             switch (s.locs[v]) {
                 .reg => |r| if (@as(Gp, @fromBackingInt(@intCast(r))) != src) try s.b.emit(.movRR, .{ @fromBackingInt(@intCast(r)), src }),
-                .stack => |k| try s.b.emit(.movMR, .{ s.slot(k), src }),
+                .stack => |k| {
+                    // Inside a split segment: write through to the register and the slot.
+                    if (s.res.regAt(v, s.pos.*)) |r| if (@as(Gp, @fromBackingInt(@intCast(r))) != src) try s.b.emit(.movRR, .{ @fromBackingInt(@intCast(r)), src });
+                    try s.b.emit(.movMR, .{ s.slot(k), src });
+                },
                 .none => {},
             }
         }
     };
-    const ctx: L = .{ .locs = res.locs, .nsaved = nsaved, .b = b };
+    var pos: u32 = 0;
+    const ctx: L = .{ .locs = res.locs, .res = &res, .pos = &pos, .nsaved = nsaved, .b = b };
 
     // ---- prolog ----
     try b.comment(f.name);
@@ -160,12 +175,13 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     const known = try A.alloc(?i64, @max(f.num_vregs, 1));
     var folded_imm: u32 = 0;
     var folded_mem: u32 = 0;
-    var pos: u32 = 1; // regalloc position: entry block starts with the parameter-def inst
+    pos = 1; // regalloc position: entry block starts with the parameter-def inst
     for (f.blocks.items, 0..) |blk, bi| {
         try b.bind(labels[bi]);
         @memset(known, null);
         for (blk.ops.items) |o| {
             defer pos += 1;
+            try res.loadsAt(pos, ctx, L.load);
             defer if (o.def()) |d| {
                 known[d] = if (o == .@"const") o.@"const".imm else null;
             };
@@ -198,7 +214,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                             folded_imm += 1;
                             break :fold;
                         };
-                        if (res.locs[c.b] == .stack) {
+                        if (res.locs[c.b] == .stack and res.regAt(c.b, pos) == null) {
                             const ra0 = try ctx.get(c.a, s0);
                             if (ra0 != s0) try b.emit(.movRR, .{ s0, ra0 });
                             const m = ctx.slot(res.locs[c.b].stack);
@@ -320,7 +336,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     }
     try b.emit(.pop, .{.rbp});
     try b.add(.ret);
-    return .{ .spills = res.spills, .slots = res.num_slots, .nodes = b.count(), .folded_imm = folded_imm, .folded_mem = folded_mem };
+    return .{ .spills = res.spills, .slots = res.num_slots, .nodes = b.count(), .folded_imm = folded_imm, .folded_mem = folded_mem, .segments = @intCast(res.segs.len), .coalesced = res.coalesced };
 }
 
 /// IR -> bytes in `cb` (finalized). Runs dead-code, jump-to-next and branch-shortening passes.
@@ -559,5 +575,60 @@ test "compiler: differential vs interpreter on random programs" {
         const want = try ir.interpret(&f, &args, 1 << 16);
         try t.expectEqual(want, try run(&f, .{}, &args));
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx) }, &args));
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx) | bit(.r12), .split = false }, &args));
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx) | bit(.r12), .algo = .graph }, &args));
+        try t.expectEqual(want, try run(&f, .{ .algo = .graph }, &args));
+    }
+}
+
+test "compiler: splitting and coalescing are exercised and execute correctly" {
+    // 8 values live through a loop with 2 registers: spilled values used several times per
+    // block get register segments; the copies in `done` coalesce under `.graph` (the
+    // loop-carried `v6 = copy v7` does not: hole-free intervals make them interfere).
+    const src =
+        \\func k 2
+        \\entry:
+        \\  v2 = const 3
+        \\  v3 = const 5
+        \\  v4 = const 7
+        \\  v5 = const 11
+        \\  v6 = const 0
+        \\  v8 = const 0
+        \\  br loop
+        \\loop:
+        \\  v7 = add v6 v2
+        \\  v7 = add v7 v2
+        \\  v7 = mul v7 v3
+        \\  v7 = add v7 v3
+        \\  v7 = xor v7 v4
+        \\  v7 = add v7 v4
+        \\  v7 = add v7 v5
+        \\  v7 = sub v7 v5
+        \\  v6 = copy v7
+        \\  v1 = sub v1 v0
+        \\  cbr ne v1 v8 loop done
+        \\done:
+        \\  v9 = copy v6
+        \\  v10 = add v9 v2
+        \\  v11 = copy v10
+        \\  ret v11
+    ;
+    var f = try ir.parse(t.allocator, src);
+    defer f.deinit();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const st = try compile(t.allocator, &f, &cb, .{ .allocatable = bit(.rax) | bit(.rbx) });
+    try t.expect(st.spills > 0 and st.segments > 0);
+    var cb2 = CodeBuffer.init(t.allocator);
+    defer cb2.deinit();
+    const st2 = try compile(t.allocator, &f, &cb2, .{ .algo = .graph });
+    try t.expect(st2.coalesced > 0);
+    if (!can_run) return;
+    for ([_]i64{ 1, 2, 7 }) |n| {
+        const args = [_]i64{ 1, n };
+        const want = try ir.interpret(&f, &args, 1 << 16);
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx) }, &args));
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx), .algo = .graph }, &args));
+        try t.expectEqual(want, try run(&f, .{ .algo = .graph }, &args));
     }
 }
