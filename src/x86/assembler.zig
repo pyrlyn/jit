@@ -3,9 +3,8 @@
 //! absolute disp32 (no RIP-relative), one-byte `inc/dec r32`, moffs32 `mov eax, [abs]`.
 //! Branches and labels reuse `CodeBuffer` fixups (rel8/rel32 have the same encoding as x86-64).
 //!
-//! The GP encoder selects the mode through the global `gp.mode32`; every emitter sets it for
-//! the duration of one instruction and restores it (not thread-safe across concurrent 64-bit
-//! and 32-bit emission on different threads; a comptime mode parameter is the follow-up).
+//! The mode is the comptime `gp.CpuMode` parameter (`gp.emitIn(.x86, ...)`): no global state,
+//! so 32-bit and 64-bit emission can run concurrently on different threads.
 const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const x64 = @import("../x86_64/assembler.zig");
@@ -94,10 +93,7 @@ pub fn AssemblerT(comptime opts: Options) type {
         /// memory, immediates): `a.inst(.movzx, .{ gp.r32(.rax), gp.byte(...) })`.
         /// 64-bit registers and REX-only registers are rejected by the encoder.
         pub fn inst(a: Self, comptime mn: gp.Mnemonic, args: anytype) Error!void {
-            const prev = gp.mode32;
-            gp.mode32 = true;
-            defer gp.mode32 = prev;
-            return gp.emit(a.buf, mn, args);
+            return gp.emitIn(.x86, a.buf, mn, args);
         }
         inline fn r(g: Gp) gp.Reg {
             return gp.r32(g.wide());
@@ -274,7 +270,6 @@ test "x86: byte-exact vs LLVM (clang -target i386)" {
     var cb = CodeBuffer.init(t.allocator);
     defer cb.deinit();
     const a = Assembler.init(&cb);
-    const mode_before = gp.mode32; // other test files leave the global set
     try a.movRR(.eax, .ecx);
     try a.movRM(.edi, ptr(.esp, 4));
     try a.movMR(ptr(.ebp, -8), .esi);
@@ -314,7 +309,15 @@ test "x86: byte-exact vs LLVM (clang -target i386)" {
         0x10, 0x00, 0x00,
     };
     try t.expectEqualSlices(u8, &want, cb.code());
-    try t.expectEqual(mode_before, gp.mode32); // mode restored
+    // The mode is per call: interleaved 64-bit emission still gets REX.W.
+    var cb64 = CodeBuffer.init(t.allocator);
+    defer cb64.deinit();
+    try gp.emit(&cb64, .mov, .{ gp.r64(.rax), gp.r64(.rcx) });
+    try a.movRR(.eax, .ecx);
+    try gp.emit(&cb64, .inc, .{gp.r32(.rax)});
+    try t.expectEqualSlices(u8, &.{ 0x48, 0x89, 0xC8, 0xFF, 0xC0 }, cb64.code());
+    try t.expectEqualSlices(u8, &.{ 0x89, 0xC8 }, cb.code()[cb.code().len - 2 ..]);
+    try t.expectError(error.NoMatchingForm, gp.emitIn(.x86, &cb64, .mov, .{ gp.r64(.rax), gp.r64(.rcx) }));
 }
 
 test "x86: branches rel8/rel32, labels, validation" {
