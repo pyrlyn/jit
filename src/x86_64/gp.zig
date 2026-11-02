@@ -68,16 +68,17 @@ pub const Form = struct {
 /// Which CPU mode a form exists in (AsmJit DB `any` / `x64` / `x86`).
 pub const Mode = enum(u2) { any, x64, x86 };
 
-/// Encode for 32-bit protected mode (x86-32) instead of 64-bit mode: no REX, no 64-bit
-/// operands, x86-only forms (`inc r32` = 40+r, `pusha`, `aaa`, ...), `[disp32]` is absolute.
-/// Process-wide switch for the table-driven `gp` / `vec` encoders.
-pub var mode32: bool = false;
+/// Target CPU mode of the table-driven `gp` / `vec` encoders, a comptime parameter of the
+/// `*In` entry points. `.x86` is 32-bit protected mode: no REX, no 64-bit operands, x86-only
+/// forms (`inc r32` = 40+r, `pusha`, `aaa`, ...), `[disp32]` is absolute. The plain entry
+/// points (`emit`, `emitOps`, ...) encode for `.x64`.
+pub const CpuMode = enum { x64, x86 };
 
-pub fn modeOk(m: Mode) bool {
+pub fn modeOk(comptime cm: CpuMode, m: Mode) bool {
     return switch (m) {
         .any => true,
-        .x64 => !mode32,
-        .x86 => mode32,
+        .x64 => cm == .x64,
+        .x86 => cm == .x86,
     };
 }
 
@@ -264,15 +265,15 @@ fn matchKind(f: Form, k: Kind, o: Op) bool {
     }
 }
 
-fn matches(f: Form, ops: []const Op) bool {
+fn matches(comptime cm: CpuMode, f: Form, ops: []const Op) bool {
     if (f.ops.len != ops.len) return false;
-    if (!modeOk(f.mode)) return false;
-    if (mode32) {
+    if (!modeOk(cm, f.mode)) return false;
+    if ((cm == .x86)) {
         if (f.rexw) return false;
         for (f.ops) |k| if (regSize(k) == .q and k != .m64) return false;
     }
     // `xchg eax, eax` via 90+r would be `nop`, which does not zero-extend into rax: use 87 /r.
-    if (!mode32 and f.opreg != null and f.op.len == 1 and f.op[0] == 0x90 and !f.rexw and f.pre.len == 0 and
+    if (!(cm == .x86) and f.opreg != null and f.op.len == 1 and f.op[0] == 0x90 and !f.rexw and f.pre.len == 0 and
         ops[0] == .reg and ops[1] == .reg and ops[0].reg.id == .rax and ops[1].reg.id == .rax) return false;
     for (f.ops, ops) |k, o| if (!matchKind(f, k, o)) return false;
     return true;
@@ -311,7 +312,7 @@ fn rhi(g: Gp) u8 {
 }
 
 /// Encodes `ops` with form `f` into `out`. Returns the offset of a RIP disp32 within `out`, if any.
-pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
+pub fn encodeFormIn(comptime cm: CpuMode, f: Form, ops: []const Op, out: *Buf) Error!?u8 {
     var rex: u8 = if (f.rexw) 0x48 else 0;
     var need_rex = false;
     var has_high = false;
@@ -355,11 +356,11 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
     if (cur_opt.rex) need_rex = true;
     if (has_high and (rex != 0 or need_rex)) return error.InvalidOperand;
     if (rm_mem) |m| if (m.addr16) {
-        if (!mode32) return error.InvalidOperand;
+        if (!(cm == .x86)) return error.InvalidOperand;
         rex &= 0x48; // ids of bx/si/di/bp are < 8; nothing to extend
         out.u8_(0x67);
     };
-    if (mode32 and (rex != 0 or need_rex)) return error.InvalidOperand;
+    if ((cm == .x86) and (rex != 0 or need_rex)) return error.InvalidOperand;
     for (f.pre) |p| out.u8_(p);
     if (rex != 0 or need_rex) out.u8_(0x40 | rex);
     for (f.op, 0..) |b, k| out.u8_(if (k == f.op.len - 1) b + plus else b);
@@ -386,7 +387,7 @@ pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
                     out.u8_(@as(u8, @backingInt(m.scale)) << 6 | (if (m.index) |x| rlo(x) else 4) << 3 | rlo(base));
                 } else out.u8_(mod | r | rlo(base));
                 if (mod == 0x40) out.int(m.disp, 1) else if (mod == 0x80) out.int(m.disp, 4);
-            } else if (mode32 and m.index == null) {
+            } else if ((cm == .x86) and m.index == null) {
                 out.u8_(r | 5); // [disp32]: absolute in 32-bit mode
                 out.int(m.disp, 4);
             } else {
@@ -416,10 +417,10 @@ pub const Opt = struct {
 threadlocal var cur_opt: Opt = .{};
 
 /// `emit` with options.
-pub fn emitOpt(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, opt: Opt) Error!void {
+pub fn emitOptIn(comptime cm: CpuMode, buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, opt: Opt) Error!void {
     cur_opt = opt;
     defer cur_opt = .{};
-    return emit(buf, mn, args);
+    return emitIn(cm, buf, mn, args);
 }
 
 /// `mov` between the accumulator and a 64-bit absolute address (A0..A3 moffs64).
@@ -437,15 +438,15 @@ pub fn movMoffs(buf: *CodeBuffer, store: bool, acc: Reg, addr: u64) Error!void {
 }
 
 /// Emits `mn` with operands `args` (tuple of Reg / Mem / integers) into `buf`.
-pub fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype) Error!void {
+pub fn emitIn(comptime cm: CpuMode, buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype) Error!void {
     var ops: [args.len]Op = undefined;
     inline for (args, 0..) |a, i| ops[i] = toOp(a);
-    return emitOps(buf, &@field(tbl.table, @tagName(mn)), &ops);
+    return emitOpsIn(cm, buf, &@field(tbl.table, @tagName(mn)), &ops);
 }
 
-pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void {
+pub fn emitOpsIn(comptime cm: CpuMode, buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void {
     // 32-bit mode: `mov acc, [abs]` / `mov [abs], acc` use the moffs32 forms (A0..A3), like AsmJit.
-    if (mode32 and cur_opt.mod == .auto and forms.ptr == &tbl.table.mov and ops.len == 2) {
+    if ((cm == .x86) and cur_opt.mod == .auto and forms.ptr == &tbl.table.mov and ops.len == 2) {
         for (0..2) |i| {
             const a = ops[1 - i];
             if (ops[i] == .mem and a == .reg and a.reg.id == .rax and !a.reg.high and a.reg.size != .q) {
@@ -460,8 +461,8 @@ pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!voi
             }
         }
     }
-    return emitExact(buf, forms, ops) catch |e| switch (e) {
-        error.NoMatchingForm => emitAliased(buf, forms, ops) orelse e,
+    return emitExact(cm, buf, forms, ops) catch |e| switch (e) {
+        error.NoMatchingForm => emitAliased(cm, buf, forms, ops) orelse e,
         else => e,
     };
 }
@@ -492,20 +493,20 @@ fn withSize(ops: []const Op, s: Size, out: []Op) []const Op {
 ///   `rdmsr(edx, eax, ecx)`, `xsaves(m, edx, eax)`, `monitor(ptr(rax), ecx, edx)`;
 ///   the implicit `dx:ax` pair / `ax` also fixes the size of an unsized memory operand;
 /// - `imul(r, imm)` -> `imul(r, r, imm)`.
-fn emitAliased(buf: *CodeBuffer, forms: []const Form, ops: []const Op) ?Error!void {
+fn emitAliased(comptime cm: CpuMode, buf: *CodeBuffer, forms: []const Form, ops: []const Op) ?Error!void {
     var tmp: [8]Op = undefined;
     if (ops.len > tmp.len) return null;
     if (ops.len == 2 and ops[0] == .reg and ops[1] == .imm) {
         const three = [_]Op{ ops[0], ops[0], ops[1] };
-        if (emitExact(buf, forms, &three)) |_| return {} else |_| {}
+        if (emitExact(cm, buf, forms, &three)) |_| return {} else |_| {}
     }
     // dx:ax pair (mul/div/imul one-operand forms): size comes from the pair.
     if (ops.len == 3 and ops[0] == .reg and ops[1] == .reg and ops[0].reg.id == .rdx and
         ops[1].reg.id == .rax and ops[0].reg.size == ops[1].reg.size)
-        if (emitExact(buf, forms, withSize(ops[2..], ops[0].reg.size, &tmp))) |_| return {} else |_| {};
+        if (emitExact(cm, buf, forms, withSize(ops[2..], ops[0].reg.size, &tmp))) |_| return {} else |_| {};
     // ax = al * r/m8.
     if (ops.len == 2 and ops[0] == .reg and ops[0].reg.id == .rax and ops[0].reg.size == .w)
-        if (emitExact(buf, forms, withSize(ops[1..], .b, &tmp))) |_| return {} else |_| {};
+        if (emitExact(cm, buf, forms, withSize(ops[1..], .b, &tmp))) |_| return {} else |_| {};
     // Otherwise drop implicit operands from either end.
     var lo: usize = 0;
     while (lo <= ops.len) : (lo += 1) {
@@ -515,7 +516,7 @@ fn emitAliased(buf: *CodeBuffer, forms: []const Form, ops: []const Op) ?Error!vo
                 var ok = true;
                 for (ops[0..lo]) |o| ok = ok and isImplicit(o);
                 for (ops[hi..]) |o| ok = ok and isImplicit(o);
-                if (ok) if (emitExact(buf, forms, ops[lo..hi])) |_| return {} else |_| {};
+                if (ok) if (emitExact(cm, buf, forms, ops[lo..hi])) |_| return {} else |_| {};
             }
             if (hi == lo) break;
         }
@@ -524,18 +525,18 @@ fn emitAliased(buf: *CodeBuffer, forms: []const Form, ops: []const Op) ?Error!vo
     return null;
 }
 
-fn emitExact(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void {
+fn emitExact(comptime cm: CpuMode, buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void {
     var best: ?Buf = null;
     var best_rip: ?u8 = null;
     var best_imm: u8 = 0;
     for (forms) |f| {
-        if (!matches(f, ops)) continue;
+        if (!matches(cm, f, ops)) continue;
         const o = cur_opt;
         if (o.mod == .mr and f.reg != null and f.reg.? == 0) continue;
         if (o.mod == .rm and f.rm != null and f.rm.? == 0 and f.reg != null) continue;
         if (o.long and !(f.imm == 8)) continue;
         var b: Buf = .{};
-        const r = encodeForm(f, ops, &b) catch |err| if (mode32) continue else return err;
+        const r = encodeFormIn(cm, f, ops, &b) catch |err| if ((cm == .x86)) continue else return err;
         // Shortest wins; on a tie prefer the narrower immediate (`66 83 /r ib` over `66 05 iw`), like LLVM.
         if (best == null or b.n < best.?.n or (b.n == best.?.n and f.imm < best_imm)) {
             best = b;
@@ -563,4 +564,18 @@ fn emitExact(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void 
         },
         else => {},
     };
+}
+
+// ---- x86-64 entry points (`*In(.x64, ...)`) ----
+pub fn encodeForm(f: Form, ops: []const Op, out: *Buf) Error!?u8 {
+    return encodeFormIn(.x64, f, ops, out);
+}
+pub fn emitOpt(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, opt: Opt) Error!void {
+    return emitOptIn(.x64, buf, mn, args, opt);
+}
+pub fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype) Error!void {
+    return emitIn(.x64, buf, mn, args);
+}
+pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops: []const Op) Error!void {
+    return emitOpsIn(.x64, buf, forms, ops);
 }

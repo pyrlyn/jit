@@ -125,9 +125,8 @@ pub fn Lookup(comptime T: type) type {
 /// Encodes a case with `forms`; null if no form matches.
 pub fn encode(cb: *CodeBuffer, forms: []const vec.Form, c: Case) !?[]const u8 {
     cb.reset();
-    gp.mode32 = c.x86;
-    defer gp.mode32 = false;
-    vec.emitOps(cb, forms, c.ops[0..c.n], c.e) catch |err| switch (err) {
+    const r = if (c.x86) vec.emitOpsIn(.x86, cb, forms, c.ops[0..c.n], c.e) else vec.emitOps(cb, forms, c.ops[0..c.n], c.e);
+    r catch |err| switch (err) {
         error.NoMatchingForm, error.InvalidOperand => return null,
         else => return err,
     };

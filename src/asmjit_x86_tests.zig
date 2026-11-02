@@ -6,11 +6,11 @@ const CodeBuffer = @import("core/code_buffer.zig").CodeBuffer;
 const x = @import("x86_64/assembler.zig");
 const gp = @import("x86_64/gp.zig");
 const vec = @import("x86_64/vec.zig");
+const CM: gp.CpuMode = .x86;
 
 fn check3(expected: []const u8, store: bool, acc: gp.Reg, addr: u64, text: []const u8) u32 {
     var cb = CodeBuffer.init(std.testing.allocator);
     defer cb.deinit();
-    gp.mode32 = true;
     gp.movMoffs(&cb, store, acc, addr) catch |e| {
         std.debug.print("{s}: {s}\n", .{ @errorName(e), text });
         return 1;
@@ -23,8 +23,7 @@ fn check3(expected: []const u8, store: bool, acc: gp.Reg, addr: u64, text: []con
 fn check(expected: []const u8, comptime mn: anytype, args: anytype, opt: gp.Opt, text: []const u8) u32 {
     var cb = CodeBuffer.init(std.testing.allocator);
     defer cb.deinit();
-    gp.mode32 = true;
-    gp.emitOpt(&cb, mn, args, opt) catch |e| {
+    gp.emitOptIn(CM, &cb, mn, args, opt) catch |e| {
         std.debug.print("{s}: {s}\n", .{ @errorName(e), text });
         return 1;
     };
@@ -36,8 +35,7 @@ fn check(expected: []const u8, comptime mn: anytype, args: anytype, opt: gp.Opt,
 fn checkV(expected: []const u8, comptime mn: anytype, args: anytype, e: @import("x86_64/vec.zig").Extra, text: []const u8) u32 {
     var cb = CodeBuffer.init(std.testing.allocator);
     defer cb.deinit();
-    gp.mode32 = true;
-    vec.emitCompact(&cb, mn, args, e) catch |err| {
+    vec.emitCompactIn(CM, &cb, mn, args, e) catch |err| {
         std.debug.print("{s}: {s}\n", .{ @errorName(err), text });
         return 1;
     };
@@ -49,8 +47,7 @@ fn checkV(expected: []const u8, comptime mn: anytype, args: anytype, e: @import(
 fn checkVS(expected: []const u8, comptime mn: anytype, args: anytype, e: @import("x86_64/vec.zig").Extra, text: []const u8) u32 {
     var cb = CodeBuffer.init(std.testing.allocator);
     defer cb.deinit();
-    gp.mode32 = true;
-    vec.emit(&cb, mn, args, e) catch |err| {
+    vec.emitIn(CM, &cb, mn, args, e) catch |err| {
         std.debug.print("{s}: {s}\n", .{ @errorName(err), text });
         return 1;
     };

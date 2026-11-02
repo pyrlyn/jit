@@ -229,10 +229,10 @@ fn regNum(o: Op) u8 {
     };
 }
 
-fn matches(f: *const Form, ops: []const Op, e: Extra) bool {
+fn matches(comptime cm: gp.CpuMode, f: *const Form, ops: []const Op, e: Extra) bool {
     if (f.ops.len != ops.len) return false;
-    if (f.mode != .any and !gp.modeOk(f.mode)) return false;
-    if (gp.mode32) {
+    if (f.mode != .any and !gp.modeOk(cm, f.mode)) return false;
+    if ((cm == .x86)) {
         if (f.rexw) return false;
         for (ops) |o| switch (o) {
             .r => |r| if (r.size == .q or @backingInt(r.id) >= 8) return false,
@@ -285,7 +285,7 @@ fn fitsI8(v: i64) bool {
 }
 
 /// ModRM (+SIB, disp) for memory `m` with reg field `r3`; `n` = EVEX disp8 scale (1 otherwise).
-inline fn modrmMem(out: anytype, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
+inline fn modrmMem(comptime cm: gp.CpuMode, out: anytype, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
     const r = (r3 & 7) << 3;
     if (m.rip) {
         out.u8_(r | 5);
@@ -307,7 +307,7 @@ inline fn modrmMem(out: anytype, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
             out.u8_(sc | ((if (idx) |i| i else 4) & 7) << 3 | (b & 7));
         } else out.u8_(mod | r | (b & 7));
         if (mod == 0x40) out.int(disp8.?, 1) else if (mod == 0x80) out.int(m.disp, 4);
-    } else if (gp.mode32 and idx == null) {
+    } else if ((cm == .x86) and idx == null) {
         out.u8_(r | 5); // [disp32]: absolute in 32-bit mode
         out.int(m.disp, 4);
     } else {
@@ -318,7 +318,7 @@ inline fn modrmMem(out: anytype, r3: u8, m: Mem, n: u8, force_sib: bool) ?u8 {
     return null;
 }
 
-pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error!?u8 {
+pub fn encodeFormIn(comptime cm: gp.CpuMode, f: *const Form, ops: []const Op, e: Extra, out: anytype) Error!?u8 {
     var reg: u8 = f.digit orelse 0;
     if (f.reg) |i| reg = regNum(ops[i]);
     var rm_reg: ?u8 = null;
@@ -373,12 +373,12 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error
             var rexv: u8 = (if (f.rexw) @as(u8, 8) else 0) | r3 << 2 | (if (rm_mem != null) x3 else 0) << 1 | b3;
             if (rm_reg != null) rexv &= 0b1101;
             // 32-bit mode: CR8..CR15 are reached through a LOCK prefix instead of REX.R.
-            if (gp.mode32 and rexv & 4 != 0 and f.reg != null and ops[f.reg.?] == .v and ops[f.reg.?].v.cls == .cr) {
+            if ((cm == .x86) and rexv & 4 != 0 and f.reg != null and ops[f.reg.?] == .v and ops[f.reg.?].v.cls == .cr) {
                 out.u8_(0xF0);
                 rexv &= ~@as(u8, 4);
             }
             if (rexv != 0 or need_rex or e.rex) {
-                if (has_high or gp.mode32) return error.InvalidOperand;
+                if (has_high or (cm == .x86)) return error.InvalidOperand;
                 out.u8_(0x40 | rexv);
             }
             switch (f.map) {
@@ -434,7 +434,7 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error
             if (f.plus == null) out.u8_(0xC0 | (reg & 7) << 3 | (rr & 7));
         } else if (rm_mem) |m| {
             const n: u8 = if (f.enc != .evex) 1 else if (bcst_elem != 0) bcst_elem else f.n;
-            rip_at = modrmMem(out, reg, m, n, false);
+            rip_at = modrmMem(cm, out, reg, m, n, false);
         }
     } else if ((f.digit != null or f.reg != null) and f.plus == null) {
         out.u8_(0xC0 | (reg & 7) << 3); // reg-only ModRM (11:rrr:000, e.g. tilezero)
@@ -472,35 +472,35 @@ pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error
 /// Operand *types* are comptime, so the candidate forms are narrowed and put in AsmJit priority
 /// order at compile time; each candidate is then checked and encoded with its form as a comptime
 /// constant (register-class tests and the encoder fold to a few compares and stores).
-pub inline fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
+pub inline fn emitIn(comptime cm: gp.CpuMode, buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
     var ops: [args.len]Op = undefined;
     inline for (args, 0..) |a, i| ops[i] = toOp(a);
     const all = &@field(tbl.table, @tagName(mn));
     const Args = @TypeOf(args);
     if (comptime specializable(Args)) {
         const sorted = comptime prioritized(all, Args);
-        if (!e.vex and !gp.mode32) {
+        if (!e.vex and !(cm == .x86)) {
             inline for (sorted) |f| {
-                if (@call(.always_inline, matches, .{ &f, &ops, e })) return emitFormC(buf, f, &ops, e);
+                if (@call(.always_inline, matches, .{ cm, &f, &ops, e })) return emitFormC(cm, buf, f, &ops, e);
             }
-            return emitOps(buf, all, &ops, e);
+            return emitOpsIn(cm, buf, all, &ops, e);
         }
     }
-    return emitSlow(buf, all, comptime narrow(all, Args), &ops, e);
+    return emitSlow(cm, buf, all, comptime narrow(all, Args), &ops, e);
 }
 
 /// Same result as `emit`, without per-call-site specialization (small code; used by the
 /// AsmJit test port, which has ~18k distinct call sites).
-pub fn emitCompact(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
+pub fn emitCompactIn(comptime cm: gp.CpuMode, buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
     var ops: [args.len]Op = undefined;
     inline for (args, 0..) |a, i| ops[i] = toOp(a);
     const all = &@field(tbl.table, @tagName(mn));
-    return emitSlow(buf, all, comptime narrow(all, @TypeOf(args)), &ops, e);
+    return emitSlow(cm, buf, all, comptime narrow(all, @TypeOf(args)), &ops, e);
 }
 
-noinline fn emitSlow(buf: *CodeBuffer, all: []const Form, narrowed: []const Form, ops: []const Op, e: Extra) Error!void {
-    if (pick(narrowed, ops, e)) |f| return emitForm(buf, f, ops, e);
-    return emitOps(buf, all, ops, e);
+noinline fn emitSlow(comptime cm: gp.CpuMode, buf: *CodeBuffer, all: []const Form, narrowed: []const Form, ops: []const Op, e: Extra) Error!void {
+    if (pick(cm, narrowed, ops, e)) |f| return emitForm(cm, buf, f, ops, e);
+    return emitOpsIn(cm, buf, all, ops, e);
 }
 
 fn specializable(comptime Args: type) bool {
@@ -529,12 +529,12 @@ fn prioritized(comptime all: []const Form, comptime Args: type) []const Form {
     return &final;
 }
 
-inline fn emitFormC(buf: *CodeBuffer, comptime f: Form, ops: []const Op, e: Extra) Error!void {
+inline fn emitFormC(comptime cm: gp.CpuMode, buf: *CodeBuffer, comptime f: Form, ops: []const Op, e: Extra) Error!void {
     try buf.ensure(17);
     if (e.lock) buf.put8(0xF0);
     // Encode straight into the buffer (ensure() left >= 17 bytes); commit only on success.
     var d: DBuf = .{ .p = buf.data[buf.len..].ptr };
-    _ = try @call(.always_inline, encodeForm, .{ &f, ops, e, &d });
+    _ = try @call(.always_inline, encodeFormIn, .{ cm, &f, ops, e, &d });
     buf.len += d.n;
 }
 
@@ -571,11 +571,11 @@ fn narrow(comptime all: []const Form, comptime Args: type) []const Form {
     return &final;
 }
 
-fn emitForm(buf: *CodeBuffer, f: Form, ops: []const Op, e: Extra) Error!void {
+fn emitForm(comptime cm: gp.CpuMode, buf: *CodeBuffer, f: Form, ops: []const Op, e: Extra) Error!void {
     try buf.ensure(17);
     if (e.lock) buf.put8(0xF0);
     var b: Buf = .{};
-    _ = try encodeForm(&f, ops, e, &b);
+    _ = try encodeFormIn(cm, &f, ops, e, &b);
     for (b.b[0..b.n]) |bt| buf.put8(bt);
 }
 
@@ -586,8 +586,8 @@ fn allRegs(ops: []const Op) bool {
 
 /// AsmJit order: legacy/VEX before EVEX; for register-only operands the load-style form (first
 /// operand in ModRM.reg) before the store-style one (`mr`, `mvr`).
-fn pick(forms: []const Form, ops: []const Op, e: Extra) ?Form {
-    return pickEx(forms, ops, e, false);
+fn pick(comptime cm: gp.CpuMode, forms: []const Form, ops: []const Op, e: Extra) ?Form {
+    return pickEx(cm, forms, ops, e, false);
 }
 
 fn has67(f: *const Form) bool {
@@ -595,7 +595,7 @@ fn has67(f: *const Form) bool {
     return false;
 }
 
-fn pickEx(forms: []const Form, ops: []const Op, e: Extra, no67: bool) ?Form {
+fn pickEx(comptime cm: gp.CpuMode, forms: []const Form, ops: []const Op, e: Extra, no67: bool) ?Form {
     const regs = allRegs(ops);
     // Levels (lower wins): 0 legacy/VEX preferred, 1 legacy/VEX other (not PreferEvex),
     // 2 EVEX preferred, 3 EVEX other, 4 VEX of a PreferEvex instruction.
@@ -610,10 +610,10 @@ fn pickEx(forms: []const Form, ops: []const Op, e: Extra, no67: bool) ?Form {
         const base: u8 = if (evex) (if (preferred) 2 else 3) else if (f.late_vex and !e.vex) 4 else if (preferred) 0 else 1;
         const level: u8 = if (f.mode == .x86) 0 else base + 1;
         if (level >= best_level) continue;
-        if (!matches(f, ops, e)) continue;
+        if (!matches(cm, f, ops, e)) continue;
         best = f;
         best_level = level;
-        if (level == 0 or (level == 1 and !gp.mode32)) break;
+        if (level == 0 or (level == 1 and !(cm == .x86))) break;
     }
     return if (best) |p| p.* else null;
 }
@@ -630,11 +630,11 @@ fn isImplicit(o: Op) bool {
 /// AsmJit spellings with explicit implicit operands (`blendvps(x, y, xmm0)`,
 /// `pcmpistri(x, y, imm, ecx)`, `vp2intersectd(k2, k3, ...)`, `maskmovq(ptr(rdi), mm, mm)`):
 /// retried with implicit operands removed from either end (or `k+1` after the first operand).
-fn pickAliased(forms: []const Form, ops: []const Op, e: Extra, tmp: []Op) ?struct { f: Form, ops: []const Op } {
+fn pickAliased(comptime cm: gp.CpuMode, forms: []const Form, ops: []const Op, e: Extra, tmp: []Op) ?struct { f: Form, ops: []const Op } {
     if (ops.len >= 2 and ops[0] == .v and ops[1] == .v and ops[0].v.cls == .k and ops[1].v.cls == .k and ops[1].v.id == ops[0].v.id + 1) {
         tmp[0] = ops[0];
         for (ops[2..], 1..) |o, i| tmp[i] = o;
-        if (pick(forms, tmp[0 .. ops.len - 1], e)) |f| return .{ .f = f, .ops = tmp[0 .. ops.len - 1] };
+        if (pick(cm, forms, tmp[0 .. ops.len - 1], e)) |f| return .{ .f = f, .ops = tmp[0 .. ops.len - 1] };
     }
     var lo: usize = 0;
     while (lo <= ops.len) : (lo += 1) {
@@ -648,7 +648,7 @@ fn pickAliased(forms: []const Form, ops: []const Op, e: Extra, tmp: []Op) ?struc
                 var wide = false;
                 for (ops[0..lo]) |o| wide = wide or (o == .r and o.r.size == .q);
                 for (ops[hi..]) |o| wide = wide or (o == .r and o.r.size == .q);
-                if (ok) if (pickEx(forms, ops[lo..hi], e, wide)) |f| return .{ .f = f, .ops = ops[lo..hi] };
+                if (ok) if (pickEx(cm, forms, ops[lo..hi], e, wide)) |f| return .{ .f = f, .ops = ops[lo..hi] };
             }
             if (hi == lo) break;
         }
@@ -657,18 +657,32 @@ fn pickAliased(forms: []const Form, ops: []const Op, e: Extra, tmp: []Op) ?struc
     return null;
 }
 
-pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops_in: []const Op, e: Extra) Error!void {
+pub fn emitOpsIn(comptime cm: gp.CpuMode, buf: *CodeBuffer, forms: []const Form, ops_in: []const Op, e: Extra) Error!void {
     var ops = ops_in;
     var tmp: [8]Op = undefined;
-    var chosen = pick(forms, ops, e);
-    if (chosen == null and ops.len <= tmp.len) if (pickAliased(forms, ops, e, &tmp)) |a| {
+    var chosen = pick(cm, forms, ops, e);
+    if (chosen == null and ops.len <= tmp.len) if (pickAliased(cm, forms, ops, e, &tmp)) |a| {
         chosen = a.f;
         ops = a.ops;
     };
     const f = chosen orelse return error.NoMatchingForm;
     var b: Buf = .{};
-    _ = try encodeForm(&f, ops, e, &b);
+    _ = try encodeFormIn(cm, &f, ops, e, &b);
     try buf.ensure(18);
     if (e.lock) buf.put8(0xF0);
     for (b.b[0..b.n]) |bt| buf.put8(bt);
+}
+
+// ---- x86-64 entry points (`*In(.x64, ...)`) ----
+pub fn encodeForm(f: *const Form, ops: []const Op, e: Extra, out: anytype) Error!?u8 {
+    return encodeFormIn(.x64, f, ops, e, out);
+}
+pub inline fn emit(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
+    return emitIn(.x64, buf, mn, args, e);
+}
+pub fn emitCompact(buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
+    return emitCompactIn(.x64, buf, mn, args, e);
+}
+pub fn emitOps(buf: *CodeBuffer, forms: []const Form, ops: []const Op, e: Extra) Error!void {
+    return emitOpsIn(.x64, buf, forms, ops, e);
 }
