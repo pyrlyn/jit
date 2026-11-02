@@ -28,7 +28,7 @@ coloring. Each layer is generic over the target with comptime parameters, like `
 cursor insertion and removal, all typed x86-64 emitters, byte-identical serialization through
 any `AssemblerT(opts)` (validation and hooks unchanged), passes `removeDeadCode`,
 `removeJumpsToNext`, `shortenBranches` (iterative relaxation, rel8 forward and backward), and a
-text formatter. Not yet: AArch64 builder, the generated `inst(mnemonic, ...)` path and SIMD forms,
+text formatter. AArch64: `src/aarch64/builder.zig` (`pyrlyn_jit.aarch64_builder.Builder`), one `Instr` variant per Assembler emitter (`b.emit(.add, .{ .x0, .x1, .x2 })`), byte-identical serialization, `removeDeadCode` and `removeJumpsToNext`. Not yet: the generated `inst(mnemonic, ...)` path and SIMD forms,
 a generic `BuilderT(Arch)`.
 
 Goal: emit instructions into a node list instead of bytes, run passes over it, then serialize
