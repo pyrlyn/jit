@@ -8,6 +8,8 @@
 //! A extension (RV64A): `lr`/`sc` and all AMOs for .w/.d with aq/rl ordering bits, `fence`.
 //! F/D extensions: flw/fld/fsw/fsd, add/sub/mul/div/sqrt/min/max/sgnj, fused multiply-add,
 //! compares, int<->fp conversions, fmv between register files, s<->d conversion.
+//! Far control flow: `callFar`/`jFar`/`la` (auipc pairs, ±2 GiB, fixup `rv_pcrel_pair`) and
+//! `bFar` (inverted branch over `jal`, ±1 MiB).
 //! Not yet: C (compressed), RV32, far branches (auipc+jalr pairs).
 const std = @import("std");
 const core = @import("../core/code_buffer.zig");
@@ -292,6 +294,50 @@ pub fn AssemblerT(comptime opts: Options) type {
         pub fn b(a: Self, c: Cond, rs1: X, rs2: X, l: Label) Error!void {
             return a.branchTo(rs2.n() << 20 | rs1.n() << 15 | @as(u32, @backingInt(c)) << 12 | 0x63, .rv_b12, l);
         }
+        // ---- far control flow ----------------------------------------------------------
+        fn pcrelPair(a: Self, rd: X, second: u32, l: Label) Error!void {
+            if (!a.buf.isValidLabel(l)) return error.InvalidLabel;
+            const at = a.buf.offset();
+            const first: u32 = rd.n() << 7 | 0x17;
+            if (a.buf.labelOffset(l)) |target| {
+                const ws = core.rvPatchPcrelPair(first, second, @as(i64, target) - at);
+                try a.word(ws[0]);
+                return a.word(ws[1]);
+            }
+            try a.word(first);
+            try a.word(second);
+            try a.buf.addFixup(.{ .at = at, .base = at, .label = l.id, .kind = .rv_pcrel_pair });
+        }
+        /// `auipc ra, hi; jalr ra, lo(ra)`: call a label up to ±2 GiB away.
+        pub fn callFar(a: Self, l: Label) Error!void {
+            return a.pcrelPair(.ra, X.ra.n() << 15 | X.ra.n() << 7 | 0x67, l);
+        }
+        /// `auipc tmp, hi; jalr zero, lo(tmp)`: jump to a label up to ±2 GiB away.
+        pub fn jFar(a: Self, tmp: X, l: Label) Error!void {
+            if (tmp == .zero) return error.InvalidOperand;
+            return a.pcrelPair(tmp, tmp.n() << 15 | 0x67, l);
+        }
+        /// `auipc rd, hi; addi rd, rd, lo`: address of a label.
+        pub fn la(a: Self, rd: X, l: Label) Error!void {
+            if (rd == .zero) return error.InvalidOperand;
+            return a.pcrelPair(rd, rd.n() << 15 | rd.n() << 7 | 0x13, l);
+        }
+        /// Conditional branch with ±1 MiB reach: `b<!cond> skip; jal zero, l; skip:`.
+        pub fn bFar(a: Self, c: Cond, rs1: X, rs2: X, l: Label) Error!void {
+            const inv: Cond = switch (c) {
+                .eq => .ne,
+                .ne => .eq,
+                .lt => .ge,
+                .ge => .lt,
+                .ltu => .geu,
+                .geu => .ltu,
+            };
+            const skip = try a.newLabel();
+            try a.b(inv, rs1, rs2, skip);
+            try a.jal(.zero, l);
+            try a.bind(skip);
+        }
+
         fn branchTo(a: Self, w: u32, comptime kind: core.FixupKind, l: Label) Error!void {
             if (!a.buf.isValidLabel(l)) return error.InvalidLabel;
             const at = a.buf.offset();
@@ -528,6 +574,49 @@ test "riscv: F/D extensions (GNU as reference values)" {
     try a.fcvtFmt(.d, .f4, .f5, .dyn); // fcvt.d.s ft4, ft5
     const want = [_]u32{ 0x02B57553, 0x00853507, 0x00A53427, 0xE2050553, 0xD2257553, 0xA2B52553, 0xFFC12087, 0x1A208043, 0xC00115D3, 0x4202F253 };
     for (want, 0..) |w, i| try t.expectEqual(w, std.mem.readInt(u32, cb.code()[4 * i ..][0..4], .little));
+}
+
+test "riscv: far branches (auipc pairs and bFar)" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler.init(&cb);
+    const far = try a.newLabel();
+    try a.callFar(far); // 0
+    try a.la(.a0, far); // 8
+    try a.bFar(.eq, .a0, .a1, far); // 16: bne +8; 20: jal
+    try a.jFar(.t1, far); // 24
+    // Pad to put `far` 0x12345 + 0x800 bytes away (exercises the hi20 rounding).
+    while (cb.offset() < 0x12B48) try a.nop();
+    try a.bind(far);
+    try a.ret();
+    try cb.finalize();
+    const c = cb.code();
+    const rd = struct {
+        fn w(code: []const u8, off: usize) u32 {
+            return std.mem.readInt(u32, code[off..][0..4], .little);
+        }
+        fn simm(v: u32, comptime bits: u5, comptime shift: u5) i64 {
+            const x: u32 = (v >> shift) & ((@as(u32, 1) << bits) - 1);
+            const sx: i64 = x;
+            return if (x >> (bits - 1) != 0) sx - (@as(i64, 1) << bits) else sx;
+        }
+    };
+    const target: i64 = 0x12B48;
+    // Decode each auipc pair back: pc + (hi << 12) + sext(lo) == target.
+    for ([_]usize{ 0, 8, 24 }) |at| {
+        const hi = rd.simm(rd.w(c, at), 20, 12);
+        const lo = rd.simm(rd.w(c, at + 4), 12, 20);
+        try t.expectEqual(target, @as(i64, @intCast(at)) + (hi << 12) + lo);
+    }
+    try t.expectEqual(@as(u32, 0x0000_0017 | 1 << 7), rd.w(c, 0) & 0xFFF); // auipc ra
+    try t.expectEqual(@as(u32, 0x00B51463), rd.w(c, 16)); // bne a0, a1, +8
+    try t.expectEqual(@as(u32, 0x6F), rd.w(c, 20) & 0xFFF); // jal zero
+    // Backward and resolved-at-emit path.
+    const back = try a.newLabel();
+    try a.bind(back);
+    try a.la(.a2, back);
+    try t.expectEqual(@as(i64, 0), rd.simm(rd.w(cb.code(), cb.code().len - 8), 20, 12));
+    try t.expectError(error.InvalidOperand, a.jFar(.zero, back));
 }
 
 test "riscv: branches and jal with labels (forward fixups and backward)" {
