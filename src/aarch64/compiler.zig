@@ -6,10 +6,12 @@
 //!   are not allocated, so parameter and call-argument moves never conflict; x18 (platform
 //!   register on Apple) is never touched;
 //! - x8 is a scratch for `srem`; x16/x17 (IP0/IP1) are scratch for spilled operands, large offsets and call targets;
-//! - frame: `Assembler.prolog(used callee-saved, slots)`; spill slot k at [sp + 8k];
+//! - frame: `Assembler.prolog(used callee-saved, out + slots)`: outgoing stack arguments at
+//!   [sp + 8i], spill slot k at [sp + out + 8k] (sp never moves inside the body);
 //!   one shared epilog label.
 //! - A64 is three-address, so `dst = a op b` needs no two-address fix-up.
-//! Limits: up to 8 parameters and call arguments (no stack-passed arguments yet).
+//! - parameters and call arguments past x7 use 8-byte stack slots (up to `ir.max_args`);
+//!   incoming ones are read at [x29 + 16 + 8i].
 const std = @import("std");
 const a64 = @import("assembler.zig");
 const ir = @import("../core/ir.zig");
@@ -47,8 +49,13 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
     var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
     defer if (lowered) |*g| g.deinit();
     const f: *const ir.Func = if (lowered) |*g| g else f0;
-    if (f.params > CC.args.len) return error.TooManyParams;
-    for (f.blocks.items) |blk| for (blk.ops.items) |o| if (o == .call and o.call.args.len > CC.args.len) return error.TooManyArgs;
+    if (f.params > ir.max_args) return error.TooManyParams;
+    // Outgoing stack-argument area: the largest number of stack-passed call arguments.
+    var out_args: u32 = 0;
+    for (f.blocks.items) |blk| for (blk.ops.items) |o| if (o == .call) {
+        out_args = @max(out_args, @as(u32, @intCast(o.call.args.len -| CC.args.len)));
+    };
+    const out: u32 = std.mem.alignForward(u32, 8 * out_args, 16);
 
     // ---- register allocation input ----
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -94,22 +101,23 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
         nsaved += 1;
     };
     const saved = saved_buf[0..nsaved];
-    if (res.num_slots * 8 > 4080) return error.TooManySpills;
+    if (out + res.num_slots * 8 > 4080) return error.TooManySpills;
 
     const L = struct {
         locs: []const ra.Loc,
+        out: u32,
         fn reg(r: u8) X {
             return @fromBackingInt(@intCast(r));
         }
-        fn slot(k: u32) u15 {
-            return @intCast(8 * k);
+        fn slot(s: @This(), k: u32) u15 {
+            return @intCast(s.out + 8 * k);
         }
         /// Register holding `v` (loads spilled values into `scratch`).
         fn get(s: @This(), as: anytype, v: ir.VReg, scratch: X) !X {
             return switch (s.locs[v]) {
                 .reg => |r| reg(r),
                 .stack => |k| blk: {
-                    try as.ldr(scratch, sp, slot(k));
+                    try as.ldr(scratch, sp, s.slot(k));
                     break :blk scratch;
                 },
                 .none => blk: { // undefined value: reads as 0
@@ -121,7 +129,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
         fn put(s: @This(), as: anytype, v: ir.VReg, src: X) !void {
             switch (s.locs[v]) {
                 .reg => |r| if (reg(r) != src) try as.mov(reg(r), src),
-                .stack => |k| try as.str(src, sp, slot(k)),
+                .stack => |k| try as.str(src, sp, s.slot(k)),
                 .none => {},
             }
         }
@@ -133,11 +141,18 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
             return .{ s1, 0 };
         }
     };
-    const ctx: L = .{ .locs = res.locs };
+    const ctx: L = .{ .locs = res.locs, .out = out };
 
     // ---- prolog ----
-    const n = try a.prolog(saved, res.num_slots * 8);
-    for (0..f.params) |i| try ctx.put(a, @intCast(i), CC.args[i]);
+    const n = try a.prolog(saved, out + res.num_slots * 8);
+    for (0..f.params) |i| {
+        if (i < CC.args.len) {
+            try ctx.put(a, @intCast(i), CC.args[i]);
+        } else {
+            try a.ldr(s0, .x29, CC.stackArgOffset(i));
+            try ctx.put(a, @intCast(i), s0);
+        }
+    }
 
     const labels = try gpa.alloc(a64.Label, f.blocks.items.len);
     defer gpa.free(labels);
@@ -190,7 +205,9 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
             .call => |c| {
                 for (c.args, 0..) |arg, i| {
                     const r = try ctx.get(a, arg, s0);
-                    if (r != CC.args[i]) try a.mov(CC.args[i], r);
+                    if (i < CC.args.len) {
+                        if (r != CC.args[i]) try a.mov(CC.args[i], r);
+                    } else try a.str(r, sp, @intCast(8 * (i - CC.args.len)));
                 }
                 try a.movImm(s0, c.addr);
                 try a.blr(s0);
@@ -264,7 +281,7 @@ test "a64 compiler: fib compiles (byte-level, any host)" {
     try t.expectEqual(@as(usize, 0), c.len % 4);
     try t.expectEqual(@as(u32, 0xA9BF7BFD), std.mem.readInt(u32, c[0..4], .little)); // stp x29, x30
     try t.expectEqual(@as(u32, 0xD65F03C0), std.mem.readInt(u32, c[c.len - 4 ..][0..4], .little)); // ret
-    var g = try ir.parse(t.allocator, "func f 9\na:\n  ret v0\n");
+    var g = try ir.parse(t.allocator, "func f 17\na:\n  ret v0\n");
     defer g.deinit();
     try t.expectError(error.TooManyParams, compile(t.allocator, &g, &cb, .{}));
 }
@@ -343,6 +360,41 @@ test "a64 compiler: block parameters (SSA input)" {
         const want = try ir.interpret(&f, &.{n}, 1 << 20);
         try t.expectEqual(want, try run(&f, .{}, &.{n}));
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.x19) }, &.{n}));
+    }
+}
+
+test "a64 compiler: stack-passed parameters and call arguments" {
+    if (!can_run) return error.SkipZigTest;
+    const Helper = struct {
+        fn sum11(a: i64, b: i64, c: i64, d: i64, e: i64, f_: i64, g: i64, h: i64, i: i64, j: i64, k: i64) callconv(.c) i64 {
+            return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f_ + 7 * g + 8 * h + 9 * i + 10 * j + 11 * k;
+        }
+        fn alt10(a: i64, b: i64, c: i64, d: i64, e: i64, f_: i64, g: i64, h: i64, i: i64, j: i64) callconv(.c) i64 {
+            return a - b + c - d + e - f_ + g - h + i - j;
+        }
+    };
+    // 10 parameters (2 on the stack); calls with 11 and 10 arguments.
+    var g = ir.Func.init(t.allocator);
+    defer g.deinit();
+    g.params = 10;
+    const e = try g.addBlock("e");
+    const a11 = try g.alloc().dupe(ir.VReg, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9 });
+    try g.emit(e, .{ .call = .{ .dst = 10, .addr = @intFromPtr(&Helper.sum11), .args = a11 } });
+    const a10 = try g.alloc().dupe(ir.VReg, &.{ 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 });
+    try g.emit(e, .{ .call = .{ .dst = 11, .addr = @intFromPtr(&Helper.alt10), .args = a10 } });
+    try g.emit(e, .{ .arith = .{ .op = .add, .dst = 12, .a = 11, .b = 0 } });
+    try g.emit(e, .{ .ret = 12 });
+    const p = [_]i64{ 1, 20, 300, 4000, 50000, 600000, 7000000, 80000000, 900000000, 10000000000 };
+    const s11 = Helper.sum11(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[9]);
+    const want = Helper.alt10(s11, p[9], p[8], p[7], p[6], p[5], p[4], p[3], p[2], p[1]) + p[0];
+    for ([_]ra.RegMask{ allocatable, bit(.x19) }) |mask| {
+        var cb = CodeBuffer.init(t.allocator);
+        defer cb.deinit();
+        _ = try compile(t.allocator, &g, &cb, .{ .allocatable = mask });
+        const fun = try JitRuntime.add(&cb);
+        defer fun.release();
+        const F = *const fn (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) callconv(.c) i64;
+        try t.expectEqual(want, fun.ptr(F)(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]));
     }
 }
 
