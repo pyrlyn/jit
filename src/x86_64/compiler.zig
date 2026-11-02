@@ -31,6 +31,9 @@ fn bit(r: Gp) ra.RegMask {
 pub const Options = struct {
     /// Restrict the allocatable set (spill stress tests).
     allocatable: ra.RegMask = allocatable,
+    /// Keep call-crossing values in caller-saved registers when no callee-saved one is free,
+    /// saving/restoring them around each call (`regalloc.Config.split_at_calls`).
+    split_at_calls: bool = true,
     shorten_branches: bool = true,
 };
 
@@ -69,7 +72,7 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
         blocks[bi] = .{ .insts = insts, .succs = succs };
     }
     const rf: ra.Func = .{ .blocks = blocks, .num_vregs = @max(f.num_vregs, 1) };
-    const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable };
+    const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls };
     var res = try ra.allocate(gpa, rf, rcfg);
     defer res.deinit(gpa);
     std.debug.assert(ra.verify(rf, rcfg, res));
@@ -130,78 +133,92 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
     for (labels) |*l| l.* = try b.newLabel();
     const epilog = try b.newLabel();
 
+    var pos: u32 = 1; // regalloc position: entry block starts with the parameter-def inst
     for (f.blocks.items, 0..) |blk, bi| {
         try b.bind(labels[bi]);
-        for (blk.ops.items) |o| switch (o) {
-            .@"const" => |c| switch (res.locs[c.dst]) {
-                .reg => |r| try b.movRI(@fromBackingInt(@intCast(r)), c.imm),
-                else => {
-                    try b.movRI(s0, c.imm);
+        for (blk.ops.items) |o| {
+            defer pos += 1;
+            switch (o) {
+                .@"const" => |c| switch (res.locs[c.dst]) {
+                    .reg => |r| try b.movRI(@fromBackingInt(@intCast(r)), c.imm),
+                    else => {
+                        try b.movRI(s0, c.imm);
+                        try ctx.put(c.dst, s0);
+                    },
+                },
+                .copy => |c| try ctx.put(c.dst, try ctx.get(c.src, s0)),
+                .arith => |c| {
+                    const ra_ = try ctx.get(c.a, s0);
+                    const rb = try ctx.get(c.b, s1);
+                    if (ra_ != s0) try b.movRR(s0, ra_);
+                    switch (c.op) {
+                        .add => try b.aluRR(.add, s0, rb),
+                        .sub => try b.aluRR(.sub, s0, rb),
+                        .@"and" => try b.aluRR(.@"and", s0, rb),
+                        .@"or" => try b.aluRR(.@"or", s0, rb),
+                        .xor => try b.aluRR(.xor, s0, rb),
+                        .mul => try b.imulRR(s0, rb),
+                    }
                     try ctx.put(c.dst, s0);
                 },
-            },
-            .copy => |c| try ctx.put(c.dst, try ctx.get(c.src, s0)),
-            .arith => |c| {
-                const ra_ = try ctx.get(c.a, s0);
-                const rb = try ctx.get(c.b, s1);
-                if (ra_ != s0) try b.movRR(s0, ra_);
-                switch (c.op) {
-                    .add => try b.aluRR(.add, s0, rb),
-                    .sub => try b.aluRR(.sub, s0, rb),
-                    .@"and" => try b.aluRR(.@"and", s0, rb),
-                    .@"or" => try b.aluRR(.@"or", s0, rb),
-                    .xor => try b.aluRR(.xor, s0, rb),
-                    .mul => try b.imulRR(s0, rb),
-                }
-                try ctx.put(c.dst, s0);
-            },
-            .load => |c| {
-                const base = try ctx.get(c.base, s1);
-                try b.movRM(s0, x.ptr(base, c.disp));
-                try ctx.put(c.dst, s0);
-            },
-            .store => |c| {
-                const base = try ctx.get(c.base, s1);
-                const v = try ctx.get(c.src, s0);
-                try b.movMR(x.ptr(base, c.disp), v);
-            },
-            .call => |c| {
-                // Argument registers are never allocated: plain moves, no parallel-move cycles.
-                for (c.args, 0..) |a, i| {
-                    const r = try ctx.get(a, s0);
-                    if (r != cc.args[i]) try b.movRR(cc.args[i], r);
-                }
-                if (cc.shadow != 0) try b.subRI(.rsp, @intCast(cc.shadow));
-                try b.callAbs(c.addr);
-                if (cc.shadow != 0) try b.addRI(.rsp, @intCast(cc.shadow));
-                try ctx.put(c.dst, .rax);
-            },
-            .br => |tg| try b.jmp(labels[tg]),
-            .cbr => |c| {
-                const ra_ = try ctx.get(c.a, s0);
-                const rb = try ctx.get(c.b, s1);
-                try b.cmpRR(ra_, rb);
-                const cond: x.Cond = switch (c.cond) {
-                    .eq => .e,
-                    .ne => .ne,
-                    .lt => .l,
-                    .le => .le,
-                    .gt => .g,
-                    .ge => .ge,
-                    .ult => .b,
-                    .ule => .be,
-                    .ugt => .a,
-                    .uge => .ae,
-                };
-                try b.jcc(cond, labels[c.then]);
-                try b.jmp(labels[c.@"else"]);
-            },
-            .ret => |v| {
-                const r = try ctx.get(v, s0);
-                if (r != .rax) try b.movRR(.rax, r);
-                try b.jmp(epilog);
-            },
-        };
+                .load => |c| {
+                    const base = try ctx.get(c.base, s1);
+                    try b.movRM(s0, x.ptr(base, c.disp));
+                    try ctx.put(c.dst, s0);
+                },
+                .store => |c| {
+                    const base = try ctx.get(c.base, s1);
+                    const v = try ctx.get(c.src, s0);
+                    try b.movMR(x.ptr(base, c.disp), v);
+                },
+                .call => |c| {
+                    // Split ranges: save caller-saved registers live across this call.
+                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                        try b.movMR(ctx.slot(res.save_slot[v].?), @fromBackingInt(@intCast(res.locs[v].reg)));
+                    };
+                    // Argument registers are never allocated: plain moves, no parallel-move cycles.
+                    for (c.args, 0..) |a, i| {
+                        const r = try ctx.get(a, s0);
+                        if (r != cc.args[i]) try b.movRR(cc.args[i], r);
+                    }
+                    if (cc.shadow != 0) try b.subRI(.rsp, @intCast(cc.shadow));
+                    try b.callAbs(c.addr);
+                    if (cc.shadow != 0) try b.addRI(.rsp, @intCast(cc.shadow));
+                    var restored = false;
+                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                        if (!restored) try b.movRR(s1, .rax);
+                        restored = true;
+                        try b.movRM(@fromBackingInt(@intCast(res.locs[v].reg)), ctx.slot(res.save_slot[v].?));
+                    };
+                    try ctx.put(c.dst, if (restored) s1 else .rax);
+                },
+                .br => |tg| try b.jmp(labels[tg]),
+                .cbr => |c| {
+                    const ra_ = try ctx.get(c.a, s0);
+                    const rb = try ctx.get(c.b, s1);
+                    try b.cmpRR(ra_, rb);
+                    const cond: x.Cond = switch (c.cond) {
+                        .eq => .e,
+                        .ne => .ne,
+                        .lt => .l,
+                        .le => .le,
+                        .gt => .g,
+                        .ge => .ge,
+                        .ult => .b,
+                        .ule => .be,
+                        .ugt => .a,
+                        .uge => .ae,
+                    };
+                    try b.jcc(cond, labels[c.then]);
+                    try b.jmp(labels[c.@"else"]);
+                },
+                .ret => |v| {
+                    const r = try ctx.get(v, s0);
+                    if (r != .rax) try b.movRR(.rax, r);
+                    try b.jmp(epilog);
+                },
+            }
+        }
     }
     try b.bind(epilog);
     if (adj != 0) try b.addRI(.rsp, @intCast(adj));
@@ -292,6 +309,12 @@ test "compiler: execution - fib, loops, calls, memory, spills" {
     const p: i64 = @bitCast(@intFromPtr(&mem));
     try t.expectEqual(@as(i64, 3 * 4 * 4 + 3), try run(&g, .{}, &.{ 3, 4, p }));
     try t.expectEqual(@as(i64, 51), mem[1]);
+    // Only caller-saved rax: v0/v2 cross the call in rax, split (saved/restored) around it.
+    for ([_]bool{ true, false }) |split| {
+        mem = .{ 0, 0 };
+        try t.expectEqual(@as(i64, 3 * 4 * 4 + 3), try run(&g, .{ .allocatable = bit(.rax), .split_at_calls = split }, &.{ 3, 4, p }));
+        try t.expectEqual(@as(i64, 51), mem[1]);
+    }
 }
 
 test "compiler: differential vs interpreter on random programs" {
