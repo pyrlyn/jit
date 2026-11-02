@@ -948,7 +948,7 @@ test "setcc, cmovcc, movzx, movsx" {
     }, cb.code());
     // Every condition maps to an existing mnemonic.
     inline for (0..16) |k| {
-        const c: Cond = @enumFromInt(k);
+        const c: Cond = @fromBackingInt(@intCast(k));
         try a.setcc(c, .rdx);
         try a.cmovcc(c, .rdx, .rbx);
     }
