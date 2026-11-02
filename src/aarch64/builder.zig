@@ -12,10 +12,11 @@ const core = @import("../core/code_buffer.zig");
 const X = a64.X;
 const Cond = a64.Cond;
 
+const generic = @import("../core/builder.zig");
 pub const Error = a64.Error || error{LabelAlreadyBound};
 
 /// Builder-side label (mapped to buffer labels at serialize).
-pub const Label = struct { id: u32 };
+pub const Label = generic.Label;
 
 /// One recorded instruction: tag = Assembler method name, payload = its arguments.
 pub const Instr = union(enum) {
@@ -56,13 +57,16 @@ pub const Instr = union(enum) {
     cbz: struct { X, Label },
     cbnz: struct { X, Label },
 
-    pub fn target(i: Instr) ?Label {
-        return switch (i) {
-            .b, .bl => |o| o[0],
-            .bcond => |o| o[1],
-            .cbz, .cbnz => |o| o[1],
-            else => null,
-        };
+    pub const min_align: u32 = 4;
+    pub fn jumpTarget(i: Instr) ?Label {
+        return if (i == .b) i.b[0] else null;
+    }
+    /// `bcond` takes the condition at comptime.
+    pub const special: []const []const u8 = &.{"bcond"};
+    pub fn emitSpecial(a: anytype, i: Instr, labels: []const core.Label) !void {
+        switch (i.bcond[0]) {
+            inline else => |c| try a.bcond(c, labels[i.bcond[1].id]),
+        }
     }
     /// Control never falls through to the next node.
     pub fn isTerminator(i: Instr) bool {
@@ -73,223 +77,14 @@ pub const Instr = union(enum) {
     }
 };
 
-pub const Node = struct {
-    pub const none: u32 = std.math.maxInt(u32);
-    data: Data,
-    prev: u32 = none,
-    next: u32 = none,
-
-    pub const Data = union(enum) {
-        inst: Instr,
-        label: Label,
-        /// Pad with NOPs (`nop = true`) or UDF to a power-of-two boundary (multiple of 4).
-        @"align": struct { boundary: u32, nop: bool = true },
-        comment: struct { off: u32, len: u32 },
-    };
-};
-
-pub const Builder = struct {
-    gpa: std.mem.Allocator,
-    nodes: std.ArrayList(Node) = .empty,
-    bytes: std.ArrayList(u8) = .empty,
-    first: u32 = Node.none,
-    last: u32 = Node.none,
-    /// New nodes are inserted after this node (`none` = at the front).
-    cursor: u32 = Node.none,
-    /// Label -> node that binds it (`none` until bound).
-    label_node: std.ArrayList(u32) = .empty,
-
-    pub fn init(gpa: std.mem.Allocator) Builder {
-        return .{ .gpa = gpa };
-    }
-    pub fn deinit(b: *Builder) void {
-        b.nodes.deinit(b.gpa);
-        b.bytes.deinit(b.gpa);
-        b.label_node.deinit(b.gpa);
-    }
-
-    // ---- node list --------------------------------------------------------------------
-    pub fn newLabel(b: *Builder) Error!Label {
-        try b.label_node.append(b.gpa, Node.none);
-        return .{ .id = @intCast(b.label_node.items.len - 1) };
-    }
-    /// Inserts `d` after the cursor and moves the cursor to it. Returns the node index.
-    pub fn addNode(b: *Builder, d: Node.Data) Error!u32 {
-        const id: u32 = @intCast(b.nodes.items.len);
-        try b.nodes.append(b.gpa, .{ .data = d });
-        const n = &b.nodes.items[id];
-        if (b.cursor == Node.none) {
-            n.next = b.first;
-            if (b.first != Node.none) b.nodes.items[b.first].prev = id else b.last = id;
-            b.first = id;
-        } else {
-            const c = &b.nodes.items[b.cursor];
-            n.prev = b.cursor;
-            n.next = c.next;
-            if (c.next != Node.none) b.nodes.items[c.next].prev = id else b.last = id;
-            c.next = id;
-        }
-        b.cursor = id;
-        return id;
-    }
-    /// Unlinks node `id`. A cursor on it moves to its predecessor.
-    pub fn removeNode(b: *Builder, id: u32) void {
-        const n = b.nodes.items[id];
-        if (n.prev != Node.none) b.nodes.items[n.prev].next = n.next else b.first = n.next;
-        if (n.next != Node.none) b.nodes.items[n.next].prev = n.prev else b.last = n.prev;
-        if (b.cursor == id) b.cursor = n.prev;
-        if (n.data == .label) b.label_node.items[n.data.label.id] = Node.none;
-        b.nodes.items[id].prev = Node.none;
-        b.nodes.items[id].next = Node.none;
-    }
-    pub fn setCursor(b: *Builder, id: u32) void {
-        b.cursor = id;
-    }
-    /// Number of linked nodes.
-    pub fn count(b: *const Builder) usize {
-        var n: usize = 0;
-        var it = b.first;
-        while (it != Node.none) : (it = b.nodes.items[it].next) n += 1;
-        return n;
-    }
-    pub fn bind(b: *Builder, l: Label) Error!void {
-        if (l.id >= b.label_node.items.len) return error.InvalidLabel;
-        if (b.label_node.items[l.id] != Node.none) return error.LabelAlreadyBound;
-        b.label_node.items[l.id] = try b.addNode(.{ .label = l });
-    }
-    pub fn alignNop(b: *Builder, boundary: u32) Error!void {
-        if (!std.math.isPowerOfTwo(boundary) or boundary < 4) return error.InvalidOperand;
-        _ = try b.addNode(.{ .@"align" = .{ .boundary = boundary } });
-    }
-    pub fn alignTrap(b: *Builder, boundary: u32) Error!void {
-        if (!std.math.isPowerOfTwo(boundary) or boundary < 4) return error.InvalidOperand;
-        _ = try b.addNode(.{ .@"align" = .{ .boundary = boundary, .nop = false } });
-    }
-    pub fn comment(b: *Builder, text: []const u8) Error!void {
-        const off: u32 = @intCast(b.bytes.items.len);
-        try b.bytes.appendSlice(b.gpa, text);
-        _ = try b.addNode(.{ .comment = .{ .off = off, .len = @intCast(text.len) } });
-    }
-    /// Records any instruction: `b.add(.{ .add = .{ .x0, .x1, .x2 } })`.
-    pub fn add(b: *Builder, i: Instr) Error!void {
-        if (i.target()) |l| if (l.id >= b.label_node.items.len) return error.InvalidLabel;
-        _ = try b.addNode(.{ .inst = i });
-    }
-    /// Typed emitter by name with the Assembler's argument order:
-    /// `b.emit(.add, .{ .x0, .x1, .x2 })`, `b.emit(.bcond, .{ .ne, loop })`.
-    pub fn emit(b: *Builder, comptime tag: std.meta.Tag(Instr), args: @FieldType(Instr, @tagName(tag))) Error!void {
-        return b.add(@unionInit(Instr, @tagName(tag), args));
-    }
-
-    pub fn runPasses(b: *Builder, comptime passes: anytype) !void {
-        inline for (passes) |p| try p(b);
-    }
-
-    // ---- serialization ----------------------------------------------------------------
-    /// Replays all nodes through `a` (an `a64.AssemblerT(...)` instance). Call
-    /// `a.buf.finalize()` afterwards.
-    pub fn serialize(b: *const Builder, a: anytype) !void {
-        const labels = try b.gpa.alloc(core.Label, b.label_node.items.len);
-        defer b.gpa.free(labels);
-        for (labels) |*l| l.* = try a.newLabel();
-        var it = b.first;
-        while (it != Node.none) : (it = b.nodes.items[it].next) {
-            switch (b.nodes.items[it].data) {
-                .label => |l| try a.bind(labels[l.id]),
-                .@"align" => |al| if (al.nop) try a.alignNop(al.boundary) else try a.alignTrap(al.boundary),
-                .comment => {},
-                .inst => |i| try emitInst(a, i, labels),
-            }
-        }
-    }
-
-    fn emitInst(a: anytype, i: Instr, labels: []const core.Label) !void {
-        @setEvalBranchQuota(100_000);
-        switch (i) {
-            // `bcond` takes the condition at comptime.
-            .bcond => |o| switch (o[0]) {
-                inline else => |c| try a.bcond(c, labels[o[1].id]),
-            },
-            .ret => try a.ret(),
-            .b => |o| try a.b(labels[o[0].id]),
-            .bl => |o| try a.bl(labels[o[0].id]),
-            .cbz => |o| try a.cbz(o[0], labels[o[1].id]),
-            .cbnz => |o| try a.cbnz(o[0], labels[o[1].id]),
-            inline else => |o, tag| try @call(.auto, @field(@TypeOf(a), @tagName(tag)), .{a} ++ o),
-        }
-    }
-
-    // ---- formatter --------------------------------------------------------------------
-    /// Appends one line per node (`L0:`, `  add x0, x1, x2`, `  // text`) to `out`.
-    pub fn format(b: *const Builder, out: *std.ArrayList(u8)) !void {
-        var it = b.first;
-        while (it != Node.none) : (it = b.nodes.items[it].next) {
-            switch (b.nodes.items[it].data) {
-                .label => |l| try out.print(b.gpa, "L{d}:\n", .{l.id}),
-                .@"align" => |al| try out.print(b.gpa, "  .align {d}\n", .{al.boundary}),
-                .comment => |c| try out.print(b.gpa, "  // {s}\n", .{b.bytes.items[c.off..][0..c.len]}),
-                .inst => |i| switch (i) {
-                    .ret => try out.appendSlice(b.gpa, "  ret\n"),
-                    inline else => |o, tag| {
-                        try out.print(b.gpa, "  {s}", .{@tagName(tag)});
-                        inline for (o, 0..) |v, k| {
-                            try out.appendSlice(b.gpa, if (k == 0) " " else ", ");
-                            const T = @TypeOf(v);
-                            if (T == Label) {
-                                try out.print(b.gpa, "L{d}", .{v.id});
-                            } else if (@typeInfo(T) == .@"enum") {
-                                try out.appendSlice(b.gpa, @tagName(v));
-                            } else try out.print(b.gpa, "#{d}", .{v});
-                        }
-                        try out.append(b.gpa, '\n');
-                    },
-                },
-            }
-        }
-    }
-};
+pub const Builder = generic.BuilderT(Instr);
+pub const Node = Builder.Node;
 
 // ---- passes ---------------------------------------------------------------------------
-
 /// Removes instructions after `b`/`ret`/`udf` up to the next label.
-pub fn removeDeadCode(b: *Builder) !void {
-    var dead = false;
-    var it = b.first;
-    while (it != Node.none) {
-        const nx = b.nodes.items[it].next;
-        switch (b.nodes.items[it].data) {
-            .label => dead = false,
-            .inst => |i| if (dead) b.removeNode(it) else if (i.isTerminator()) {
-                dead = true;
-            },
-            else => {},
-        }
-        it = nx;
-    }
-}
-
+pub const removeDeadCode = Builder.removeDeadCode;
 /// Removes `b L` when `L` is bound right after it (only labels/comments in between).
-pub fn removeJumpsToNext(b: *Builder) !void {
-    var it = b.first;
-    while (it != Node.none) {
-        const nx = b.nodes.items[it].next;
-        const d = b.nodes.items[it].data;
-        if (d == .inst and d.inst == .b) {
-            const l = d.inst.b[0];
-            var j = nx;
-            while (j != Node.none) : (j = b.nodes.items[j].next) {
-                const dj = b.nodes.items[j].data;
-                if (dj == .label) {
-                    if (dj.label.id == l.id) {
-                        b.removeNode(it);
-                        break;
-                    }
-                } else if (dj != .comment) break;
-            }
-        }
-        it = nx;
-    }
-}
+pub const removeJumpsToNext = Builder.removeJumpsToNext;
 
 // ---- tests ------------------------------------------------------------------------------
 const t = std.testing;
