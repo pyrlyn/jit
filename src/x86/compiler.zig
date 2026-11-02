@@ -310,6 +310,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     try b.emit(.jcc, .{ cond, labels[c.then] });
                     try b.emit(.jmp, .{labels[c.@"else"]});
                 },
+                .fconst, .typed, .fcmp, .cvt, .splat, .extract => unreachable, // rejected by isIntOnly
                 .ret => |v| {
                     const r = try ctx.get(v, s0);
                     if (r != .eax) try b.emit(.movRR, .{ .eax, r });
@@ -332,6 +333,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
 
 /// IR -> bytes in `cb` (finalized). Runs dead-code and jump-to-next passes.
 pub fn compile(gpa: std.mem.Allocator, f: *const ir.Func, cb: *CodeBuffer, opts: Options) !Stats {
+    if (!f.isIntOnly()) return error.UnsupportedType;
     var b = bld.Builder.init(gpa);
     defer b.deinit();
     var st = try lower(gpa, f, &b, opts);
@@ -344,6 +346,7 @@ pub fn compile(gpa: std.mem.Allocator, f: *const ir.Func, cb: *CodeBuffer, opts:
 
 /// Reference interpreter with the compiler's 32-bit semantics (no load/store/call).
 pub fn interpret32(f: *const ir.Func, args: []const i32, max_steps: usize) !i32 {
+    if (!f.isIntOnly()) return error.UnsupportedType;
     const regs = try std.heap.page_allocator.alloc(i32, @max(f.num_vregs, 1));
     defer std.heap.page_allocator.free(regs);
     @memset(regs, 0);
@@ -366,6 +369,7 @@ pub fn interpret32(f: *const ir.Func, args: []const i32, max_steps: usize) !i32 
                     blk = if (cond32(c.cond, regs[c.a], regs[c.b])) c.then else c.@"else";
                     break;
                 },
+                .fconst, .typed, .fcmp, .cvt, .splat, .extract => unreachable, // rejected by isIntOnly
                 .ret => |v| return regs[v],
                 else => return error.Unsupported,
             }

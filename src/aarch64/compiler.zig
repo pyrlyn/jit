@@ -233,6 +233,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
                 }
                 try a.b(labels[c.@"else"]);
             },
+            .fconst, .typed, .fcmp, .cvt, .splat, .extract => unreachable, // rejected by isIntOnly
             .ret => |v| {
                 const r = try ctx.get(a, v, s0);
                 if (r != CC.ret) try a.mov(CC.ret, r);
@@ -247,6 +248,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
 
 /// IR -> bytes in `cb` (finalized), with validation on.
 pub fn compile(gpa: std.mem.Allocator, f: *const ir.Func, cb: *CodeBuffer, opts: Options) !Stats {
+    if (!f.isIntOnly()) return error.UnsupportedType;
     const st = try lower(gpa, f, a64.AssemblerT(.{ .validate = true }).init(cb), opts);
     try cb.finalize();
     return st;

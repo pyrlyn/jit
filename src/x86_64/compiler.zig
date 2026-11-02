@@ -319,6 +319,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     try b.emit(.jcc, .{ cond, labels[c.then] });
                     try b.emit(.jmp, .{labels[c.@"else"]});
                 },
+                .fconst, .typed, .fcmp, .cvt, .splat, .extract => unreachable, // rejected by isIntOnly
                 .ret => |v| {
                     const r = try ctx.get(v, s0);
                     if (r != .rax) try b.emit(.movRR, .{ .rax, r });
@@ -341,6 +342,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
 
 /// IR -> bytes in `cb` (finalized). Runs dead-code, jump-to-next and branch-shortening passes.
 pub fn compile(gpa: std.mem.Allocator, f: *const ir.Func, cb: *CodeBuffer, opts: Options) !Stats {
+    if (!f.isIntOnly()) return error.UnsupportedType;
     var b = bld.Builder.init(gpa);
     defer b.deinit();
     var st = try lower(gpa, f, &b, opts);
