@@ -1077,7 +1077,7 @@ test "ir: typed values - parse, type check, print round-trip, interpret" {
 
 test "ir: typed memory and type errors" {
     var mem: [4]f64 = .{ 1.5, 2.25, 0, 0 };
-    const p: i64 = @bitCast(@intFromPtr(&mem));
+    const p: i64 = @intCast(@intFromPtr(&mem));
     const src =
         \\func m 1
         \\e:
