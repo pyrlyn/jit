@@ -31,7 +31,7 @@ wrapper, Builder/Compiler support, execution tests (no 32-bit host).
 R/I/S/U/B/J formats, RV64I + W forms, loads/stores, M extension, labels via new `rv_b12` /
 `rv_j20` fixups in `CodeBuffer`, pseudo `li` (any 64-bit constant), `mv/nop/ret/j/callAbs`,
 LP64 prolog/epilog. Tests: spec reference encodings and `li` checked by a small RV64
-interpreter on 20k values. A extension (lr/sc, all AMOs, .w/.d, aq/rl), `fence` and the F/D extensions (loads/stores, arithmetic, fmadd, compares, conversions, fmv) added. Far branches: `callFar`/`jFar`/`la` (auipc pairs, fixup `rv_pcrel_pair`, ±2 GiB) and `bFar`. Not yet: C, RV32, LLVM-generated
+interpreter on 20k values. A extension (lr/sc, all AMOs, .w/.d, aq/rl), `fence` and the F/D extensions (loads/stores, arithmetic, fmadd, compares, conversions, fmv) added. Far branches: `callFar`/`jFar`/`la` (auipc pairs, fixup `rv_pcrel_pair`, ±2 GiB) and `bFar`. C subset: explicit `c*` emitters (nop, addi, addiw, li, slli, mv, add, jr, ret, ldsp, sdsp). Not yet: rest of C, RV32, LLVM-generated
 byte-exact suite (no RISC-V-capable assembler on this machine), qemu execution.
 - Base RV64I + M + A, then F/D, then C (compressed, 16-bit) as an opt-in size mode.
 - Fixed 32-bit words like AArch64; immediates split across fields (I/S/B/U/J types).
