@@ -38,6 +38,8 @@ pub const Options = struct {
     allocatable: ra.RegMask = allocatable,
     split_at_calls: bool = true,
     algo: ra.Algo = .linear,
+    /// Per-block register segments for spilled values (`regalloc.Config.split`).
+    split: bool = true,
 };
 
 pub const Stats = struct {
@@ -46,6 +48,10 @@ pub const Stats = struct {
     nodes: usize = 0,
     folded_imm: u32 = 0,
     folded_mem: u32 = 0,
+    /// Register segments given to spilled values (live-range splitting).
+    segments: u32 = 0,
+    /// Copies removed by coalescing (`.graph`).
+    coalesced: u32 = 0,
 };
 
 fn imm32(v: i64) i32 {
@@ -76,7 +82,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
             var buf: [ir.max_args]ir.VReg = undefined;
             const u = try A.dupe(ra.VReg, o.uses(&buf));
             const d: []const ra.VReg = if (o.def()) |dv| try A.dupe(ra.VReg, &.{dv}) else &.{};
-            insts[i + extra] = .{ .uses = u, .defs = d, .is_call = o == .call };
+            insts[i + extra] = .{ .uses = u, .defs = d, .is_call = o == .call, .is_copy = o == .copy };
         }
         const succs: []const u32 = switch (blk.ops.items[blk.ops.items.len - 1]) {
             .br => |tg| try A.dupe(u32, &.{tg}),
@@ -86,15 +92,12 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
         blocks[bi] = .{ .insts = insts, .succs = succs };
     }
     const rf: ra.Func = .{ .blocks = blocks, .num_vregs = @max(f.num_vregs, 1) };
-    const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls, .algo = opts.algo };
+    const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls, .algo = opts.algo, .split = opts.split };
     var res = try ra.allocate(gpa, rf, rcfg);
     defer res.deinit(gpa);
     std.debug.assert(ra.verify(rf, rcfg, res));
 
-    var used: ra.RegMask = 0;
-    for (res.locs) |l| if (l == .reg) {
-        used |= @as(ra.RegMask, 1) << @intCast(l.reg);
-    };
+    const used = res.usedRegs();
     var saved: std.ArrayList(Gp) = .empty;
     defer saved.deinit(gpa);
     for ([_]Gp{ .ebx, .esi, .edi }) |r| if (used & bit(r) != 0) try saved.append(gpa, r);
@@ -105,6 +108,8 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
 
     const L = struct {
         locs: []const ra.Loc,
+        res: *const ra.Result,
+        pos: *const u32,
         nsaved: u32,
         b: *bld.Builder,
         fn slot(s: @This(), k: u32) x.Mem {
@@ -117,6 +122,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
             return switch (s.locs[v]) {
                 .reg => |r| reg(r),
                 .stack => |k| blk: {
+                    if (s.res.regAt(v, s.pos.*)) |r| break :blk @fromBackingInt(@intCast(r));
                     try s.b.emit(.movRM, .{ scratch, s.slot(k) });
                     break :blk scratch;
                 },
@@ -126,15 +132,23 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                 },
             };
         }
+        fn load(s: @This(), v: ir.VReg, r: u8) !void {
+            try s.b.emit(.movRM, .{ @fromBackingInt(@intCast(r)), s.slot(s.locs[v].stack) });
+        }
         fn put(s: @This(), v: ir.VReg, src: Gp) !void {
             switch (s.locs[v]) {
                 .reg => |r| if (reg(r) != src) try s.b.emit(.movRR, .{ reg(r), src }),
-                .stack => |k| try s.b.emit(.movMR, .{ s.slot(k), src }),
+                .stack => |k| {
+                    // Inside a split segment: write through to the register and the slot.
+                    if (s.res.regAt(v, s.pos.*)) |r| if (reg(r) != src) try s.b.emit(.movRR, .{ reg(r), src });
+                    try s.b.emit(.movMR, .{ s.slot(k), src });
+                },
                 .none => {},
             }
         }
     };
-    const ctx: L = .{ .locs = res.locs, .nsaved = nsaved, .b = b };
+    var pos: u32 = 0;
+    const ctx: L = .{ .locs = res.locs, .res = &res, .pos = &pos, .nsaved = nsaved, .b = b };
 
     try b.comment(f.name);
     try b.emit(.push, .{.ebp});
@@ -155,12 +169,13 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     const known = try A.alloc(?i32, @max(f.num_vregs, 1));
     var folded_imm: u32 = 0;
     var folded_mem: u32 = 0;
-    var pos: u32 = 1;
+    pos = 1;
     for (f.blocks.items, 0..) |blk, bi| {
         try b.bind(labels[bi]);
         @memset(known, null);
         for (blk.ops.items) |o| {
             defer pos += 1;
+            try res.loadsAt(pos, ctx, L.load);
             defer if (o.def()) |d| {
                 known[d] = if (o == .@"const") imm32(o.@"const".imm) else null;
             };
@@ -193,7 +208,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                             folded_imm += 1;
                             break :fold;
                         }
-                        if (alu != null and res.locs[c.b] == .stack) {
+                        if (alu != null and res.locs[c.b] == .stack and res.regAt(c.b, pos) == null) {
                             const ra0 = try ctx.get(c.a, s0);
                             if (ra0 != s0) try b.emit(.movRR, .{ s0, ra0 });
                             try b.emit(.aluRM, .{ alu.?, s0, ctx.slot(res.locs[c.b].stack) });
@@ -312,7 +327,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     }
     try b.emit(.pop, .{.ebp});
     try b.add(.ret);
-    return .{ .spills = res.spills, .slots = res.num_slots, .nodes = b.count(), .folded_imm = folded_imm, .folded_mem = folded_mem };
+    return .{ .spills = res.spills, .slots = res.num_slots, .nodes = b.count(), .folded_imm = folded_imm, .folded_mem = folded_mem, .segments = @intCast(res.segs.len), .coalesced = res.coalesced };
 }
 
 /// IR -> bytes in `cb` (finalized). Runs dead-code and jump-to-next passes.
