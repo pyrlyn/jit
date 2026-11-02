@@ -14,7 +14,7 @@ GP/vector/AArch64 encoder tables generated from LLVM `.td` files, CI.
 
 Order: Builder -> Compiler -> register allocator -> x86-64 operands -> other architectures.
 
-1. Builder: AArch64 builder, SIMD forms, generated `inst(mnemonic, ...)` path, generic `BuilderT(Arch)`.
+1. Builder: SIMD forms, generated `inst(mnemonic, ...)` path; port the x86-64 builder onto `core/builder.zig` (branch shortening as a pass).
 2. Compiler: shifts and division, stack-passed arguments, immediate/memory folding, AArch64
    lowering, SSA with block parameters.
 3. Register allocator: live-range splitting, lifetime holes, edge move resolution, spill
@@ -49,8 +49,8 @@ coloring. Each layer is generic over the target with comptime parameters, like `
 cursor insertion and removal, all typed x86-64 emitters, byte-identical serialization through
 any `AssemblerT(opts)` (validation and hooks unchanged), passes `removeDeadCode`,
 `removeJumpsToNext`, `shortenBranches` (iterative relaxation, rel8 forward and backward), and a
-text formatter. AArch64: `src/aarch64/builder.zig` (`pyrlyn_jit.aarch64_builder.Builder`), one `Instr` variant per Assembler emitter (`b.emit(.add, .{ .x0, .x1, .x2 })`), byte-identical serialization, `removeDeadCode` and `removeJumpsToNext`. Not yet: the generated `inst(mnemonic, ...)` path and SIMD forms,
-a generic `BuilderT(Arch)`.
+text formatter. AArch64: `src/aarch64/builder.zig` (`pyrlyn_jit.aarch64_builder.Builder`), one `Instr` variant per Assembler emitter (`b.emit(.add, .{ .x0, .x1, .x2 })`), byte-identical serialization, `removeDeadCode` and `removeJumpsToNext`. Generic layer: `src/core/builder.zig` (`BuilderT(Instr)`: node list, cursor, labels, align/comment, formatter, serialize-by-tag, `removeDeadCode`/`removeJumpsToNext`), used by the AArch64 builder. Not yet: the generated `inst(mnemonic, ...)` path and SIMD forms,
+the x86-64 builder on the generic layer.
 
 Goal: emit instructions into a node list instead of bytes, run passes over it, then serialize
 to an Assembler. Users never write bytes or compute offsets.
