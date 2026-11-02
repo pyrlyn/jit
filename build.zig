@@ -17,6 +17,8 @@ pub fn build(b: *std.Build) void {
     opts.addOption(bool, "hooks", b.option(bool, "hooks", "Default Assembler supports runtime emission hooks (default: on in all modes)") orelse true);
     // Benchmark only: attach a comptime CountingHooks instead of the default CallbackHooks.
     opts.addOption(bool, "asmjit_tests", b.option(bool, "asmjit-tests", "test: include AsmJit's ported assembler tests (src/asmjit_x64_tests.zig, src/asmjit_x86_tests.zig, src/asmjit_a64_tests.zig)") orelse false);
+    // x86-64: restrict instruction forms to these CPU features at compile time (empty: all).
+    opts.addOption([]const u8, "x86_features", b.option([]const u8, "x86-features", "x86-64: comma-separated CPU features (isa.Feature, e.g. sse4_2,avx2,avx512_f); forms needing others are removed and calling them is a compile error") orelse "");
     opts.addOption(bool, "gp_fuzz", b.option(bool, "gp-fuzz", "test: include src/gp_fuzz.zig (written by scripts/fuzz_gp.py)") orelse false);
     opts.addOption(bool, "bench_counting", b.option(bool, "bench-counting", "bench: use comptime CountingHooks (implies validate setting as given)") orelse false);
 

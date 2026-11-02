@@ -66,6 +66,44 @@ fn xgetbv0() u32 {
 
 var cached: ?isa.Features = null;
 
+/// Host CPU identification and features (CPUID).
+pub const CpuInfo = struct {
+    /// "GenuineIntel", "AuthenticAMD", "VirtualApple" (Rosetta), ...
+    vendor: [12]u8,
+    family: u32,
+    model: u32,
+    stepping: u32,
+    features: isa.Features,
+    pub fn has(c: CpuInfo, f: isa.Feature) bool {
+        return c.features.contains(f);
+    }
+    pub fn vendorName(c: *const CpuInfo) []const u8 {
+        return std.mem.sliceTo(&c.vendor, 0);
+    }
+};
+
+/// CpuInfo of the running CPU, or null if the host is not x86-64.
+pub fn info() ?CpuInfo {
+    if (builtin.cpu.arch != .x86_64) return null;
+    const l0 = cpuid(0, 0);
+    var v: [12]u8 = undefined;
+    std.mem.writeInt(u32, v[0..4], l0[1], .little);
+    std.mem.writeInt(u32, v[4..8], l0[3], .little);
+    std.mem.writeInt(u32, v[8..12], l0[2], .little);
+    const a = cpuid(1, 0)[0];
+    const base_family = (a >> 8) & 0xF;
+    const family = if (base_family == 0xF) base_family + ((a >> 20) & 0xFF) else base_family;
+    const model = if (base_family == 0x6 or base_family == 0xF) ((a >> 4) & 0xF) | ((a >> 12) & 0xF0) else (a >> 4) & 0xF;
+    return .{ .vendor = v, .family = family, .model = model, .stepping = a & 0xF, .features = host().? };
+}
+
+test "cpu: CpuInfo on x86-64 hosts" {
+    const c = info() orelse return error.SkipZigTest;
+    try std.testing.expect(c.has(.SSE2)); // baseline x86-64
+    try std.testing.expect(c.vendorName().len > 0);
+    try std.testing.expect(c.family != 0);
+}
+
 /// Features of the CPU running this process, or null if the host is not x86-64.
 pub fn host() ?isa.Features {
     if (builtin.cpu.arch != .x86_64) return null;

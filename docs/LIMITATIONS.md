@@ -12,6 +12,7 @@
 ## ISA-database validation, CPU features, finalize and label checks
 
 - `validate = true` additionally checks every emitted instruction against forms generated from AsmJit's ISA database (`scripts/gen_isa_tables.py` -> `src/x86_64/isa.zig`, `src/aarch64/isa.zig`); a mismatch rolls back and returns `error.EncodingMismatch`.
+- Vector forms (`vinst`) are checked per selected form (`addps` SSE, `vaddps ymm` AVX, `vaddps zmm` AVX512_F); `-Dx86-features=...` gates forms at compile time; `cpu.info()` returns vendor/family/model/features.
 - `cpu_check = .target` with `target_features = &.{"BMI2", ...}` rejects instructions needing other features at compile time; `.host` checks against detected host features (CPUID / sysctl) at runtime (`error.UnsupportedCpuFeature`).
 - Always on (all modes): `finalize` fails with `UnboundLabel` (list them with `unresolvedLabels`), `DisplacementOutOfRange` (rel8/rel32, AArch64 imm19/imm26) or `CodeTooLarge` (> 2 GiB) and leaves the code untouched; binding a label twice gives `LabelAlreadyBound`, an unknown label id gives `InvalidLabel`.
 - Two AsmJit DB bugs are overridden in the generator (`cbz Xn`, `ret Xn` patterns).
