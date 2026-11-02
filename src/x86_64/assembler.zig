@@ -177,7 +177,7 @@ const Enc = struct {
 };
 
 /// Instruction id seen by validation and hooks (one per public emitter).
-pub const Inst = enum { mov_rr, mov_rm, mov_mr, mov_mi, lea, mov_ri, movabs, alu_rr, alu_rm, alu_mr, alu_ri, test_rr, imul_rr, imul_rm, imul_rri, push, pop, ret, nop, call_r, jmp_r, jmp, call, jcc, gp };
+pub const Inst = enum { mov_rr, mov_rm, mov_mr, mov_mi, lea, mov_ri, movabs, alu_rr, alu_rm, alu_mr, alu_ri, test_rr, imul_rr, imul_rm, imul_rri, push, pop, ret, nop, call_r, jmp_r, jmp, call, jcc, gp, vec };
 
 /// Operands of one instruction, as passed to validation and hooks. Unused fields are null.
 /// `r0` is the first register operand in Intel order (destination when it is a register).
@@ -458,6 +458,21 @@ pub fn AssemblerT(comptime opts: Options) type {
             if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = .gp, .ops = ops, .offset = start });
             try gp.emit(a.buf, mn, args);
             if (comptime @hasDecl(Hooks, "post")) h.post(.{ .id = .gp, .ops = ops, .offset = start, .bytes = a.buf.data[start..a.buf.len] });
+        }
+
+        /// Any SSE/AVX/AVX2/FMA/AVX-512/AMX form of the shared vector table: `vec.xmm/ymm/zmm(0..31)`,
+        /// `vec.k(0..7)`, `vec.mem(ptr, size)`, `vec.bcst(m, n)`, immediates; `e` carries
+        /// `{k}`, `{z}`, `{er}`, `{sae}`. Example (AVX-512):
+        /// `a.vinst(.vaddps, .{ vec.zmm(1), vec.zmm(2), vec.bcst(vec.mem(ptr(.rax, 0), 4), 16) }, .{ .k = 1, .z = true })`.
+        /// Hooks see it as `Inst.vec` with `Ops.mn` set.
+        pub fn vinst(a: Self, comptime mn: vec.Mnemonic, args: anytype, e: vec.Extra) (Error || vec.Error)!void {
+            if (comptime !has_hooks) return vec.emit(a.buf, mn, args, e);
+            const h = a.hooks orelse return vec.emit(a.buf, mn, args, e);
+            const ops: Ops = .{ .mn = @tagName(mn) };
+            const start: u32 = @intCast(a.buf.len);
+            if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = .vec, .ops = ops, .offset = start });
+            try vec.emit(a.buf, mn, args, e);
+            if (comptime @hasDecl(Hooks, "post")) h.post(.{ .id = .vec, .ops = ops, .offset = start, .bytes = a.buf.data[start..a.buf.len] });
         }
 
         // ---- typed wrappers over `inst` (condition codes, extension) -------------------

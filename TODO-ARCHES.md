@@ -113,6 +113,12 @@ Estimate: 2–3 weeks (sizes + RIP + extra forms), mostly mechanical once the ge
 
 ## 6. x86-64 SIMD
 
+**Status:** every SSE..AVX-512/AMX form of the generated vector table is reachable from the
+Assembler as `a.vinst(mn, args, extra)` (hooked as `Inst.vec`): zmm/ymm/xmm 0..31, `{k}`/`{z}`,
+`{1toN}`, `{er}`/`{sae}`, VSIB, disp8*N. `src/avx512_tests.zig` (scripts/gen_avx512_tests.py)
+checks 95 AVX-512 forms byte-exact vs LLVM. Not yet: per-form CPU feature checks for vector
+forms, runtime AVX-512 execution tests (no AVX-512 on CI/Rosetta).
+
 ### Order
 1. SSE, SSE2 (baseline on x86-64), SSE3, SSSE3, SSE4.1, SSE4.2.
 2. AVX (VEX, 128/256-bit, non-destructive 3-operand).
