@@ -32,6 +32,7 @@ jobs:
       - name: Install qemu-user (RISC-V execution tests)
         run: sudo apt-get update -q && sudo apt-get install -y -q qemu-user
       - run: zig build test-riscv64 -fqemu --summary all
+      - run: zig build test-bc2jit e2e-bc2jit -Dtarget=riscv64-linux-musl -fqemu --summary all
       - name: Cancel whole run on failure
         if: failure()
         env:
