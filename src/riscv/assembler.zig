@@ -818,6 +818,26 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.rType(1, rs2, rs1, 0, rd, 0x3B);
         }
 
+        /// Pads with `nop` (and one `c.nop` if the offset is only 2-aligned) up to a multiple
+        /// of `boundary` bytes (power of two, >= 2).
+        pub fn alignNop(a: Self, boundary: u32) Error!void {
+            const pad = try alignPad(a, boundary);
+            if (pad % 4 == 2) try a.buf.emitBytes(&.{ 0x01, 0x00 }); // c.nop
+            for (0..pad / 4) |_| try a.word(0x00000013); // addi x0, x0, 0
+        }
+        /// Pads with zero bytes (the all-zero parcel is a defined illegal instruction) up to a
+        /// multiple of `boundary` bytes (power of two, >= 2).
+        pub fn alignTrap(a: Self, boundary: u32) Error!void {
+            const pad = try alignPad(a, boundary);
+            for (0..pad / 2) |_| try a.buf.emitBytes(&.{ 0, 0 });
+        }
+        fn alignPad(a: Self, boundary: u32) Error!u32 {
+            if (!std.math.isPowerOfTwo(boundary) or boundary < 2) return error.InvalidOperand;
+            const off: u32 = @intCast(a.buf.offset());
+            if (off % 2 != 0) return error.InvalidOperand;
+            return (boundary - (off & (boundary - 1))) & (boundary - 1);
+        }
+
         // ---- pseudo-instructions ----
         pub fn nop(a: Self) Error!void {
             return a.addi(.zero, .zero, 0);
