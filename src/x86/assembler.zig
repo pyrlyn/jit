@@ -11,12 +11,13 @@ const x64 = @import("../x86_64/assembler.zig");
 pub const gp = @import("../x86_64/gp.zig");
 const CodeBuffer = core.CodeBuffer;
 pub const Label = core.Label;
-pub const Error = core.Error || gp.Error || error{InvalidOperand};
+pub const vec = @import("../x86_64/vec.zig");
+pub const Error = core.Error || gp.Error || vec.Error || error{InvalidOperand};
 const safety = @import("../core/safety.zig");
 
 /// Instruction id seen by hooks: `.gp` for everything emitted through `inst` (all typed GP
 /// wrappers), the rest for the hand-encoded control-flow emitters.
-pub const Inst = enum { gp, mov_ri, inc, dec, push, pop, push_i, ret, ret_n, nop, int3, call_r, jmp_r, jmp, call, jcc };
+pub const Inst = enum { gp, vec, mov_ri, inc, dec, push, pop, push_i, ret, ret_n, nop, int3, call_r, jmp_r, jmp, call, jcc };
 /// Operands passed to hooks. Unused fields are null.
 pub const Ops = struct {
     /// `.gp`: the mnemonic (operands are not decoded into `Ops`).
@@ -43,6 +44,23 @@ pub const Gp = enum(u3) {
     edi,
     inline fn wide(r: Gp) x64.Gp {
         return @fromBackingInt(@intCast(@backingInt(r)));
+    }
+};
+/// SSE/AVX register in 32-bit mode: xmm0..7 / ymm0..7 (no REX/VEX.R̄ extension).
+pub const Xmm = enum(u3) {
+    xmm0,
+    xmm1,
+    xmm2,
+    xmm3,
+    xmm4,
+    xmm5,
+    xmm6,
+    xmm7,
+    pub fn v(r: Xmm) vec.V {
+        return vec.xmm(@backingInt(r));
+    }
+    pub fn y(r: Xmm) vec.V {
+        return vec.ymm(@backingInt(r));
     }
 };
 pub const Scale = x64.Scale;
@@ -138,6 +156,54 @@ pub fn AssemblerT(comptime opts: Options) type {
         pub fn inst(a: Self, comptime mn: gp.Mnemonic, args: anytype) Error!void {
             return a.hooked(.gp, .{ .mn = @tagName(mn) }, gp.emitIn, .{ .x86, a.buf, mn, args });
         }
+        /// Any SSE/AVX/AVX-512 form of the shared vector table in 32-bit mode (operands:
+        /// `Xmm.v()/.y()`, `vmem(m, size)`, `gp.r32(...)`, immediates). Registers 8..31 and
+        /// 64-bit GP operands are rejected by the encoder. Hooks see `Inst.vec`.
+        pub fn vinst(a: Self, comptime mn: vec.Mnemonic, args: anytype, e: vec.Extra) Error!void {
+            if (opts.validate) inline for (args) |o| if (@TypeOf(o) == vec.Mem) try checkVMem(o);
+            return a.hooked(.vec, .{ .mn = @tagName(mn) }, vec.emitCompactIn, .{ .x86, a.buf, mn, args, e });
+        }
+        fn checkVMem(m: vec.Mem) Error!void {
+            if (m.rip) return error.InvalidOperand;
+            if (m.index) |i| if (i == .rsp or @backingInt(i) >= 8) return error.InvalidOperand;
+            if (m.base) |b| if (@backingInt(b) >= 8) return error.InvalidOperand;
+        }
+        // ---- typed SIMD helpers (SSE2 baseline; v* = AVX) ----
+        pub fn movupsRM(a: Self, d: Xmm, s: Mem) Error!void {
+            return a.vinst(.movups, .{ d.v(), vmem(s, 16) }, .{});
+        }
+        pub fn movupsMR(a: Self, d: Mem, s: Xmm) Error!void {
+            return a.vinst(.movups, .{ vmem(d, 16), s.v() }, .{});
+        }
+        pub fn movsdRM(a: Self, d: Xmm, s: Mem) Error!void {
+            return a.vinst(.movsd, .{ d.v(), vmem(s, 8) }, .{});
+        }
+        pub fn movsdMR(a: Self, d: Mem, s: Xmm) Error!void {
+            return a.vinst(.movsd, .{ vmem(d, 8), s.v() }, .{});
+        }
+        pub fn movssRM(a: Self, d: Xmm, s: Mem) Error!void {
+            return a.vinst(.movss, .{ d.v(), vmem(s, 4) }, .{});
+        }
+        pub fn movssMR(a: Self, d: Mem, s: Xmm) Error!void {
+            return a.vinst(.movss, .{ vmem(d, 4), s.v() }, .{});
+        }
+        /// Two-operand SSE op `op xmm, xmm` (addps, mulsd, pxor, paddd, ...).
+        pub fn sse(a: Self, comptime mn: vec.Mnemonic, d: Xmm, s: Xmm) Error!void {
+            return a.vinst(mn, .{ d.v(), s.v() }, .{});
+        }
+        /// Three-operand AVX op on ymm (`vaddps ymm, ymm, ymm`, ...).
+        pub fn avx256(a: Self, comptime mn: vec.Mnemonic, d: Xmm, s1: Xmm, s2: Xmm) Error!void {
+            return a.vinst(mn, .{ d.y(), s1.y(), s2.y() }, .{});
+        }
+        /// `cvtsi2sd xmm, r32`.
+        pub fn cvtsi2sd(a: Self, d: Xmm, s: Gp) Error!void {
+            return a.vinst(.cvtsi2sd, .{ d.v(), r(s) }, .{});
+        }
+        /// `cvttsd2si r32, xmm`.
+        pub fn cvttsd2si(a: Self, d: Gp, s: Xmm) Error!void {
+            return a.vinst(.cvttsd2si, .{ r(d), s.v() }, .{});
+        }
+
         inline fn r(g: Gp) gp.Reg {
             return gp.r32(g.wide());
         }
@@ -304,6 +370,10 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
     };
 }
+/// Vector memory operand of `size` bytes from a 32-bit address.
+pub fn vmem(m: Mem, size: u16) vec.Mem {
+    return vec.mem(m.wide(), size);
+}
 pub const Assembler = AssemblerT(.{});
 
 // ---- tests: expected bytes from `clang -target i386-linux-gnu` + objdump --------------
@@ -439,4 +509,26 @@ test "x86: hooks see every instruction (pre veto, post bytes, compiled out by de
     _ = try ca.prolog(&.{.ebx}, 0); // push ebp; mov ebp, esp; push ebx; sub esp, 4
     try t.expectEqual(@as(usize, 4), c.instructions);
     try t.expectEqual(cb.code().len - before, c.bytes);
+}
+
+test "x86: SIMD wrapper (byte-exact vs clang -target i386)" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler.init(&cb);
+    try a.sse(.addps, .xmm1, .xmm2); // 0f 58 ca
+    try a.movupsRM(.xmm0, ptr(.eax, 0)); // 0f 10 00
+    try a.movsdRM(.xmm0, ptr(.esp, 4)); // f2 0f 10 44 24 04
+    try a.movsdMR(ptr(.ebp, -8), .xmm7); // f2 0f 11 7d f8
+    try a.sse(.pxor, .xmm0, .xmm0); // 66 0f ef c0
+    try a.cvtsi2sd(.xmm0, .eax); // f2 0f 2a c0
+    try a.cvttsd2si(.eax, .xmm1); // f2 0f 2c c1
+    try a.avx256(.vaddps, .xmm0, .xmm1, .xmm2); // c5 f4 58 c2
+    try a.vinst(.vmovups, .{ vmem(ptr(.ecx, 0), 32), Xmm.xmm1.y() }, .{}); // c5 fc 11 09
+    try a.vinst(.movsd, .{ Xmm.xmm0.v(), vmem(.{ .disp = 0x1000 }, 8) }, .{}); // f2 0f 10 05 00 10 00 00
+    const want = [_]u8{ 0x0f, 0x58, 0xca, 0x0f, 0x10, 0x00, 0xf2, 0x0f, 0x10, 0x44, 0x24, 0x04, 0xf2, 0x0f, 0x11, 0x7d, 0xf8, 0x66, 0x0f, 0xef, 0xc0, 0xf2, 0x0f, 0x2a, 0xc0, 0xf2, 0x0f, 0x2c, 0xc1, 0xc5, 0xf4, 0x58, 0xc2, 0xc5, 0xfc, 0x11, 0x09, 0xf2, 0x0f, 0x10, 0x05, 0x00, 0x10, 0x00, 0x00 };
+    try t.expectEqualSlices(u8, &want, cb.code());
+    // xmm8+ and 64-bit GP operands do not exist in 32-bit mode.
+    try t.expect(std.meta.isError(a.vinst(.addps, .{ vec.xmm(8), vec.xmm(1) }, .{})));
+    try t.expect(std.meta.isError(a.vinst(.cvtsi2sd, .{ vec.xmm(0), gp.r64(.rax) }, .{})));
+    try t.expectError(error.InvalidOperand, a.vinst(.movups, .{ vec.xmm(0), vec.mem(x64.ptr(.r8, 0), 16) }, .{}));
 }
