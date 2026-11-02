@@ -1,4 +1,4 @@
-# TODO: remaining architectures and x86-64 work (plan only, no code yet)
+# TODO: remaining architectures and x86-64 work
 
 Rules that every new backend follows (same as x86-64 and AArch64):
 - its own module `src/<arch>/assembler.zig`, compiled only when listed in `-Dtargets=`;
@@ -11,7 +11,7 @@ Builder, Compiler and register allocator: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## 1. x86 (32-bit)
 
-**Status (feat/x86-32): base implemented** in `src/x86/assembler.zig` (`pyrlyn_jit.x86`): typed
+**Status (merged): base implemented** in `src/x86/assembler.zig` (`pyrlyn_jit.x86`): typed
 GP API (mov/lea/ALU/test/imul/inc/dec/push/pop/ret imm16/call/jmp/jcc with labels, absolute
 moffs), cdecl/stdcall/fastcall/SysV-i386 data, prolog/epilog, generic `inst()` over the shared
 GP table in 32-bit mode (already covered by the 8310 AsmJit x86 cases). Tests byte-exact vs
@@ -27,7 +27,7 @@ wrapper, Builder/Compiler support, execution tests (no 32-bit host).
 
 ## 2. RISC-V (RV64GC first, RV32 later)
 
-**Status (feat/riscv): RV64IM base implemented** in `src/riscv/assembler.zig` (`pyrlyn_jit.riscv`):
+**Status (merged): RV64IM base implemented** in `src/riscv/assembler.zig` (`pyrlyn_jit.riscv`):
 R/I/S/U/B/J formats, RV64I + W forms, loads/stores, M extension, labels via new `rv_b12` /
 `rv_j20` fixups in `CodeBuffer`, pseudo `li` (any 64-bit constant), `mv/nop/ret/j/callAbs`,
 LP64 prolog/epilog. Tests: spec reference encodings and `li` checked by a small RV64
