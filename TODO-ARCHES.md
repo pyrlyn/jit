@@ -70,7 +70,15 @@ byte-exact suite (no RISC-V-capable assembler on this machine), qemu execution.
 - ALU imm8 sign-extended form (`0x83`) when the value fits in i8, accumulator short form for rax.
 - Tested on ~2000 byte-exact cases (all registers × forms, boundary immediates, all SIB combos).
 
-### Remaining
+### Done since the LLVM-generated GP table (#24)
+- Operand sizes 8/16/32/64 (`gp.r8/r16/r32/r64`, `gp.byte/word/dword/qword`), empty REX for
+  spl/bpl/sil/dil, ah..bh rejected with REX; RIP-relative `gp.rip(disp)` and `gp.ripLabel(l)`
+  (fixup relative to instruction end); every GP form in the table (shifts, neg/not, div/idiv,
+  movzx/movsx/movsxd, cmovcc, setcc, xchg, bt*, cqo, ...) through `Assembler.inst(...)`,
+  byte-exact against LLVM.
+- Typed wrappers: `setcc`, `cmovcc`, `movzx(.byte|.word)`, `movsx(.byte|.word|.dword)`.
+
+### Remaining (items 1, 2 and 7 below are covered by the generic path above; kept for reference)
 1. Operand sizes 8/16/32: `0x66` prefix for 16-bit, no REX.W for 32-bit (implicitly zero-extends),
    8-bit opcodes (`0x88`, `0x80`...). Register enum per size (`Gp8/Gp16/Gp32/Gp64`) or a sized
    `Reg{ id, size }`. 8-bit: `spl/bpl/sil/dil` need an empty REX (0x40); `ah/ch/dh/bh`
