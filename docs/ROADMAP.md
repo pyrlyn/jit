@@ -14,11 +14,11 @@ GP/vector/AArch64 encoder tables generated from LLVM `.td` files, CI.
 
 Order: Builder -> Compiler -> register allocator -> x86-64 operands -> other architectures.
 
-1. Builder: AArch64 builder, SIMD forms, generated `inst(mnemonic, ...)` path, generic `BuilderT(Arch)`.
+1. Builder: SIMD forms, generated `inst(mnemonic, ...)` path; port the x86-64 builder onto `core/builder.zig` (branch shortening as a pass).
 2. Compiler: shifts and division, stack-passed arguments, immediate/memory folding, AArch64
    lowering, SSA with block parameters.
 3. Register allocator: live-range splitting, lifetime holes, edge move resolution, spill
-   weights, two-address hints; optional graph coloring.
+   weights, two-address hints (graph coloring: done, `Config.algo = .graph`).
 4. x86-64 operands: 8/16/32-bit sizes, RIP-relative with labels, imm64 fallbacks, more forms
    (movzx/movsx, cmovcc, setcc, div/idiv, ...), AVX-512/AVX10.
 5. x86-32 and RISC-V beyond the base step; MIPS and others only if needed.
@@ -49,8 +49,8 @@ coloring. Each layer is generic over the target with comptime parameters, like `
 cursor insertion and removal, all typed x86-64 emitters, byte-identical serialization through
 any `AssemblerT(opts)` (validation and hooks unchanged), passes `removeDeadCode`,
 `removeJumpsToNext`, `shortenBranches` (iterative relaxation, rel8 forward and backward), and a
-text formatter. AArch64: `src/aarch64/builder.zig` (`pyrlyn_jit.aarch64_builder.Builder`), one `Instr` variant per Assembler emitter (`b.emit(.add, .{ .x0, .x1, .x2 })`), byte-identical serialization, `removeDeadCode` and `removeJumpsToNext`. Not yet: the generated `inst(mnemonic, ...)` path and SIMD forms,
-a generic `BuilderT(Arch)`.
+text formatter. AArch64: `src/aarch64/builder.zig` (`pyrlyn_jit.aarch64_builder.Builder`), one `Instr` variant per Assembler emitter (`b.emit(.add, .{ .x0, .x1, .x2 })`), byte-identical serialization, `removeDeadCode` and `removeJumpsToNext`. Generic layer: `src/core/builder.zig` (`BuilderT(Instr)`: node list, cursor, labels, align/comment, formatter, serialize-by-tag, `removeDeadCode`/`removeJumpsToNext`), used by the AArch64 builder. Not yet: the generated `inst(mnemonic, ...)` path and SIMD forms,
+the x86-64 builder on the generic layer.
 
 Goal: emit instructions into a node list instead of bytes, run passes over it, then serialize
 to an Assembler. Users never write bytes or compute offsets.
@@ -134,7 +134,7 @@ Estimate: 3–4 weeks for x86-64, +1–2 weeks AArch64.
 over the CFG, one interval per vreg, linear scan with furthest-end spilling and spill-slot
 reuse, callee-saved-only for call-crossing values, pre-colored vregs, and an interference
 checker (`verify`) exercised by a random-program fuzz test. Splitting at calls (first version): call-crossing values may use caller-saved registers, saved/restored around each call. Not yet: general splitting, lifetime
-holes, edge move resolution, loop-depth spill weights, two-address hints, graph coloring.
+holes, edge move resolution, loop-depth spill weights, two-address hints. Graph coloring (Chaitin-Briggs, optimistic, no coalescing) is available as `Config.algo = .graph`.
 
 ### Choice
 - Default: **linear scan** (Poletto/Sarkar with lifetime holes and splitting, as in V8/HotSpot
