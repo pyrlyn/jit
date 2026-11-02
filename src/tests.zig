@@ -303,7 +303,7 @@ test "x86_64 isa: every instruction has AsmJit forms; matchForm accepts/rejects"
     const x = @import("x86_64/assembler.zig");
     inline for (@typeInfo(x.Inst).@"enum".field_values) |v| {
         const id: x.Inst = @fromBackingInt(@intCast(v));
-        if (id == .gp) continue; // generated GP path: its own tables (gp_table.zig)
+        if (id == .gp or id == .vec) continue; // generated paths: their own tables (gp_table.zig, vec_table.zig)
         const ops: x.Ops = .{ .alu = .add, .cond = .e };
         try t.expect(x.formsFor(id, ops).len > 0);
         try t.expect(x.requiredFeatures(id).count() == 0); // all current forms are baseline x86-64
