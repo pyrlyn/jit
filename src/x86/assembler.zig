@@ -341,6 +341,16 @@ pub fn AssemblerT(comptime opts: Options) type {
             const cc: u8 = @backingInt(c);
             return a.hooked(.jcc, .{ .label = l, .cond = c }, branch, .{ a, &[_]u8{0x70 + cc}, &[_]u8{ 0x0F, 0x80 + cc }, l });
         }
+        /// Pads with `nop` (0x90) to a power-of-two `boundary`.
+        pub fn alignNop(a: Self, boundary: u32) Error!void {
+            if (!std.math.isPowerOfTwo(boundary)) return error.InvalidOperand;
+            while (a.buf.offset() % boundary != 0) try a.nop();
+        }
+        /// Pads with `int3` (0xCC) to a power-of-two `boundary`.
+        pub fn alignTrap(a: Self, boundary: u32) Error!void {
+            if (!std.math.isPowerOfTwo(boundary)) return error.InvalidOperand;
+            while (a.buf.offset() % boundary != 0) try a.int3();
+        }
         /// `mov eax, addr; call eax` (eax is caller-saved in every 32-bit convention).
         pub fn callAbs(a: Self, addr: u32) Error!void {
             try a.movRI(.eax, addr);

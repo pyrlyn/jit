@@ -24,6 +24,8 @@ pub const x86_64_builder = if (opts.x86_64) @import("x86_64/builder.zig") else v
 pub const x86_64_compiler = if (opts.x86_64) @import("x86_64/compiler.zig") else void;
 /// `pyrlyn_jit.x86.Assembler`: 32-bit x86 (part of the x86_64 backend's encoder; void if disabled).
 pub const x86 = if (opts.x86_64) @import("x86/assembler.zig") else void;
+/// `pyrlyn_jit.x86_builder.Builder`: node-list layer over the x86 (32-bit) Assembler.
+pub const x86_builder = if (opts.x86_64) @import("x86/builder.zig") else void;
 /// `pyrlyn_jit.riscv.Assembler` (RV64) / `Assembler32` (RV32) (always compiled; no host dependency).
 pub const riscv = @import("riscv/assembler.zig");
 /// `pyrlyn_jit.aarch64.Assembler`, `.X`, ... (void if disabled at build time)
@@ -60,6 +62,7 @@ test {
     if (opts.aarch64) _ = aarch64_builder;
     if (opts.x86_64) _ = x86_64_compiler;
     if (opts.x86_64) _ = x86;
+    if (opts.x86_64) _ = x86_builder;
     _ = riscv;
     if (opts.aarch64) _ = aarch64;
 }
