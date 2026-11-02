@@ -9,7 +9,9 @@
 //! Optional:
 //! - `pub const special: []const []const u8` + `pub fn emitSpecial(a, Instr, []const core.Label)
 //!   !void` for emitters that take comptime arguments (the listed tags go to `emitSpecial`);
-//! - `pub const min_align: u32` (default 1).
+//! - `pub const min_align: u32` (default 1);
+//! - `pub fn formatInst(gpa, *std.ArrayList(u8), Instr) !void` (assembly-style text; the
+//!   default prints `tag arg, arg`) and `pub const comment_prefix: []const u8` (default "//").
 //! Serialization calls the Assembler emitter by tag name, so output is byte-identical to
 //! calling the Assembler directly (validation and hooks unchanged).
 const std = @import("std");
@@ -24,6 +26,7 @@ pub fn BuilderT(comptime InstrT: type) type {
     return struct {
         const Self = @This();
         pub const Instr = InstrT;
+        const comment_prefix: []const u8 = if (@hasDecl(Instr, "comment_prefix")) Instr.comment_prefix else "//";
         const min_align: u32 = if (@hasDecl(Instr, "min_align")) Instr.min_align else 1;
 
         pub const Node = struct {
@@ -38,6 +41,8 @@ pub fn BuilderT(comptime InstrT: type) type {
                 /// Pad with NOPs (`nop = true`) or trap instructions to a power-of-two boundary.
                 @"align": struct { boundary: u32, nop: bool = true },
                 comment: struct { off: u32, len: u32 },
+                /// Raw bytes (copied into the builder's byte arena).
+                embed: struct { off: u32, len: u32 },
             };
         };
 
@@ -122,6 +127,18 @@ pub fn BuilderT(comptime InstrT: type) type {
             try b.bytes.appendSlice(b.gpa, text);
             _ = try b.addNode(.{ .comment = .{ .off = off, .len = @intCast(text.len) } });
         }
+        /// Embeds raw bytes (code or data); dead-code removal stops at embeds.
+        pub fn embed(b: *Self, data: []const u8) Error!void {
+            const off: u32 = @intCast(b.bytes.items.len);
+            try b.bytes.appendSlice(b.gpa, data);
+            _ = try b.addNode(.{ .embed = .{ .off = off, .len = @intCast(data.len) } });
+        }
+        pub fn slice(b: *const Self, off: u32, len: u32) []const u8 {
+            return b.bytes.items[off..][0..len];
+        }
+        pub fn node(b: *const Self, id: u32) *Node {
+            return &b.nodes.items[id];
+        }
         /// Records any instruction: `b.add(.{ .add = .{ .x0, .x1, .x2 } })`.
         pub fn add(b: *Self, i: Instr) Error!void {
             switch (i) {
@@ -153,12 +170,14 @@ pub fn BuilderT(comptime InstrT: type) type {
                     .label => |l| try a.bind(labels[l.id]),
                     .@"align" => |al| if (al.nop) try a.alignNop(al.boundary) else try a.alignTrap(al.boundary),
                     .comment => {},
+                    .embed => |e| try a.buf.emitBytes(b.slice(e.off, e.len)),
                     .inst => |i| try emitInst(a, i, labels),
                 }
             }
         }
 
-        fn emitInst(a: anytype, i: Instr, labels: []const core.Label) !void {
+        /// Emits one instruction through Assembler `a` (`labels` maps builder labels).
+        pub fn emitInst(a: anytype, i: Instr, labels: []const core.Label) !void {
             @setEvalBranchQuota(100_000);
             switch (i) {
                 inline else => |o, tag| {
@@ -191,8 +210,13 @@ pub fn BuilderT(comptime InstrT: type) type {
                 switch (b.nodes.items[it].data) {
                     .label => |l| try out.print(b.gpa, "L{d}:\n", .{l.id}),
                     .@"align" => |al| try out.print(b.gpa, "  .align {d}\n", .{al.boundary}),
-                    .comment => |c| try out.print(b.gpa, "  // {s}\n", .{b.bytes.items[c.off..][0..c.len]}),
-                    .inst => |i| switch (i) {
+                    .comment => |c| try out.print(b.gpa, "  {s} {s}\n", .{ comment_prefix, b.slice(c.off, c.len) }),
+                    .embed => |e| try out.print(b.gpa, "  .embed {d} bytes\n", .{e.len}),
+                    .inst => |i| if (comptime @hasDecl(Instr, "formatInst")) {
+                        try out.appendSlice(b.gpa, "  ");
+                        try Instr.formatInst(b.gpa, out, i);
+                        try out.append(b.gpa, '\n');
+                    } else switch (i) {
                         inline else => |o, tag| {
                             try out.print(b.gpa, "  {s}", .{@tagName(tag)});
                             if (@TypeOf(o) != void) inline for (o, 0..) |v, k| {
@@ -221,7 +245,7 @@ pub fn BuilderT(comptime InstrT: type) type {
             while (it != Node.none) {
                 const nx = b.nodes.items[it].next;
                 switch (b.nodes.items[it].data) {
-                    .label => dead = false,
+                    .label, .embed => dead = false,
                     .inst => |i| if (dead) b.removeNode(it) else if (i.isTerminator()) {
                         dead = true;
                     },
