@@ -30,6 +30,8 @@ pub const x86_builder = if (opts.x86_64) @import("x86/builder.zig") else void;
 pub const x86_compiler = if (opts.x86_64) @import("x86/compiler.zig") else void;
 /// `pyrlyn_jit.riscv.Assembler` (RV64) / `Assembler32` (RV32) (always compiled; no host dependency).
 pub const riscv = @import("riscv/assembler.zig");
+/// `pyrlyn_jit.riscv_compiler`: IR -> RV64 machine code (always compiled; no host dependency).
+pub const riscv_compiler = @import("riscv/compiler.zig");
 /// `pyrlyn_jit.aarch64.Assembler`, `.X`, ... (void if disabled at build time)
 pub const aarch64 = if (opts.aarch64) @import("aarch64/assembler.zig") else void;
 /// `pyrlyn_jit.aarch64_compiler.compile`: IR -> regalloc -> AArch64 machine code (void if disabled).
@@ -69,6 +71,7 @@ test {
     if (opts.x86_64) _ = x86;
     if (opts.x86_64) _ = x86_builder;
     _ = riscv;
+    _ = riscv_compiler;
     _ = @import("riscv_tests.zig");
     if (opts.aarch64) _ = aarch64;
 }

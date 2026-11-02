@@ -8,6 +8,10 @@ const CodeBuffer = @import("core/code_buffer.zig").CodeBuffer;
 const JitRuntime = @import("core/jit_runtime.zig");
 const t = std.testing;
 
+test {
+    _ = @import("riscv/compiler.zig"); // Compiler execution tests
+}
+
 const can_run = builtin.cpu.arch == .riscv64;
 const Fn3 = *const fn (i64, i64, i64) callconv(.c) i64;
 
