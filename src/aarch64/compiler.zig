@@ -5,7 +5,7 @@
 //! - allocatable: x9..x15 (caller-saved) and x19..x28 (callee-saved); x0..x7 (arguments)
 //!   are not allocated, so parameter and call-argument moves never conflict; x18 (platform
 //!   register on Apple) is never touched;
-//! - x16/x17 (IP0/IP1) are scratch for spilled operands, large offsets and call targets;
+//! - x8 is a scratch for `srem`; x16/x17 (IP0/IP1) are scratch for spilled operands, large offsets and call targets;
 //! - frame: `Assembler.prolog(used callee-saved, slots)`; spill slot k at [sp + 8k];
 //!   one shared epilog label.
 //! - A64 is three-address, so `dst = a op b` needs no two-address fix-up.
@@ -60,7 +60,7 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, a: anytype, opts: Option
             insts[0] = .{ .defs = params };
         }
         for (blk.ops.items, 0..) |o, i| {
-            var buf: [8]ir.VReg = undefined;
+            var buf: [ir.max_args]ir.VReg = undefined;
             const u = try A.dupe(ra.VReg, o.uses(&buf));
             const d: []const ra.VReg = if (o.def()) |dv| try A.dupe(ra.VReg, &.{dv}) else &.{};
             insts[i + extra] = .{ .uses = u, .defs = d, .is_call = o == .call };
@@ -161,6 +161,15 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, a: anytype, opts: Option
                     .@"and" => try a.and_(s0, ra_, rb),
                     .@"or" => try a.orr(s0, ra_, rb),
                     .xor => try a.eor(s0, ra_, rb),
+                    // lslv/lsrv/asrv Xd, Xn, Xm (count taken mod 64, like the IR)
+                    .shl => try a.word(0x9AC02000 | @as(u32, @backingInt(rb)) << 16 | @as(u32, @backingInt(ra_)) << 5 | @backingInt(s0)),
+                    .shr => try a.word(0x9AC02400 | @as(u32, @backingInt(rb)) << 16 | @as(u32, @backingInt(ra_)) << 5 | @backingInt(s0)),
+                    .sar => try a.word(0x9AC02800 | @as(u32, @backingInt(rb)) << 16 | @as(u32, @backingInt(ra_)) << 5 | @backingInt(s0)),
+                    .sdiv => try a.sdiv(s0, ra_, rb),
+                    .srem => { // a - (a / b) * b; quotient in x8 (never allocated) since ra_ may be s0
+                        try a.sdiv(.x8, ra_, rb);
+                        try a.msub(s0, .x8, rb, ra_);
+                    },
                 }
                 try ctx.put(a, c.dst, s0);
             },
@@ -288,6 +297,36 @@ test "a64 compiler: execution - fib, calls, memory, spills" {
     }
 }
 
+test "a64 compiler: shifts and signed division match the interpreter" {
+    if (!can_run) return error.SkipZigTest;
+    const src =
+        \\func f 2
+        \\e:
+        \\  v2 = shl v0 v1
+        \\  v3 = shr v0 v1
+        \\  v4 = sar v0 v1
+        \\  v9 = const 7
+        \\  v5 = sdiv v0 v9
+        \\  v6 = srem v0 v9
+        \\  v7 = sdiv v2 v0
+        \\  v8 = add v2 v3
+        \\  v8 = xor v8 v4
+        \\  v8 = add v8 v5
+        \\  v8 = sub v8 v6
+        \\  v8 = add v8 v7
+        \\  ret v8
+    ;
+    var f = try ir.parse(t.allocator, src);
+    defer f.deinit();
+    const cases = [_][2]i64{ .{ 1, 0 }, .{ -1, 62 }, .{ 12345, 3 }, .{ -98765, 65 }, .{ std.math.maxInt(i64), 1 }, .{ -7, 2 } };
+    for (cases) |c| {
+        const want = try ir.interpret(&f, &c, 1000);
+        try t.expectEqual(want, try run(&f, .{}, &c));
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.x9) | bit(.x19) }, &c));
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.x19) }, &c)); // operands spilled
+    }
+}
+
 test "a64 compiler: differential vs interpreter on random programs" {
     if (!can_run) return error.SkipZigTest;
     var prng = std.Random.DefaultPrng.init(11);
@@ -307,7 +346,7 @@ test "a64 compiler: differential vs interpreter on random programs" {
                 const d = r.uintLessThan(u32, nv);
                 if (r.boolean()) {
                     try f.emit(blk, .{ .@"const" = .{ .dst = d, .imm = r.int(i64) } });
-                } else try f.emit(blk, .{ .arith = .{ .op = r.enumValue(ir.Arith), .dst = d, .a = r.uintLessThan(u32, nv), .b = r.uintLessThan(u32, nv) } });
+                } else try f.emit(blk, .{ .arith = .{ .op = @fromBackingInt(@intCast(r.uintLessThan(u8, @backingInt(ir.Arith.sdiv)))), .dst = d, .a = r.uintLessThan(u32, nv), .b = r.uintLessThan(u32, nv) } });
             }
             if (bi + 1 == nb) {
                 try f.emit(blk, .{ .ret = r.uintLessThan(u32, nv) });

@@ -30,6 +30,8 @@ pub const riscv = @import("riscv/assembler.zig");
 pub const aarch64 = if (opts.aarch64) @import("aarch64/assembler.zig") else void;
 /// `pyrlyn_jit.aarch64_compiler.compile`: IR -> regalloc -> AArch64 machine code (void if disabled).
 pub const aarch64_compiler = if (opts.aarch64) @import("aarch64/compiler.zig") else void;
+/// `pyrlyn_jit.aarch64_builder.Builder`: node-list layer over the AArch64 Assembler (void if disabled).
+pub const aarch64_builder = if (opts.aarch64) @import("aarch64/builder.zig") else void;
 
 test {
     _ = @import("core/code_buffer.zig");
@@ -51,6 +53,7 @@ test {
     if (opts.x86_64) _ = x86_64;
     if (opts.x86_64) _ = x86_64_builder;
     if (opts.aarch64) _ = aarch64_compiler;
+    if (opts.aarch64) _ = aarch64_builder;
     if (opts.x86_64) _ = x86_64_compiler;
     if (opts.x86_64) _ = x86;
     _ = riscv;

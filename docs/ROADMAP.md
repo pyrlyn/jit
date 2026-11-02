@@ -1,6 +1,27 @@
-# Roadmap (plan only, no code yet)
+# Roadmap
 
 This is the single roadmap index. Detailed plans live in the linked sections.
+
+## Current state (main)
+
+Done and merged: x86-64 and AArch64 assemblers (AsmJit test parity, SIMD SSE..AVX2 and NEON
+basics), safety layer and dual RW/RX mapping, stable C ABI (`include/pyrlyn_jit.h`) with C, C++,
+Rust and Zig examples, CMake adapter, x86-64 Builder, linear-scan register allocator
+(milestones 1–2), x86-64 Compiler (steps 1–3, simplified), x86-32 and RV64IM base backends,
+GP/vector/AArch64 encoder tables generated from LLVM `.td` files, CI.
+
+## Remaining, by priority
+
+Order: Builder -> Compiler -> register allocator -> x86-64 operands -> other architectures.
+
+1. Builder: AArch64 builder, SIMD forms, generated `inst(mnemonic, ...)` path, generic `BuilderT(Arch)`.
+2. Compiler: shifts and division, stack-passed arguments, immediate/memory folding, AArch64
+   lowering, SSA with block parameters.
+3. Register allocator: live-range splitting, lifetime holes, edge move resolution, spill
+   weights, two-address hints; optional graph coloring.
+4. x86-64 operands: 8/16/32-bit sizes, RIP-relative with labels, imm64 fallbacks, more forms
+   (movzx/movsx, cmovcc, setcc, div/idiv, ...), AVX-512/AVX10.
+5. x86-32 and RISC-V beyond the base step; MIPS and others only if needed.
 
 | Topic | Detailed plan |
 |---|---|
@@ -23,12 +44,12 @@ coloring. Each layer is generic over the target with comptime parameters, like `
 
 ## 1. Builder
 
-**Status (feat/builder): x86-64 implemented** in `src/x86_64/builder.zig`
+**Status: x86-64 implemented (merged)** in `src/x86_64/builder.zig`
 (`pyrlyn_jit.x86_64_builder.Builder`): index-linked node list (inst/label/align/embed/comment),
 cursor insertion and removal, all typed x86-64 emitters, byte-identical serialization through
 any `AssemblerT(opts)` (validation and hooks unchanged), passes `removeDeadCode`,
 `removeJumpsToNext`, `shortenBranches` (iterative relaxation, rel8 forward and backward), and a
-text formatter. Not yet: AArch64 builder, the generated `inst(mnemonic, ...)` path and SIMD forms,
+text formatter. AArch64: `src/aarch64/builder.zig` (`pyrlyn_jit.aarch64_builder.Builder`), one `Instr` variant per Assembler emitter (`b.emit(.add, .{ .x0, .x1, .x2 })`), byte-identical serialization, `removeDeadCode` and `removeJumpsToNext`. Not yet: the generated `inst(mnemonic, ...)` path and SIMD forms,
 a generic `BuilderT(Arch)`.
 
 Goal: emit instructions into a node list instead of bytes, run passes over it, then serialize
@@ -62,15 +83,14 @@ Estimate: ~2 weeks.
 
 ## 2. Compiler
 
-**Status (feat/compiler, x86-64): steps 1–3 done, simplified.** `src/core/ir.zig` (`pyrlyn_jit.ir`):
+**Status (x86-64, merged): steps 1–3 done, simplified.** `src/core/ir.zig` (`pyrlyn_jit.ir`):
 i64 IR with mutable vregs (not SSA/block params), text parser, verifier, printer, reference
 interpreter. `src/x86_64/compiler.zig` (`pyrlyn_jit.x86_64_compiler`): regalloc
 (`core/regalloc.zig`) -> Builder -> passes -> Assembler; host C ABI (SysV/Win64 shadow space),
 calls to absolute addresses, only-used callee-saved registers in prolog/epilog, spill slots.
 Tested by execution under Rosetta (fib, calls, memory, forced spills) and a differential fuzz
-vs the interpreter. This branch carries copies of `builder.zig` and `regalloc.zig` from
-feat/builder and feat/regalloc (uncommitted dependency). Not yet: shifts/div, stack-passed
-args, immediate/memory folding. AArch64 lowering: `src/aarch64/compiler.zig` (`pyrlyn_jit.aarch64_compiler`), AAPCS64, up to 8 params/args, same IR and allocator, executed natively and fuzzed vs the interpreter.
+vs the interpreter. Shifts (`shl/shr/sar`, count in rcx) and signed division (`sdiv/srem` via `cqo; idiv`) are supported. Stack-passed parameters and call arguments (up to 16) are supported. Immediate (block-local `const`, imm32) and spilled-operand memory folding are done.
+AArch64 lowering: `src/aarch64/compiler.zig` (`pyrlyn_jit.aarch64_compiler`), AAPCS64, up to 8 params/args, shifts (`lslv/lsrv/asrv`) and `sdiv`/`srem` (`sdiv` + `msub`), same IR and allocator, executed natively and fuzzed vs the interpreter.
 
 Goal: compile a minimal IR to machine code through the Builder.
 
@@ -109,7 +129,7 @@ Estimate: 3–4 weeks for x86-64, +1–2 weeks AArch64.
 
 ## 3. Register allocator
 
-**Status (feat/regalloc): milestone 1 + call clobbers + fixed registers** in
+**Status (merged): milestone 1 + call clobbers + fixed registers** in
 `src/core/regalloc.zig` (`pyrlyn_jit.regalloc`): arch-agnostic (register masks), bitset liveness
 over the CFG, one interval per vreg, linear scan with furthest-end spilling and spill-slot
 reuse, callee-saved-only for call-crossing values, pre-colored vregs, and an interference
