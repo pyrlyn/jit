@@ -1,16 +1,34 @@
-//! RISC-V RV64IM Assembler (TODO-ARCHES.md §2, base step). Fixed 32-bit little-endian words,
+//! RISC-V RV64IMA Assembler (TODO-ARCHES.md §2, base step). Fixed 32-bit little-endian words,
 //! direct emission into a CodeBuffer like the other backends. Labels use the new
 //! `rv_b12` (conditional branches, ±4 KiB) and `rv_j20` (jal, ±1 MiB) fixups.
 //!
 //! Covered: RV64I integer ops (R/I/W forms), loads/stores, lui/auipc, jal/jalr, branches,
 //! M extension (mul/div/rem + W forms), pseudo-instructions `li` (any 64-bit constant,
 //! lui/addiw/slli/addi chains), `mv`, `nop`, `ret`, `j`, `callAbs`, and an RV64 prolog/epilog.
-//! Not yet: A (atomics), F/D, C (compressed), RV32, far branches (auipc+jalr pairs).
+//! A extension (RV64A): `lr`/`sc` and all AMOs for .w/.d with aq/rl ordering bits, `fence`.
+//! Not yet: F/D, C (compressed), RV32, far branches (auipc+jalr pairs).
 const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const CodeBuffer = core.CodeBuffer;
 pub const Label = core.Label;
 pub const Error = core.Error || error{InvalidOperand};
+
+/// Atomic operand width: `.w` (32-bit, sign-extended result) or `.d` (64-bit).
+pub const Width = enum(u3) { w = 2, d = 3 };
+/// Memory ordering bits of A-extension instructions.
+pub const Order = enum(u2) { none = 0, rl = 1, aq = 2, aqrl = 3 };
+/// AMO operations (funct5).
+pub const Amo = enum(u5) {
+    add = 0b00000,
+    swap = 0b00001,
+    xor = 0b00100,
+    @"or" = 0b01000,
+    @"and" = 0b01100,
+    min = 0b10000,
+    max = 0b10100,
+    minu = 0b11000,
+    maxu = 0b11100,
+};
 
 /// x0..x31 with ABI names.
 pub const X = enum(u5) {
@@ -260,6 +278,24 @@ pub fn AssemblerT(comptime opts: Options) type {
         pub fn remu(a: Self, rd: X, rs1: X, rs2: X) Error!void {
             return a.rType(1, rs2, rs1, 7, rd, 0x33);
         }
+        // ---- A extension (opcode 0x2F, funct7 = funct5 << 2 | aq << 1 | rl) ------------
+        /// `amo<op>.<w|d><.aq|.rl> rd, rs2, (rs1)`: rd = old [rs1]; [rs1] = op(old, rs2).
+        pub fn amo(a: Self, op: Amo, w: Width, ord: Order, rd: X, rs2: X, rs1: X) Error!void {
+            return a.rType(@as(u32, @backingInt(op)) << 2 | @backingInt(ord), rs2, rs1, @backingInt(w), rd, 0x2F);
+        }
+        /// `lr.<w|d> rd, (rs1)`: load-reserved.
+        pub fn lr(a: Self, w: Width, ord: Order, rd: X, rs1: X) Error!void {
+            return a.rType(0b00010 << 2 | @as(u32, @backingInt(ord)), .zero, rs1, @backingInt(w), rd, 0x2F);
+        }
+        /// `sc.<w|d> rd, rs2, (rs1)`: store-conditional, rd = 0 on success.
+        pub fn sc(a: Self, w: Width, ord: Order, rd: X, rs2: X, rs1: X) Error!void {
+            return a.rType(0b00011 << 2 | @as(u32, @backingInt(ord)), rs2, rs1, @backingInt(w), rd, 0x2F);
+        }
+        /// `fence pred, succ` (4-bit iorw sets; `fence rw, rw` = `fence(0b0011, 0b0011)`).
+        pub fn fence(a: Self, pred: u4, succ: u4) Error!void {
+            return a.word(@as(u32, pred) << 24 | @as(u32, succ) << 20 | 0x0F);
+        }
+
         pub fn mulw(a: Self, rd: X, rs1: X, rs2: X) Error!void {
             return a.rType(1, rs2, rs1, 0, rd, 0x3B);
         }
@@ -350,6 +386,21 @@ test "riscv: encodings (RISC-V spec / GNU as reference values)" {
     try a.mv(.s0, .sp);
     const want = [_]u32{ 0x00150513, 0x00b50533, 0x40b50533, 0x02b50533, 0x12345537, 0x00813503, 0x00113423, 0x00008067, 0x00351513, 0x43f55513, 0xfff5051b, 0x00000013, 0x00010413 };
     for (want, words(&cb)) |w, g| try t.expectEqual(w, g);
+}
+
+test "riscv: A extension and fence (spec reference values)" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler.init(&cb);
+    try a.lr(.d, .none, .a0, .a1); // lr.d a0, (a1)
+    try a.sc(.d, .none, .a2, .a3, .a1); // sc.d a2, a3, (a1)
+    try a.amo(.add, .w, .none, .a0, .a1, .a2); // amoadd.w a0, a1, (a2)
+    try a.amo(.swap, .d, .aqrl, .t0, .t1, .t2); // amoswap.d.aqrl t0, t1, (t2)
+    try a.lr(.w, .aq, .a0, .a1); // lr.w.aq a0, (a1)
+    try a.amo(.maxu, .d, .rl, .a0, .a1, .a2); // amomaxu.d.rl a0, a1, (a2)
+    try a.fence(0b0011, 0b0011); // fence rw, rw
+    const want = [_]u32{ 0x1005B52F, 0x18D5B62F, 0x00B6252F, 0x0E63B2AF, 0x1405A52F, 0xE2B6352F, 0x0330000F };
+    for (want, 0..) |w, i| try t.expectEqual(w, std.mem.readInt(u32, cb.code()[4 * i ..][0..4], .little));
 }
 
 test "riscv: branches and jal with labels (forward fixups and backward)" {
