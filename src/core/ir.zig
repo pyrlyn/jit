@@ -10,9 +10,9 @@
 //!   func <name> <params>
 //!   <label>:
 //!     vD = const <int>          vD = copy vA
-//!     vD = add|sub|mul|and|or|xor vA vB
+//!     vD = add|sub|mul|and|or|xor|shl|shr|sar|sdiv|srem vA vB
 //!     vD = load vA <disp>       store vA <disp> vB         (64-bit memory at vA+disp)
-//!     vD = call <addr> vA ...   (up to 6 args, C calling convention)
+//!     vD = call <addr> vA ...   (up to 16 args, C calling convention)
 //!     br <label>                cbr <cond> vA vB <then> <else>
 //!     ret vA
 //!
@@ -25,7 +25,11 @@
 const std = @import("std");
 
 pub const VReg = u32;
-pub const Arith = enum { add, sub, mul, @"and", @"or", xor };
+/// Maximum call arguments and function parameters (extra ones are passed on the stack).
+pub const max_args = 16;
+/// `shl/shr/sar` mask the count to 6 bits; `sdiv/srem` truncate toward zero and are
+/// undefined (trap in generated code) for a zero divisor or `minInt(i64) / -1`.
+pub const Arith = enum { add, sub, mul, @"and", @"or", xor, shl, shr, sar, sdiv, srem };
 pub const CondCode = enum { eq, ne, lt, le, gt, ge, ult, ule, ugt, uge };
 
 pub const Op = union(enum) {
@@ -56,7 +60,7 @@ pub const Op = union(enum) {
         };
     }
     /// Writes used vregs into `buf`, returns the slice.
-    pub fn uses(o: Op, buf: *[8]VReg) []const VReg {
+    pub fn uses(o: Op, buf: *[max_args]VReg) []const VReg {
         return switch (o) {
             .@"const", .br => buf[0..0],
             .copy => |x| blk: {
@@ -141,7 +145,7 @@ pub const Func = struct {
     pub fn emit(f: *Func, block: u32, op: Op) !void {
         try f.blocks.items[block].ops.append(f.alloc(), op);
         if (op.def()) |d| f.num_vregs = @max(f.num_vregs, d + 1);
-        var buf: [8]VReg = undefined;
+        var buf: [max_args]VReg = undefined;
         for (op.uses(&buf)) |u| f.num_vregs = @max(f.num_vregs, u + 1);
     }
 
@@ -158,22 +162,22 @@ pub const Func = struct {
                 switch (o) {
                     .br => |tg| if (tg >= nb or f.blocks.items[tg].params.len != 0) return if (tg >= nb) error.BadBlock else error.ArgCountMismatch,
                     .cbr => |c| if (c.then >= nb or c.@"else" >= nb) return error.BadBlock else if (f.blocks.items[c.then].params.len != 0 or f.blocks.items[c.@"else"].params.len != 0) return error.ArgCountMismatch,
-                    .call => |c| if (c.args.len > 6) return error.TooManyArgs,
+                    .call => |c| if (c.args.len > max_args) return error.TooManyArgs,
                     .bra => |c| {
                         if (c.target >= nb) return error.BadBlock;
-                        if (c.args.len > 8) return error.TooManyArgs;
+                        if (c.args.len > max_args) return error.TooManyArgs;
                         if (c.args.len != f.blocks.items[c.target].params.len) return error.ArgCountMismatch;
                     },
                     .cbra => |c| {
                         if (c.then >= nb or c.@"else" >= nb) return error.BadBlock;
-                        if (2 + c.then_args.len + c.else_args.len > 8) return error.TooManyArgs;
+                        if (2 + c.then_args.len + c.else_args.len > max_args) return error.TooManyArgs;
                         if (c.then_args.len != f.blocks.items[c.then].params.len or
                             c.else_args.len != f.blocks.items[c.@"else"].params.len) return error.ArgCountMismatch;
                     },
 
                     else => {},
                 }
-                var buf: [8]VReg = undefined;
+                var buf: [max_args]VReg = undefined;
                 for (o.uses(&buf)) |u| if (u >= f.num_vregs) return error.BadVReg;
                 if (o.def()) |d| if (d >= f.num_vregs) return error.BadVReg;
             }
@@ -465,7 +469,7 @@ pub fn interpret(f: *const Func, args: []const i64, max_steps: usize) !i64 {
 }
 
 fn assignParams(regs: []i64, params: []const VReg, args: []const VReg) void {
-    var tmp: [8]i64 = undefined;
+    var tmp: [max_args]i64 = undefined;
     for (args, 0..) |a, i| tmp[i] = regs[a];
     for (params, 0..) |p, i| regs[p] = tmp[i];
 }
@@ -478,6 +482,12 @@ pub fn arith(op: Arith, a: i64, b: i64) i64 {
         .@"and" => a & b,
         .@"or" => a | b,
         .xor => a ^ b,
+        .shl => @bitCast(@as(u64, @bitCast(a)) << @intCast(b & 63)),
+        .shr => @bitCast(@as(u64, @bitCast(a)) >> @intCast(b & 63)),
+        .sar => a >> @intCast(b & 63),
+        // Undefined cases (b == 0, minInt / -1) return 0 here; callers must avoid them.
+        .sdiv => if (b == 0 or (a == std.math.minInt(i64) and b == -1)) 0 else @divTrunc(a, b),
+        .srem => if (b == 0 or (a == std.math.minInt(i64) and b == -1)) 0 else @rem(a, b),
     };
 }
 pub fn cond(c: CondCode, a: i64, b: i64) bool {
