@@ -10,12 +10,16 @@
 //! compares, int<->fp conversions, fmv between register files, s<->d conversion.
 //! Far control flow: `callFar`/`jFar`/`la` (auipc pairs, ±2 GiB, fixup `rv_pcrel_pair`) and
 //! `bFar` (inverted branch over `jal`, ±1 MiB).
-//! C extension subset (explicit `c*` emitters: c.nop/addi/addiw/li/slli/mv/add/jr/ret/ldsp/sdsp).
+//! C extension (explicit `c*` emitters): CI/CR (c.nop/addi/addiw/li/lui/addi16sp/slli/mv/add/jr/
+//! jalr/ret/ebreak), stack-relative (c.lwsp/swsp/ldsp/sdsp), CIW c.addi4spn, CL/CS on x8..x15
+//! (c.lw/sw/ld/sd), CB (c.srli/srai/andi, c.beqz/bnez with label fixup `rv_cb9`), CA
+//! (c.sub/xor/or/and/subw/addw), CJ (c.j, RV32 c.jal; fixup `rv_cj12`).
+//! Auto-compress: `AssemblerT(.{ .compress = true })` makes the regular emitters pick the
+//! 16-bit form when one encodes the same instruction (label branches stay 32-bit).
 //! RV32 mode: `AssemblerT(.{ .xlen = .rv32 })` (comptime). Shift amounts are limited to 0..31,
 //! RV64-only instructions (W forms, ld/sd/lwu, .d atomics, fcvt l/lu, fmv.x.d/fmv.d.x,
 //! c.addiw/c.ldsp/c.sdsp) are compile errors, `li` uses lui+addi, and prolog/epilog use
 //! 4-byte sw/lw slots (ILP32). `c.lwsp`/`c.swsp` are available in both modes.
-//! Not yet: rest of C (compressed branches, c.ld/c.sd with x8..x15).
 const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const CodeBuffer = core.CodeBuffer;
@@ -94,7 +98,12 @@ fn fitsI12(v: i64) bool {
 /// Base integer register width.
 pub const Xlen = enum { rv32, rv64 };
 
-pub const Options = struct { validate: bool = true, xlen: Xlen = .rv64 };
+pub const Options = struct {
+    validate: bool = true,
+    xlen: Xlen = .rv64,
+    /// Emit 16-bit C forms from the regular emitters where possible.
+    compress: bool = false,
+};
 
 /// f0..f31 (floating-point registers; ABI names ft0.., fa0.. are f0.., f10..).
 pub const F = enum(u5) {
@@ -248,6 +257,137 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.half(0b111 << 13 | (o >> 3 & 7) << 10 | (o >> 6 & 7) << 7 | @as(u16, @intCast(rs2.n())) << 2 | 0b10);
         }
 
+        /// 3-bit register field of x8..x15 (s0, s1, a0..a5).
+        fn creg(r: X) Error!u16 {
+            const v = r.n();
+            if (v < 8 or v > 15) return error.InvalidOperand;
+            return @intCast(v - 8);
+        }
+        fn isC(r: X) bool {
+            return r.n() >= 8 and r.n() <= 15;
+        }
+        /// `c.lui rd, imm` (rd != zero/sp, imm6 nonzero; rd = sext(imm) << 12).
+        pub fn cLui(a: Self, rd: X, imm: i64) Error!void {
+            if (rd == .zero or rd == .sp or imm == 0) return error.InvalidOperand;
+            return a.ci(0b011, rd, try imm6(imm), 0b01);
+        }
+        /// `c.addi16sp imm` (multiple of 16, -512..496, nonzero).
+        pub fn cAddi16sp(a: Self, imm: i64) Error!void {
+            if (imm == 0 or @mod(imm, 16) != 0 or imm < -512 or imm > 496) return error.InvalidOperand;
+            const v: u16 = @truncate(@as(u64, @bitCast(imm)));
+            return a.half(0b011 << 13 | (v >> 9 & 1) << 12 | 2 << 7 | (v >> 4 & 1) << 6 | (v >> 6 & 1) << 5 | (v >> 7 & 3) << 3 | (v >> 5 & 1) << 2 | 0b01);
+        }
+        /// `c.addi4spn rd', sp, imm` (multiple of 4, 4..1020).
+        pub fn cAddi4spn(a: Self, rd: X, imm: u32) Error!void {
+            if (imm == 0 or imm % 4 != 0 or imm > 1020) return error.InvalidOperand;
+            const v: u16 = @intCast(imm);
+            return a.half((v >> 4 & 3) << 11 | (v >> 6 & 0xF) << 7 | (v >> 2 & 1) << 6 | (v >> 3 & 1) << 5 | try creg(rd) << 2);
+        }
+        fn clcs(a: Self, f3: u16, r: X, off: u32, base: X, comptime dbl: bool) Error!void {
+            const lim: u32 = if (dbl) 248 else 124;
+            if (off % (if (dbl) 8 else 4) != 0 or off > lim) return error.InvalidOperand;
+            const o: u16 = @intCast(off);
+            const lo: u16 = if (dbl) (o >> 6 & 3) << 5 else (o >> 2 & 1) << 6 | (o >> 6 & 1) << 5;
+            return a.half(f3 << 13 | (o >> 3 & 7) << 10 | try creg(base) << 7 | lo | try creg(r) << 2);
+        }
+        /// `c.lw rd', off(rs1')` (off multiple of 4, 0..124).
+        pub fn cLw(a: Self, rd: X, off: u32, rs1: X) Error!void {
+            return a.clcs(0b010, rd, off, rs1, false);
+        }
+        /// `c.sw rs2', off(rs1')`.
+        pub fn cSw(a: Self, rs2: X, off: u32, rs1: X) Error!void {
+            return a.clcs(0b110, rs2, off, rs1, false);
+        }
+        /// `c.ld rd', off(rs1')` (RV64; off multiple of 8, 0..248).
+        pub fn cLd(a: Self, rd: X, off: u32, rs1: X) Error!void {
+            comptime need64("cLd");
+            return a.clcs(0b011, rd, off, rs1, true);
+        }
+        /// `c.sd rs2', off(rs1')` (RV64).
+        pub fn cSd(a: Self, rs2: X, off: u32, rs1: X) Error!void {
+            comptime need64("cSd");
+            return a.clcs(0b111, rs2, off, rs1, true);
+        }
+        fn cb(a: Self, f2: u16, rd: X, imm: u16) Error!void {
+            return a.half(0b100 << 13 | (imm >> 5 & 1) << 12 | f2 << 10 | try creg(rd) << 7 | (imm & 0x1F) << 2 | 0b01);
+        }
+        /// `c.srli rd', shamt` (1..63; RV32 1..31).
+        pub fn cSrli(a: Self, rd: X, shamt: u32) Error!void {
+            if (shamt == 0 or shamt > max_shamt) return error.InvalidOperand;
+            return a.cb(0b00, rd, @intCast(shamt));
+        }
+        /// `c.srai rd', shamt`.
+        pub fn cSrai(a: Self, rd: X, shamt: u32) Error!void {
+            if (shamt == 0 or shamt > max_shamt) return error.InvalidOperand;
+            return a.cb(0b01, rd, @intCast(shamt));
+        }
+        /// `c.andi rd', imm` (-32..31).
+        pub fn cAndi(a: Self, rd: X, imm: i64) Error!void {
+            return a.cb(0b10, rd, try imm6(imm));
+        }
+        fn ca(a: Self, hi: u16, rd: X, f2: u16, rs2: X) Error!void {
+            return a.half(hi << 10 | try creg(rd) << 7 | f2 << 5 | try creg(rs2) << 2 | 0b01);
+        }
+        /// `c.sub/xor/or/and rd', rs2'` (rd' = rd' op rs2').
+        pub fn cSub(a: Self, rd: X, rs2: X) Error!void {
+            return a.ca(0b100011, rd, 0b00, rs2);
+        }
+        pub fn cXor(a: Self, rd: X, rs2: X) Error!void {
+            return a.ca(0b100011, rd, 0b01, rs2);
+        }
+        pub fn cOr(a: Self, rd: X, rs2: X) Error!void {
+            return a.ca(0b100011, rd, 0b10, rs2);
+        }
+        pub fn cAnd(a: Self, rd: X, rs2: X) Error!void {
+            return a.ca(0b100011, rd, 0b11, rs2);
+        }
+        /// `c.subw/c.addw rd', rs2'` (RV64).
+        pub fn cSubw(a: Self, rd: X, rs2: X) Error!void {
+            comptime need64("cSubw");
+            return a.ca(0b100111, rd, 0b00, rs2);
+        }
+        pub fn cAddw(a: Self, rd: X, rs2: X) Error!void {
+            comptime need64("cAddw");
+            return a.ca(0b100111, rd, 0b01, rs2);
+        }
+        /// `c.jalr rs1` (rs1 != zero; links ra).
+        pub fn cJalr(a: Self, rs1: X) Error!void {
+            if (rs1 == .zero) return error.InvalidOperand;
+            return a.half(0b1001 << 12 | @as(u16, @intCast(rs1.n())) << 7 | 0b10);
+        }
+        pub fn cEbreak(a: Self) Error!void {
+            return a.half(0x9002);
+        }
+        fn cBranchTo(a: Self, h: u16, comptime kind: core.FixupKind, l: Label) Error!void {
+            if (!a.buf.isValidLabel(l)) return error.InvalidLabel;
+            const at = a.buf.offset();
+            if (a.buf.labelOffset(l)) |target| {
+                const d: i64 = @as(i64, target) - at;
+                const lim: i64 = if (kind == .rv_cb9) 1 << 8 else 1 << 11;
+                if (d < -lim or d >= lim) return error.DisplacementOutOfRange;
+                return a.half(if (kind == .rv_cb9) core.rvPatchCB(h, d) else core.rvPatchCJ(h, d));
+            }
+            try a.half(h);
+            try a.buf.addFixup(.{ .at = at, .base = at, .label = l.id, .kind = kind });
+        }
+        /// `c.beqz rs1', label` (±256 B).
+        pub fn cBeqz(a: Self, rs1: X, l: Label) Error!void {
+            return a.cBranchTo(0b110 << 13 | try creg(rs1) << 7 | 0b01, .rv_cb9, l);
+        }
+        /// `c.bnez rs1', label` (±256 B).
+        pub fn cBnez(a: Self, rs1: X, l: Label) Error!void {
+            return a.cBranchTo(0b111 << 13 | try creg(rs1) << 7 | 0b01, .rv_cb9, l);
+        }
+        /// `c.j label` (±2 KiB).
+        pub fn cJ(a: Self, l: Label) Error!void {
+            return a.cBranchTo(0b101 << 13 | 0b01, .rv_cj12, l);
+        }
+        /// `c.jal label` (RV32 only; links ra, ±2 KiB).
+        pub fn cJal(a: Self, l: Label) Error!void {
+            if (is64) @compileError("cJal is RV32-only (the encoding is c.addiw on RV64)");
+            return a.cBranchTo(0b001 << 13 | 0b01, .rv_cj12, l);
+        }
+
         fn word(a: Self, w: u32) Error!void {
             try a.buf.ensure(4);
             a.buf.put32(w);
@@ -255,6 +395,30 @@ pub fn AssemblerT(comptime opts: Options) type {
         fn imm12(v: i64) Error!u32 {
             if (opts.validate and !fitsI12(v)) return error.InvalidOperand;
             return @as(u32, @truncate(@as(u64, @bitCast(v)))) & 0xFFF;
+        }
+
+        /// Auto-compress helpers: null = no 16-bit form, use the 32-bit encoding.
+        fn tryCompressAddi(a: Self, rd: X, rs1: X, imm: i64) ?Error!void {
+            if (rd == .zero) return if (rs1 == .zero and imm == 0) a.cNop() else null;
+            if (rs1 == .zero and imm >= -32 and imm <= 31) return a.cLi(rd, imm);
+            if (imm == 0) return if (rs1 != .zero) a.cMv(rd, rs1) else null;
+            if (rd == rs1 and imm >= -32 and imm <= 31) return a.cAddi(rd, imm);
+            if (rd == .sp and rs1 == .sp and @mod(imm, 16) == 0 and imm >= -512 and imm <= 496) return a.cAddi16sp(imm);
+            if (rs1 == .sp and isC(rd) and imm > 0 and imm <= 1020 and @mod(imm, 4) == 0) return a.cAddi4spn(rd, @intCast(imm));
+            return null;
+        }
+        fn tryCompressMem(a: Self, r: X, off: i64, base: X, comptime size: u32, comptime store: bool) ?Error!void {
+            if (off < 0 or @mod(off, size) != 0) return null;
+            const o: u32 = @intCast(@min(off, 1 << 20));
+            if (base == .sp and (store or r != .zero) and o <= 63 * size) {
+                if (size == 8) return if (store) a.cSdsp(r, o) else a.cLdsp(r, o);
+                return if (store) a.cSwsp(r, o) else a.cLwsp(r, o);
+            }
+            if (isC(base) and isC(r) and o <= 31 * size) {
+                if (size == 8) return if (store) a.cSd(r, o, base) else a.cLd(r, o, base);
+                return if (store) a.cSw(r, o, base) else a.cLw(r, o, base);
+            }
+            return null;
         }
 
         // ---- raw formats ----
@@ -271,9 +435,11 @@ pub fn AssemblerT(comptime opts: Options) type {
 
         // ---- RV64I ----
         pub fn add(a: Self, rd: X, rs1: X, rs2: X) Error!void {
+            if (opts.compress) if (rd != .zero and rd == rs1 and rs2 != .zero) return a.cAdd(rd, rs2) else if (rd != .zero and rs1 == .zero and rs2 != .zero) return a.cMv(rd, rs2) else if (rd != .zero and rd == rs2 and rs1 != .zero) return a.cAdd(rd, rs1);
             return a.rType(0, rs2, rs1, 0, rd, 0x33);
         }
         pub fn sub(a: Self, rd: X, rs1: X, rs2: X) Error!void {
+            if (opts.compress) if (rd == rs1 and isC(rd) and isC(rs2)) return a.cSub(rd, rs2);
             return a.rType(0x20, rs2, rs1, 0, rd, 0x33);
         }
         pub fn sll(a: Self, rd: X, rs1: X, rs2: X) Error!void {
@@ -286,6 +452,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.rType(0, rs2, rs1, 3, rd, 0x33);
         }
         pub fn xor(a: Self, rd: X, rs1: X, rs2: X) Error!void {
+            if (opts.compress) if (isC(rd) and isC(rs1) and isC(rs2) and (rd == rs1 or rd == rs2)) return a.cXor(rd, if (rd == rs1) rs2 else rs1);
             return a.rType(0, rs2, rs1, 4, rd, 0x33);
         }
         pub fn srl(a: Self, rd: X, rs1: X, rs2: X) Error!void {
@@ -295,20 +462,25 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.rType(0x20, rs2, rs1, 5, rd, 0x33);
         }
         pub fn @"or"(a: Self, rd: X, rs1: X, rs2: X) Error!void {
+            if (opts.compress) if (isC(rd) and isC(rs1) and isC(rs2) and (rd == rs1 or rd == rs2)) return a.cOr(rd, if (rd == rs1) rs2 else rs1);
             return a.rType(0, rs2, rs1, 6, rd, 0x33);
         }
         pub fn @"and"(a: Self, rd: X, rs1: X, rs2: X) Error!void {
+            if (opts.compress) if (isC(rd) and isC(rs1) and isC(rs2) and (rd == rs1 or rd == rs2)) return a.cAnd(rd, if (rd == rs1) rs2 else rs1);
             return a.rType(0, rs2, rs1, 7, rd, 0x33);
         }
         pub fn addw(a: Self, rd: X, rs1: X, rs2: X) Error!void {
             comptime need64("addw");
+            if (opts.compress) if (isC(rd) and isC(rs1) and isC(rs2) and (rd == rs1 or rd == rs2)) return a.cAddw(rd, if (rd == rs1) rs2 else rs1);
             return a.rType(0, rs2, rs1, 0, rd, 0x3B);
         }
         pub fn subw(a: Self, rd: X, rs1: X, rs2: X) Error!void {
             comptime need64("subw");
+            if (opts.compress) if (rd == rs1 and isC(rd) and isC(rs2)) return a.cSubw(rd, rs2);
             return a.rType(0x20, rs2, rs1, 0, rd, 0x3B);
         }
         pub fn addi(a: Self, rd: X, rs1: X, imm: i64) Error!void {
+            if (opts.compress) if (a.tryCompressAddi(rd, rs1, imm)) |r| return r;
             return a.iType(imm, rs1, 0, rd, 0x13);
         }
         pub fn slti(a: Self, rd: X, rs1: X, imm: i64) Error!void {
@@ -324,10 +496,12 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.iType(imm, rs1, 6, rd, 0x13);
         }
         pub fn andi(a: Self, rd: X, rs1: X, imm: i64) Error!void {
+            if (opts.compress) if (rd == rs1 and isC(rd) and imm >= -32 and imm <= 31) return a.cAndi(rd, imm);
             return a.iType(imm, rs1, 7, rd, 0x13);
         }
         pub fn addiw(a: Self, rd: X, rs1: X, imm: i64) Error!void {
             comptime need64("addiw");
+            if (opts.compress) if (rd == rs1 and rd != .zero and imm >= -32 and imm <= 31) return a.cAddiw(rd, imm);
             return a.iType(imm, rs1, 0, rd, 0x1B);
         }
         fn shiftImm(a: Self, rd: X, rs1: X, shamt: u32, f3: u32, hi: u32) Error!void {
@@ -335,15 +509,19 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.word(hi << 26 | shamt << 20 | rs1.n() << 15 | f3 << 12 | rd.n() << 7 | 0x13);
         }
         pub fn slli(a: Self, rd: X, rs1: X, shamt: u32) Error!void {
+            if (opts.compress) if (rd == rs1 and rd != .zero and shamt != 0 and shamt <= max_shamt) return a.cSlli(rd, @intCast(shamt));
             return a.shiftImm(rd, rs1, shamt, 1, 0);
         }
         pub fn srli(a: Self, rd: X, rs1: X, shamt: u32) Error!void {
+            if (opts.compress) if (rd == rs1 and isC(rd) and shamt != 0 and shamt <= max_shamt) return a.cSrli(rd, shamt);
             return a.shiftImm(rd, rs1, shamt, 5, 0);
         }
         pub fn srai(a: Self, rd: X, rs1: X, shamt: u32) Error!void {
+            if (opts.compress) if (rd == rs1 and isC(rd) and shamt != 0 and shamt <= max_shamt) return a.cSrai(rd, shamt);
             return a.shiftImm(rd, rs1, shamt, 5, 0x10);
         }
         pub fn lui(a: Self, rd: X, imm20: u32) Error!void {
+            if (opts.compress) if (rd != .zero and rd != .sp and imm20 != 0 and (imm20 < 32 or imm20 >= 0xFFFE0)) return a.cLui(rd, @as(i64, @as(i20, @bitCast(@as(u20, @intCast(imm20))))));
             if (opts.validate and imm20 > 0xFFFFF) return error.InvalidOperand;
             return a.word(imm20 << 12 | rd.n() << 7 | 0x37);
         }
@@ -359,10 +537,12 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.iType(off, rs1, 1, rd, 0x03);
         }
         pub fn lw(a: Self, rd: X, off: i64, rs1: X) Error!void {
+            if (opts.compress) if (a.tryCompressMem(rd, off, rs1, 4, false)) |r| return r;
             return a.iType(off, rs1, 2, rd, 0x03);
         }
         pub fn ld(a: Self, rd: X, off: i64, rs1: X) Error!void {
             comptime need64("ld");
+            if (opts.compress) if (a.tryCompressMem(rd, off, rs1, 8, false)) |r| return r;
             return a.iType(off, rs1, 3, rd, 0x03);
         }
         pub fn lbu(a: Self, rd: X, off: i64, rs1: X) Error!void {
@@ -382,13 +562,16 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.sType(off, rs2, rs1, 1);
         }
         pub fn sw(a: Self, rs2: X, off: i64, rs1: X) Error!void {
+            if (opts.compress) if (a.tryCompressMem(rs2, off, rs1, 4, true)) |r| return r;
             return a.sType(off, rs2, rs1, 2);
         }
         pub fn sd(a: Self, rs2: X, off: i64, rs1: X) Error!void {
             comptime need64("sd");
+            if (opts.compress) if (a.tryCompressMem(rs2, off, rs1, 8, true)) |r| return r;
             return a.sType(off, rs2, rs1, 3);
         }
         pub fn jalr(a: Self, rd: X, off: i64, rs1: X) Error!void {
+            if (opts.compress) if (off == 0 and rs1 != .zero and (rd == .zero or rd == .ra)) return if (rd == .zero) a.cJr(rs1) else a.cJalr(rs1);
             return a.iType(off, rs1, 0, rd, 0x67);
         }
         /// `jal rd, label` (±1 MiB).
@@ -652,6 +835,8 @@ pub fn AssemblerT(comptime opts: Options) type {
 pub const Assembler = AssemblerT(.{});
 /// RV32 (ILP32) assembler.
 pub const Assembler32 = AssemblerT(.{ .xlen = .rv32 });
+/// RV64GC assembler that auto-compresses.
+pub const AssemblerC = AssemblerT(.{ .compress = true });
 
 // ---- tests ------------------------------------------------------------------------------
 const t = std.testing;
@@ -938,4 +1123,161 @@ test "riscv: RV32 prolog/epilog use 4-byte slots" {
     for (want, w[0..want.len]) |e, g| try t.expectEqual(e, g);
     try t.expectEqual(@as(u32, 0x00c12083), w[w.len - 3]); // lw ra, 12(sp)
     try t.expectEqual(@as(u32, 0x00008067), w[w.len - 1]); // ret
+}
+
+fn halves(cb: *const CodeBuffer) []align(1) const u16 {
+    return std.mem.bytesAsSlice(u16, cb.code());
+}
+
+test "riscv: C extension CL/CS/CB/CA/CIW forms (GNU as reference values)" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler.init(&cb);
+    try a.cLw(.a0, 0, .a1); // 4188
+    try a.cSw(.a0, 0, .a1); // c188
+    try a.cLd(.a0, 0, .a1); // 6188
+    try a.cSd(.a0, 0, .a1); // e188
+    try a.cLd(.a0, 8, .a1); // 6588
+    try a.cSub(.a0, .a1); // 8d0d
+    try a.cXor(.a0, .a1); // 8d2d
+    try a.cOr(.a0, .a1); // 8d4d
+    try a.cAnd(.a0, .a1); // 8d6d
+    try a.cSubw(.a0, .a1); // 9d0d
+    try a.cAddw(.a0, .a1); // 9d2d
+    try a.cSrli(.a0, 1); // 8105
+    try a.cSrai(.a0, 1); // 8505
+    try a.cAndi(.a0, 1); // 8905
+    try a.cLui(.a0, 1); // 6505
+    try a.cAddi16sp(-64); // 7139
+    try a.cAddi4spn(.s0, 16); // 0800
+    try a.cAddi4spn(.a0, 16); // 0808
+    try a.cJalr(.a0); // 9502
+    try a.cEbreak(); // 9002
+    const want = [_]u16{ 0x4188, 0xC188, 0x6188, 0xE188, 0x6588, 0x8D0D, 0x8D2D, 0x8D4D, 0x8D6D, 0x9D0D, 0x9D2D, 0x8105, 0x8505, 0x8905, 0x6505, 0x7139, 0x0800, 0x0808, 0x9502, 0x9002 };
+    for (want, halves(&cb)) |w, g| try t.expectEqual(w, g);
+    try t.expectEqual(want.len * 2, cb.code().len);
+    try t.expectError(error.InvalidOperand, a.cLw(.a0, 0, .sp)); // base not x8..x15
+    try t.expectError(error.InvalidOperand, a.cLw(.t0, 0, .a1));
+    try t.expectError(error.InvalidOperand, a.cLw(.a0, 2, .a1));
+    try t.expectError(error.InvalidOperand, a.cLd(.a0, 256, .a1));
+    try t.expectError(error.InvalidOperand, a.cAddi16sp(8));
+    try t.expectError(error.InvalidOperand, a.cLui(.sp, 1));
+}
+
+/// Decodes the target offset of a CB / CJ parcel (inverse of rvPatchCB / rvPatchCJ).
+fn cOff(h: u16, comptime cj: bool) i64 {
+    const v: u32 = h;
+    var o: u32 = undefined;
+    var bits: u5 = undefined;
+    if (cj) {
+        o = (v >> 12 & 1) << 11 | (v >> 11 & 1) << 4 | (v >> 9 & 3) << 8 | (v >> 8 & 1) << 10 | (v >> 7 & 1) << 6 | (v >> 6 & 1) << 7 | (v >> 3 & 7) << 1 | (v >> 2 & 1) << 5;
+        bits = 12;
+    } else {
+        o = (v >> 12 & 1) << 8 | (v >> 10 & 3) << 3 | (v >> 5 & 3) << 6 | (v >> 3 & 3) << 1 | (v >> 2 & 1) << 5;
+        bits = 9;
+    }
+    const sx: i64 = o;
+    return if (o >> (bits - 1) != 0) sx - (@as(i64, 1) << bits) else sx;
+}
+
+test "riscv: compressed branches and jumps (labels, fixups, round-trip)" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler.init(&cb);
+    const here = try a.newLabel();
+    try a.bind(here);
+    try a.cJ(here); // a001
+    try a.cBeqz(.a0, here); // -2
+    try a.cBnez(.a0, here); // -4
+    try t.expectEqual(@as(u16, 0xA001), halves(&cb)[0]);
+    try t.expectEqual(@as(u16, 0xC101), halves(&cb)[1] & 0xE383);
+    try t.expectEqual(@as(i64, -2), cOff(halves(&cb)[1], false));
+    try t.expectEqual(@as(i64, -4), cOff(halves(&cb)[2], false));
+    // Every even offset in range, forward (fixup) and backward (resolved at emit).
+    var d: i64 = -2048;
+    while (d < 2048) : (d += 2) {
+        try t.expectEqual(d, cOff(core.rvPatchCJ(0xA001, d), true));
+        if (d >= -256 and d < 256) try t.expectEqual(d, cOff(core.rvPatchCB(0xC101, d), false));
+    }
+    cb.reset();
+    const fwd = try a.newLabel();
+    try a.cBnez(.s1, fwd);
+    try a.cJ(fwd);
+    for (0..100) |_| try a.cNop();
+    try a.bind(fwd);
+    try cb.finalize();
+    try t.expectEqual(@as(i64, 204), cOff(halves(&cb)[0], false));
+    try t.expectEqual(@as(i64, 202), cOff(halves(&cb)[1], true));
+    // Out of range.
+    cb.reset();
+    const far = try a.newLabel();
+    try a.cBeqz(.a0, far);
+    for (0..200) |_| try a.cNop();
+    try a.bind(far);
+    try t.expectError(error.DisplacementOutOfRange, cb.finalize());
+    try t.expectError(error.InvalidOperand, a.cBeqz(.t0, far));
+}
+
+test "riscv: RV32 c.jal" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler32.init(&cb);
+    const l = try a.newLabel();
+    try a.bind(l);
+    try a.cJal(l); // 2001
+    try t.expectEqual(@as(u16, 0x2001), halves(&cb)[0]);
+}
+
+test "riscv: auto-compress picks 16-bit forms only when equivalent" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = AssemblerC.init(&cb);
+    try a.addi(.sp, .sp, -16); // c.addi sp,-16: 1141
+    try a.sd(.ra, 8, .sp); // c.sdsp: e406
+    try a.addi(.s0, .sp, 16); // c.addi4spn: 0800
+    try a.mv(.a0, .a1); // c.mv: 852e
+    try a.li(.a0, 1); // c.li: 4505
+    try a.add(.a0, .a0, .a1); // c.add: 952e
+    try a.sub(.a0, .a0, .a1); // c.sub: 8d0d
+    try a.ld(.a0, 8, .a1); // c.ld: 6588
+    try a.lw(.a0, 0, .a1); // c.lw: 4188
+    try a.ld(.ra, 8, .sp); // c.ldsp: 60a2
+    try a.addi(.sp, .sp, -64); // c.addi16sp: 7139
+    try a.nop(); // c.nop: 0001
+    try a.ret(); // c.ret: 8082
+    const want = [_]u16{ 0x1141, 0xE406, 0x0800, 0x852E, 0x4505, 0x952E, 0x8D0D, 0x6588, 0x4188, 0x60A2, 0x7139, 0x0001, 0x8082 };
+    for (want, halves(&cb)) |w, g| try t.expectEqual(w, g);
+    try t.expectEqual(want.len * 2, cb.code().len);
+    // No 16-bit form: stays 32-bit (same words as the plain assembler).
+    cb.reset();
+    try a.addi(.a0, .a1, 100);
+    try a.sub(.a0, .a1, .a2);
+    try a.ld(.t0, 8, .a1);
+    try a.ld(.a0, 4, .a1); // misaligned for c.ld
+    try a.addi(.a0, .a0, 0x7FF);
+    try t.expectEqual(@as(usize, 20), cb.code().len);
+    var cb2 = CodeBuffer.init(t.allocator);
+    defer cb2.deinit();
+    const p = Assembler.init(&cb2);
+    try p.addi(.a0, .a1, 100);
+    try p.sub(.a0, .a1, .a2);
+    try p.ld(.t0, 8, .a1);
+    try p.ld(.a0, 4, .a1);
+    try p.addi(.a0, .a0, 0x7FF);
+    try t.expectEqualSlices(u8, cb2.code(), cb.code());
+}
+
+test "riscv: RV32 auto-compress (c.lwsp/c.swsp, c.lw, ILP32 prolog stays valid)" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = AssemblerT(.{ .xlen = .rv32, .compress = true }).init(&cb);
+    try a.sw(.ra, 12, .sp); // c.swsp: c606
+    try a.lw(.ra, 12, .sp); // c.lwsp: 40b2
+    try a.lw(.a0, 0, .a1); // c.lw: 4188
+    try a.slli(.a0, .a0, 31); // c.slli a0,31: 057e
+    const want = [_]u16{ 0xC606, 0x40B2, 0x4188, 0x057E };
+    for (want, halves(&cb)) |w, g| try t.expectEqual(w, g);
+    try a.slli(.a0, .a1, 3); // rd != rs1: 32-bit
+    try t.expectEqual(@as(usize, 12), cb.code().len);
+    _ = try a.prolog(&.{.s1}, 0);
 }
