@@ -77,6 +77,7 @@ byte-exact suite (no RISC-V-capable assembler on this machine), qemu execution.
   movzx/movsx/movsxd, cmovcc, setcc, xchg, bt*, cqo, ...) through `Assembler.inst(...)`,
   byte-exact against LLVM.
 - Typed wrappers: `setcc`, `cmovcc`, `movzx(.byte|.word)`, `movsx(.byte|.word|.dword)`.
+- imm64 helpers (item 3): `aluRI64`, `cmpRI64`, `imulRRI64` use the imm32 form when the value fits i32, otherwise load it into a caller-provided temp register.
 
 ### Remaining (items 1, 2 and 7 below are covered by the generic path above; kept for reference)
 1. Operand sizes 8/16/32: `0x66` prefix for 16-bit, no REX.W for 32-bit (implicitly zero-extends),

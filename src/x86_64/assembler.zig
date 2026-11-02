@@ -816,6 +816,32 @@ pub fn AssemblerT(comptime opts: Options) type {
             if (!a.active()) return a.rawAluRI(op, dst, imm);
             return a.emit(.alu_ri, .{ .alu = op, .r0 = dst, .imm = imm }, rawAluRI, .{ op, dst, imm });
         }
+        // ---- 64-bit immediate helpers ------------------------------------------------
+        // x86-64 ALU/imul/cmp take imm32 sign-extended to 64 bits. These pick the imm form when
+        // `imm` fits i32 and otherwise load it into the caller-provided `tmp` (`movRI` picks the
+        // shortest mov) and use the register form. `tmp` must differ from `dst`.
+        // Note: 0x80000000 fits u32 but not i32, so it goes through `tmp`.
+
+        /// `op dst, imm64` (add/or/adc/sbb/and/sub/xor/cmp).
+        pub fn aluRI64(a: Self, comptime op: Alu, dst: Gp, imm: i64, tmp: Gp) Error!void {
+            if (std.math.cast(i32, imm)) |i| return a.aluRI(op, dst, i);
+            if (tmp == dst) return error.InvalidOperand;
+            try a.movRI(tmp, imm);
+            return a.aluRR(op, dst, tmp);
+        }
+        /// `cmp dst, imm64`.
+        pub fn cmpRI64(a: Self, dst: Gp, imm: i64, tmp: Gp) Error!void {
+            return a.aluRI64(.cmp, dst, imm, tmp);
+        }
+        /// `dst = src * imm64`.
+        pub fn imulRRI64(a: Self, dst: Gp, src: Gp, imm: i64, tmp: Gp) Error!void {
+            if (std.math.cast(i32, imm)) |i| return a.imulRRI(dst, src, i);
+            if (tmp == dst) return error.InvalidOperand;
+            try a.movRI(tmp, imm);
+            if (dst != src) try a.movRR(dst, src);
+            return a.imulRR(dst, tmp);
+        }
+
         pub inline fn testRR(a: Self, d: Gp, s: Gp) Error!void {
             if (!a.active()) return a.rawTestRR(d, s);
             return a.emit(.test_rr, .{ .r0 = d, .r1 = s }, rawTestRR, .{ d, s });
@@ -952,6 +978,28 @@ test "setcc, cmovcc, movzx, movsx" {
         try a.setcc(c, .rdx);
         try a.cmovcc(c, .rdx, .rbx);
     }
+}
+
+test "imm64 helpers" {
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    const a = AssemblerT(.{ .validate = true }).init(&cb);
+    try a.aluRI64(.add, .rax, 5, .r11); // 48 83 C0 05
+    try a.aluRI64(.add, .rax, 0x80000000, .r11); // 41 BB 00 00 00 80 (mov r11d); 4C 01 D8
+    try a.cmpRI64(.rcx, -1, .r11); // 48 83 F9 FF
+    try a.imulRRI64(.rdx, .rcx, 1 << 40, .r11); // 49 BB <imm64>; 48 89 CA; 49 0F AF D3
+    try std.testing.expectEqualSlices(u8, &.{
+        0x48, 0x83, 0xC0, 0x05,
+        0x41, 0xBB, 0x00, 0x00,
+        0x00, 0x80, 0x4C, 0x01,
+        0xD8, 0x48, 0x83, 0xF9,
+        0xFF, 0x49, 0xBB, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x48,
+        0x89, 0xCA, 0x49, 0x0F,
+        0xAF, 0xD3,
+    }, cb.code());
+    try std.testing.expectError(error.InvalidOperand, a.aluRI64(.add, .rax, 1 << 40, .rax));
 }
 
 test "mov" {
