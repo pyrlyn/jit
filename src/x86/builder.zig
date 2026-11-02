@@ -10,6 +10,13 @@ const Mem = x86.Mem;
 const Xmm = x86.Xmm;
 const Alu = x86.Alu;
 const Cond = x86.Cond;
+const gp = @import("../x86_64/gp.zig");
+
+/// Shift kind for `shiftRCl` (count in cl, masked to 5 bits by the CPU).
+pub const Shift = enum { shl, shr, sar };
+fn r32(r: Gp) gp.Reg {
+    return gp.r32(@fromBackingInt(@as(u4, @backingInt(r))));
+}
 
 pub const Error = x86.Error || generic.Error;
 pub const Label = generic.Label;
@@ -56,9 +63,15 @@ pub const Instr = union(enum) {
     movssMR: struct { Mem, Xmm },
     cvtsi2sd: struct { Xmm, Gp },
     cvttsd2si: struct { Gp, Xmm },
+    /// `shl/shr/sar r32, cl`.
+    shiftRCl: struct { Shift, Gp },
+    /// `idiv r32` (edx:eax / r).
+    idivR: struct { Gp },
+    /// `cdq` (sign-extend eax into edx:eax).
+    cdq,
 
     /// The ALU emitters take the operation at comptime.
-    pub const special: []const []const u8 = &.{ "aluRR", "aluRM", "aluMR", "aluRI" };
+    pub const special: []const []const u8 = &.{ "aluRR", "aluRM", "aluMR", "aluRI", "shiftRCl", "idivR", "cdq" };
     pub fn emitSpecial(a: anytype, i: Instr, _: []const core.Label) !void {
         switch (i) {
             .aluRR => |o| switch (o[0]) {
@@ -73,6 +86,11 @@ pub const Instr = union(enum) {
             .aluRI => |o| switch (o[0]) {
                 inline else => |op| try a.aluRI(op, o[1], o[2]),
             },
+            .shiftRCl => |o| switch (o[0]) {
+                inline else => |op| try a.inst(@field(gp.Mnemonic, @tagName(op)), .{ r32(o[1]), gp.r8(.rcx) }),
+            },
+            .idivR => |o| try a.inst(.idiv, .{r32(o[0])}),
+            .cdq => try a.inst(.cdq, .{}),
             else => unreachable,
         }
     }
