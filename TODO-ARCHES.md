@@ -38,7 +38,7 @@ byte-exact suite (no RISC-V-capable assembler on this machine), qemu execution.
 - `li` materialization (lui + addi, + slli chains for 64-bit), `auipc`+`jalr` for far calls.
 - Labels: B-type ±4 KiB, J-type ±1 MiB, fixup kinds `rv_b12`, `rv_j20`, `rv_auipc_pair`.
 - Validation: x0 as destination (writes discarded), immediate ranges, alignment with/without C.
-- Tests: byte-exact vs `clang -target riscv64`; execution under qemu-user (optional CI job).
+- Tests: byte-exact vs `clang -target riscv64`; execution under qemu-user (**done**: `zig build test-riscv64 -fqemu`, `src/riscv_exec_tests.zig`, CI ubuntu job).
 - Estimate: 2–3 weeks for RV64IMAFD+C subset.
 
 ## 3. MIPS (MIPS32/MIPS64 r2, later r6)
