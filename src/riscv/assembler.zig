@@ -284,11 +284,76 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.half((v >> 4 & 3) << 11 | (v >> 6 & 0xF) << 7 | (v >> 2 & 1) << 6 | (v >> 3 & 1) << 5 | try creg(rd) << 2);
         }
         fn clcs(a: Self, f3: u16, r: X, off: u32, base: X, comptime dbl: bool) Error!void {
+            return a.clcsN(f3, r.n(), off, base, dbl);
+        }
+        fn clcsN(a: Self, f3: u16, rn: u32, off: u32, base: X, comptime dbl: bool) Error!void {
             const lim: u32 = if (dbl) 248 else 124;
             if (off % (if (dbl) 8 else 4) != 0 or off > lim) return error.InvalidOperand;
+            if (rn < 8 or rn > 15) return error.InvalidOperand;
             const o: u16 = @intCast(off);
             const lo: u16 = if (dbl) (o >> 6 & 3) << 5 else (o >> 2 & 1) << 6 | (o >> 6 & 1) << 5;
-            return a.half(f3 << 13 | (o >> 3 & 7) << 10 | try creg(base) << 7 | lo | try creg(r) << 2);
+            return a.half(f3 << 13 | (o >> 3 & 7) << 10 | try creg(base) << 7 | lo | @as(u16, @intCast(rn - 8)) << 2);
+        }
+        // ---- compressed FP loads/stores (C + F/D) ----
+        /// `c.fld rd', off(rs1')` (f8..f15, off multiple of 8, 0..248).
+        pub fn cFld(a: Self, rd: F, off: u32, rs1: X) Error!void {
+            return a.clcsN(0b001, rd.n(), off, rs1, true);
+        }
+        /// `c.fsd rs2', off(rs1')`.
+        pub fn cFsd(a: Self, rs2: F, off: u32, rs1: X) Error!void {
+            return a.clcsN(0b101, rs2.n(), off, rs1, true);
+        }
+        /// `c.flw rd', off(rs1')` (RV32 only; off multiple of 4, 0..124).
+        pub fn cFlw(a: Self, rd: F, off: u32, rs1: X) Error!void {
+            if (is64) @compileError("cFlw is RV32-only (the encoding is c.ld on RV64)");
+            return a.clcsN(0b011, rd.n(), off, rs1, false);
+        }
+        /// `c.fsw rs2', off(rs1')` (RV32 only).
+        pub fn cFsw(a: Self, rs2: F, off: u32, rs1: X) Error!void {
+            if (is64) @compileError("cFsw is RV32-only (the encoding is c.sd on RV64)");
+            return a.clcsN(0b111, rs2.n(), off, rs1, false);
+        }
+        /// `c.fldsp rd, off(sp)` (off multiple of 8, 0..504).
+        pub fn cFldsp(a: Self, rd: F, off: u32) Error!void {
+            if (off % 8 != 0 or off > 504) return error.InvalidOperand;
+            const o: u16 = @intCast(off);
+            return a.half(0b001 << 13 | (o >> 5 & 1) << 12 | @as(u16, @intCast(rd.n())) << 7 | (o >> 3 & 3) << 5 | (o >> 6 & 7) << 2 | 0b10);
+        }
+        /// `c.fsdsp rs2, off(sp)` (off multiple of 8, 0..504).
+        pub fn cFsdsp(a: Self, rs2: F, off: u32) Error!void {
+            if (off % 8 != 0 or off > 504) return error.InvalidOperand;
+            const o: u16 = @intCast(off);
+            return a.half(0b101 << 13 | (o >> 3 & 7) << 10 | (o >> 6 & 7) << 7 | @as(u16, @intCast(rs2.n())) << 2 | 0b10);
+        }
+        /// `c.flwsp rd, off(sp)` (RV32 only; off multiple of 4, 0..252).
+        pub fn cFlwsp(a: Self, rd: F, off: u32) Error!void {
+            if (is64) @compileError("cFlwsp is RV32-only");
+            if (off % 4 != 0 or off > 252) return error.InvalidOperand;
+            const o: u16 = @intCast(off);
+            return a.half(0b011 << 13 | (o >> 5 & 1) << 12 | @as(u16, @intCast(rd.n())) << 7 | (o >> 2 & 7) << 4 | (o >> 6 & 3) << 2 | 0b10);
+        }
+        /// `c.fswsp rs2, off(sp)` (RV32 only).
+        pub fn cFswsp(a: Self, rs2: F, off: u32) Error!void {
+            if (is64) @compileError("cFswsp is RV32-only");
+            if (off % 4 != 0 or off > 252) return error.InvalidOperand;
+            const o: u16 = @intCast(off);
+            return a.half(0b111 << 13 | (o >> 2 & 0xF) << 9 | (o >> 6 & 3) << 7 | @as(u16, @intCast(rs2.n())) << 2 | 0b10);
+        }
+        fn tryCompressFMem(a: Self, fmt: Fmt, r: F, off: i64, base: X, comptime store: bool) ?Error!void {
+            const size: i64 = if (fmt == .d) 8 else 4;
+            if (fmt == .s and is64) return null; // RV64C has no c.flw/c.fsw
+            if (off < 0 or @mod(off, size) != 0) return null;
+            const o: u32 = @intCast(@min(off, 1 << 20));
+            const cr = r.n() >= 8 and r.n() <= 15;
+            if (fmt == .d) {
+                if (base == .sp and o <= 504) return if (store) a.cFsdsp(r, o) else a.cFldsp(r, o);
+                if (isC(base) and cr and o <= 248) return if (store) a.cFsd(r, o, base) else a.cFld(r, o, base);
+                return null;
+            }
+            if (is64) return null;
+            if (base == .sp and o <= 252) return if (store) a.cFswsp(r, o) else a.cFlwsp(r, o);
+            if (isC(base) and cr and o <= 124) return if (store) a.cFsw(r, o, base) else a.cFlw(r, o, base);
+            return null;
         }
         /// `c.lw rd', off(rs1')` (off multiple of 4, 0..124).
         pub fn cLw(a: Self, rd: X, off: u32, rs1: X) Error!void {
@@ -688,10 +753,12 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// `flw/fld rd, off(rs1)`.
         pub fn fload(a: Self, fmt: Fmt, rd: F, off: i64, rs1: X) Error!void {
+            if (opts.compress) if (a.tryCompressFMem(fmt, rd, off, rs1, false)) |r| return r;
             return a.word(try imm12(off) << 20 | rs1.n() << 15 | (@as(u32, @backingInt(fmt)) + 2) << 12 | rd.n() << 7 | 0x07);
         }
         /// `fsw/fsd rs2, off(rs1)`.
         pub fn fstore(a: Self, fmt: Fmt, rs2: F, off: i64, rs1: X) Error!void {
+            if (opts.compress) if (a.tryCompressFMem(fmt, rs2, off, rs1, true)) |r| return r;
             const v = try imm12(off);
             return a.word((v >> 5) << 25 | rs2.n() << 20 | rs1.n() << 15 | (@as(u32, @backingInt(fmt)) + 2) << 12 | (v & 0x1F) << 7 | 0x27);
         }

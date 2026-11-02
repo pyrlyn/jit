@@ -64,5 +64,6 @@ test {
     if (opts.x86_64) _ = x86;
     if (opts.x86_64) _ = x86_builder;
     _ = riscv;
+    _ = @import("riscv_tests.zig");
     if (opts.aarch64) _ = aarch64;
 }
