@@ -11,7 +11,11 @@
 //! Far control flow: `callFar`/`jFar`/`la` (auipc pairs, ±2 GiB, fixup `rv_pcrel_pair`) and
 //! `bFar` (inverted branch over `jal`, ±1 MiB).
 //! C extension subset (explicit `c*` emitters: c.nop/addi/addiw/li/slli/mv/add/jr/ret/ldsp/sdsp).
-//! Not yet: rest of C (compressed branches, c.ld/c.sd with x8..x15), RV32.
+//! RV32 mode: `AssemblerT(.{ .xlen = .rv32 })` (comptime). Shift amounts are limited to 0..31,
+//! RV64-only instructions (W forms, ld/sd/lwu, .d atomics, fcvt l/lu, fmv.x.d/fmv.d.x,
+//! c.addiw/c.ldsp/c.sdsp) are compile errors, `li` uses lui+addi, and prolog/epilog use
+//! 4-byte sw/lw slots (ILP32). `c.lwsp`/`c.swsp` are available in both modes.
+//! Not yet: rest of C (compressed branches, c.ld/c.sd with x8..x15).
 const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const CodeBuffer = core.CodeBuffer;
@@ -87,7 +91,10 @@ fn fitsI12(v: i64) bool {
     return v >= -2048 and v <= 2047;
 }
 
-pub const Options = struct { validate: bool = true };
+/// Base integer register width.
+pub const Xlen = enum { rv32, rv64 };
+
+pub const Options = struct { validate: bool = true, xlen: Xlen = .rv64 };
 
 /// f0..f31 (floating-point registers; ABI names ft0.., fa0.. are f0.., f10..).
 pub const F = enum(u5) {
@@ -140,6 +147,14 @@ pub fn AssemblerT(comptime opts: Options) type {
     return struct {
         const Self = @This();
         buf: *CodeBuffer,
+        pub const xlen = opts.xlen;
+        const is64 = opts.xlen == .rv64;
+        /// Register width in bytes (8 on RV64, 4 on RV32).
+        pub const xlen_bytes: u32 = if (is64) 8 else 4;
+        const max_shamt: u32 = if (is64) 63 else 31;
+        fn need64(comptime what: []const u8) void {
+            if (!is64) @compileError(what ++ " is RV64-only");
+        }
 
         pub fn init(buf: *CodeBuffer) Self {
             return .{ .buf = buf };
@@ -174,6 +189,7 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// `c.addiw rd, imm` (rd != zero, -32..31).
         pub fn cAddiw(a: Self, rd: X, imm: i64) Error!void {
+            comptime need64("cAddiw");
             if (rd == .zero) return error.InvalidOperand;
             return a.ci(0b001, rd, try imm6(imm), 0b01);
         }
@@ -184,7 +200,7 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// `c.slli rd, shamt` (rd != zero, 1..63).
         pub fn cSlli(a: Self, rd: X, shamt: u6) Error!void {
-            if (rd == .zero or shamt == 0) return error.InvalidOperand;
+            if (rd == .zero or shamt == 0 or shamt > max_shamt) return error.InvalidOperand;
             return a.ci(0b000, rd, shamt, 0b10);
         }
         /// `c.mv rd, rs2` (both != zero).
@@ -207,12 +223,26 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// `c.ldsp rd, off(sp)` (rd != zero, off multiple of 8, 0..504).
         pub fn cLdsp(a: Self, rd: X, off: u32) Error!void {
+            comptime need64("cLdsp");
             if (rd == .zero or off % 8 != 0 or off > 504) return error.InvalidOperand;
             const o: u16 = @intCast(off);
             return a.half(0b011 << 13 | (o >> 5 & 1) << 12 | @as(u16, @intCast(rd.n())) << 7 | (o >> 3 & 3) << 5 | (o >> 6 & 7) << 2 | 0b10);
         }
         /// `c.sdsp rs2, off(sp)` (off multiple of 8, 0..504).
+        /// `c.lwsp rd, off(sp)` (rd != zero, off multiple of 4, 0..252).
+        pub fn cLwsp(a: Self, rd: X, off: u32) Error!void {
+            if (rd == .zero or off % 4 != 0 or off > 252) return error.InvalidOperand;
+            const o: u16 = @intCast(off);
+            return a.half(0b010 << 13 | (o >> 5 & 1) << 12 | @as(u16, @intCast(rd.n())) << 7 | (o >> 2 & 7) << 4 | (o >> 6 & 3) << 2 | 0b10);
+        }
+        /// `c.swsp rs2, off(sp)` (off multiple of 4, 0..252).
+        pub fn cSwsp(a: Self, rs2: X, off: u32) Error!void {
+            if (off % 4 != 0 or off > 252) return error.InvalidOperand;
+            const o: u16 = @intCast(off);
+            return a.half(0b110 << 13 | (o >> 2 & 0xF) << 9 | (o >> 6 & 3) << 7 | @as(u16, @intCast(rs2.n())) << 2 | 0b10);
+        }
         pub fn cSdsp(a: Self, rs2: X, off: u32) Error!void {
+            comptime need64("cSdsp");
             if (off % 8 != 0 or off > 504) return error.InvalidOperand;
             const o: u16 = @intCast(off);
             return a.half(0b111 << 13 | (o >> 3 & 7) << 10 | (o >> 6 & 7) << 7 | @as(u16, @intCast(rs2.n())) << 2 | 0b10);
@@ -271,9 +301,11 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.rType(0, rs2, rs1, 7, rd, 0x33);
         }
         pub fn addw(a: Self, rd: X, rs1: X, rs2: X) Error!void {
+            comptime need64("addw");
             return a.rType(0, rs2, rs1, 0, rd, 0x3B);
         }
         pub fn subw(a: Self, rd: X, rs1: X, rs2: X) Error!void {
+            comptime need64("subw");
             return a.rType(0x20, rs2, rs1, 0, rd, 0x3B);
         }
         pub fn addi(a: Self, rd: X, rs1: X, imm: i64) Error!void {
@@ -295,10 +327,11 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.iType(imm, rs1, 7, rd, 0x13);
         }
         pub fn addiw(a: Self, rd: X, rs1: X, imm: i64) Error!void {
+            comptime need64("addiw");
             return a.iType(imm, rs1, 0, rd, 0x1B);
         }
         fn shiftImm(a: Self, rd: X, rs1: X, shamt: u32, f3: u32, hi: u32) Error!void {
-            if (shamt > 63) return error.InvalidOperand;
+            if (shamt > max_shamt) return error.InvalidOperand;
             return a.word(hi << 26 | shamt << 20 | rs1.n() << 15 | f3 << 12 | rd.n() << 7 | 0x13);
         }
         pub fn slli(a: Self, rd: X, rs1: X, shamt: u32) Error!void {
@@ -329,6 +362,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.iType(off, rs1, 2, rd, 0x03);
         }
         pub fn ld(a: Self, rd: X, off: i64, rs1: X) Error!void {
+            comptime need64("ld");
             return a.iType(off, rs1, 3, rd, 0x03);
         }
         pub fn lbu(a: Self, rd: X, off: i64, rs1: X) Error!void {
@@ -338,6 +372,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.iType(off, rs1, 5, rd, 0x03);
         }
         pub fn lwu(a: Self, rd: X, off: i64, rs1: X) Error!void {
+            comptime need64("lwu");
             return a.iType(off, rs1, 6, rd, 0x03);
         }
         pub fn sb(a: Self, rs2: X, off: i64, rs1: X) Error!void {
@@ -350,6 +385,7 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.sType(off, rs2, rs1, 2);
         }
         pub fn sd(a: Self, rs2: X, off: i64, rs1: X) Error!void {
+            comptime need64("sd");
             return a.sType(off, rs2, rs1, 3);
         }
         pub fn jalr(a: Self, rd: X, off: i64, rs1: X) Error!void {
@@ -445,14 +481,17 @@ pub fn AssemblerT(comptime opts: Options) type {
         // ---- A extension (opcode 0x2F, funct7 = funct5 << 2 | aq << 1 | rl) ------------
         /// `amo<op>.<w|d><.aq|.rl> rd, rs2, (rs1)`: rd = old [rs1]; [rs1] = op(old, rs2).
         pub fn amo(a: Self, op: Amo, w: Width, ord: Order, rd: X, rs2: X, rs1: X) Error!void {
+            if (!is64 and w == .d) return error.InvalidOperand;
             return a.rType(@as(u32, @backingInt(op)) << 2 | @backingInt(ord), rs2, rs1, @backingInt(w), rd, 0x2F);
         }
         /// `lr.<w|d> rd, (rs1)`: load-reserved.
         pub fn lr(a: Self, w: Width, ord: Order, rd: X, rs1: X) Error!void {
+            if (!is64 and w == .d) return error.InvalidOperand;
             return a.rType(0b00010 << 2 | @as(u32, @backingInt(ord)), .zero, rs1, @backingInt(w), rd, 0x2F);
         }
         /// `sc.<w|d> rd, rs2, (rs1)`: store-conditional, rd = 0 on success.
         pub fn sc(a: Self, w: Width, ord: Order, rd: X, rs2: X, rs1: X) Error!void {
+            if (!is64 and w == .d) return error.InvalidOperand;
             return a.rType(0b00011 << 2 | @as(u32, @backingInt(ord)), rs2, rs1, @backingInt(w), rd, 0x2F);
         }
         /// `fence pred, succ` (4-bit iorw sets; `fence rw, rw` = `fence(0b0011, 0b0011)`).
@@ -500,10 +539,12 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// `fcvt.<w|wu|l|lu>.<s|d> rd, rs1` (float -> integer).
         pub fn fcvtToInt(a: Self, k: IntKind, fmt: Fmt, rd: X, rs1: F, rm: Rm) Error!void {
+            if (!is64 and (k == .l or k == .lu)) return error.InvalidOperand;
             return a.fpR(0b11000, fmt, @backingInt(k), rs1.n(), @backingInt(rm), rd.n());
         }
         /// `fcvt.<s|d>.<w|wu|l|lu> rd, rs1` (integer -> float).
         pub fn fcvtFromInt(a: Self, k: IntKind, fmt: Fmt, rd: F, rs1: X, rm: Rm) Error!void {
+            if (!is64 and (k == .l or k == .lu)) return error.InvalidOperand;
             return a.fpR(0b11010, fmt, @backingInt(k), rs1.n(), @backingInt(rm), rd.n());
         }
         /// `fcvt.s.d` (to = .s) or `fcvt.d.s` (to = .d).
@@ -513,14 +554,17 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// `fmv.x.w/fmv.x.d rd, rs1` (raw bits float -> integer register).
         pub fn fmvToInt(a: Self, fmt: Fmt, rd: X, rs1: F) Error!void {
+            if (!is64 and fmt == .d) return error.InvalidOperand;
             return a.fpR(0b11100, fmt, 0, rs1.n(), 0, rd.n());
         }
         /// `fmv.w.x/fmv.d.x rd, rs1` (raw bits integer -> float register).
         pub fn fmvFromInt(a: Self, fmt: Fmt, rd: F, rs1: X) Error!void {
+            if (!is64 and fmt == .d) return error.InvalidOperand;
             return a.fpR(0b11110, fmt, 0, rs1.n(), 0, rd.n());
         }
 
         pub fn mulw(a: Self, rd: X, rs1: X, rs2: X) Error!void {
+            comptime need64("mulw");
             return a.rType(1, rs2, rs1, 0, rd, 0x3B);
         }
 
@@ -540,7 +584,17 @@ pub fn AssemblerT(comptime opts: Options) type {
         /// Loads any 64-bit constant (same strategy as LLVM's RISCVMatInt for the base ISA):
         /// 32-bit values: `lui` + `addiw` (or `addi` from zero); larger: materialize the upper
         /// part recursively, `slli`, then `addi` the low 12 bits.
+        /// RV32: `v` must fit in 32 bits (signed or unsigned); emits `lui` + `addi`.
         pub fn li(a: Self, rd: X, v: i64) Error!void {
+            if (!is64) {
+                if (v < std.math.minInt(i32) or v > std.math.maxInt(u32)) return error.InvalidOperand;
+                const v32: i64 = @as(i32, @bitCast(@as(u32, @truncate(@as(u64, @bitCast(v))))));
+                if (fitsI12(v32)) return a.addi(rd, .zero, v32);
+                const lo = @as(i64, @as(i12, @truncate(v32)));
+                try a.lui(rd, @truncate(@as(u64, @bitCast((v32 - lo) >> 12)) & 0xFFFFF));
+                if (lo != 0) try a.addi(rd, rd, lo);
+                return;
+            }
             if (fitsI12(v)) return a.addi(rd, .zero, v);
             if (v >= std.math.minInt(i32) and v <= std.math.maxInt(i32)) {
                 const lo = @as(i64, @as(i12, @truncate(v)));
@@ -549,6 +603,9 @@ pub fn AssemblerT(comptime opts: Options) type {
                 if (lo != 0) try a.addiw(rd, rd, lo);
                 return;
             }
+            return a.liWide(rd, v);
+        }
+        fn liWide(a: Self, rd: X, v: i64) Error!void {
             const lo = @as(i64, @as(i12, @truncate(v)));
             var hi = (v -% lo) >> 12;
             const tz: u6 = @intCast(@ctz(hi));
@@ -559,30 +616,42 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// `li t0, addr; jalr ra, 0(t0)`.
         pub fn callAbs(a: Self, addr: u64) Error!void {
+            if (!is64 and addr > std.math.maxInt(u32)) return error.InvalidOperand;
             try a.li(.t0, @bitCast(addr));
             try a.jalr(.ra, 0, .t0);
         }
-        /// `addi sp, sp, -n; sd ra, n-8(sp); sd s0, n-16(sp); addi s0, sp, n; sd <saved>...`,
-        /// n = 16-aligned frame (ra + s0 + saved + locals). Returns n.
+        /// Store/load one register-sized slot (`sd`/`ld` on RV64, `sw`/`lw` on RV32).
+        pub fn storeX(a: Self, rs2: X, off: i64, rs1: X) Error!void {
+            return a.sType(off, rs2, rs1, if (is64) 3 else 2);
+        }
+        pub fn loadX(a: Self, rd: X, off: i64, rs1: X) Error!void {
+            return a.iType(off, rs1, if (is64) 3 else 2, rd, 0x03);
+        }
+        /// `addi sp, sp, -n; s{d,w} ra, n-X(sp); s{d,w} s0, n-2X(sp); addi s0, sp, n; <saved>...`,
+        /// X = xlen_bytes, n = 16-aligned frame (ra + s0 + saved + locals). Returns n.
         pub fn prolog(a: Self, saved: []const X, locals: u32) Error!i32 {
-            const n: i32 = @intCast(std.mem.alignForward(u32, 16 + 8 * @as(u32, @intCast(saved.len)) + locals, 16));
+            const w: i32 = @intCast(xlen_bytes);
+            const n: i32 = @intCast(std.mem.alignForward(u32, 2 * xlen_bytes + xlen_bytes * @as(u32, @intCast(saved.len)) + locals, 16));
             try a.addi(.sp, .sp, -n);
-            try a.sd(.ra, n - 8, .sp);
-            try a.sd(.s0, n - 16, .sp);
-            for (saved, 0..) |r, i| try a.sd(r, n - 24 - 8 * @as(i32, @intCast(i)), .sp);
+            try a.storeX(.ra, n - w, .sp);
+            try a.storeX(.s0, n - 2 * w, .sp);
+            for (saved, 0..) |r, i| try a.storeX(r, n - 3 * w - w * @as(i32, @intCast(i)), .sp);
             try a.addi(.s0, .sp, n);
             return n;
         }
         pub fn epilog(a: Self, saved: []const X, n: i32) Error!void {
-            for (saved, 0..) |r, i| try a.ld(r, n - 24 - 8 * @as(i32, @intCast(i)), .sp);
-            try a.ld(.s0, n - 16, .sp);
-            try a.ld(.ra, n - 8, .sp);
+            const w: i32 = @intCast(xlen_bytes);
+            for (saved, 0..) |r, i| try a.loadX(r, n - 3 * w - w * @as(i32, @intCast(i)), .sp);
+            try a.loadX(.s0, n - 2 * w, .sp);
+            try a.loadX(.ra, n - w, .sp);
             try a.addi(.sp, .sp, n);
             try a.ret();
         }
     };
 }
 pub const Assembler = AssemblerT(.{});
+/// RV32 (ILP32) assembler.
+pub const Assembler32 = AssemblerT(.{ .xlen = .rv32 });
 
 // ---- tests ------------------------------------------------------------------------------
 const t = std.testing;
@@ -784,5 +853,89 @@ test "riscv: prolog/epilog shape" {
     try a.epilog(&.{.s1}, n);
     const w = words(&cb);
     try t.expectEqual(@as(u32, 0xfe010113), w[0]); // addi sp, sp, -32
+    try t.expectEqual(@as(u32, 0x00008067), w[w.len - 1]); // ret
+}
+
+test "riscv: RV32 mode (GNU as -march=rv32imafd reference values)" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler32.init(&cb);
+    try a.slli(.a0, .a0, 31); // 01f51513
+    try a.srai(.a0, .a0, 31); // 41f55513
+    try a.srli(.a0, .a0, 1); // 00155513
+    try a.lw(.a0, 4, .sp); // 00412503
+    try a.sw(.ra, 12, .sp); // 00112623
+    try a.amo(.add, .w, .none, .a0, .a1, .a2); // 00b6252f
+    try a.fmvToInt(.s, .a0, .f10); // e0050553
+    try a.cLwsp(.ra, 12); // 40b2
+    try a.cSwsp(.ra, 12); // c606
+    const want = [_]u32{ 0x01F51513, 0x41F55513, 0x00155513, 0x00412503, 0x00112623, 0x00B6252F, 0xE0050553 };
+    for (want, 0..) |w, i| try t.expectEqual(w, std.mem.readInt(u32, cb.code()[4 * i ..][0..4], .little));
+    try t.expectEqual(@as(u16, 0x40B2), std.mem.readInt(u16, cb.code()[28..30], .little));
+    try t.expectEqual(@as(u16, 0xC606), std.mem.readInt(u16, cb.code()[30..32], .little));
+    try t.expectError(error.InvalidOperand, a.slli(.a0, .a0, 32));
+    try t.expectError(error.InvalidOperand, a.srai(.a0, .a0, 32));
+    try t.expectError(error.InvalidOperand, a.cSlli(.a0, 32));
+    try t.expectError(error.InvalidOperand, a.amo(.add, .d, .none, .a0, .a1, .a2));
+    try t.expectError(error.InvalidOperand, a.lr(.d, .none, .a0, .a1));
+    try t.expectError(error.InvalidOperand, a.fcvtToInt(.l, .d, .a0, .f0, .dyn));
+    try t.expectError(error.InvalidOperand, a.fmvFromInt(.d, .f0, .a0));
+    try t.expectError(error.InvalidOperand, a.li(.a0, 0x1_0000_0000));
+    try t.expectError(error.InvalidOperand, a.li(.a0, -0x8000_0001));
+    try t.expectError(error.InvalidOperand, a.callAbs(0x1_0000_0000));
+    // RV64 accepts the same shift amount and still rejects 64.
+    var cb64 = CodeBuffer.init(t.allocator);
+    defer cb64.deinit();
+    try Assembler.init(&cb64).slli(.a0, .a0, 32);
+    try t.expectEqual(@as(u32, 0x02051513), words(&cb64)[0]);
+    try t.expect(!@hasDecl(Assembler32, "is64") and Assembler32.xlen == .rv32 and Assembler32.xlen_bytes == 4);
+}
+
+/// Tiny RV32 interpreter for the ops RV32 `li` emits (lui, addi).
+fn evalLi32(code: []align(1) const u32, rd: u5) u32 {
+    var x: [32]u32 = @splat(0);
+    for (code) |w| {
+        const d: u5 = @truncate(w >> 7);
+        const s1: u5 = @truncate(w >> 15);
+        switch (w & 0x7F) {
+            0x37 => x[d] = w & 0xFFFFF000,
+            0x13 => {
+                std.debug.assert((w >> 12) & 7 == 0);
+                x[d] = x[s1] +% @as(u32, @bitCast(@as(i32, @bitCast(w)) >> 20));
+            },
+            else => unreachable,
+        }
+        x[0] = 0;
+    }
+    return x[rd];
+}
+
+test "riscv: RV32 li (lui+addi, interpreter check, 20000 values)" {
+    var prng = std.Random.DefaultPrng.init(2);
+    const r = prng.random();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const edge = [_]i64{ 0, 1, -1, 2047, -2048, 2048, -2049, 0x7FF, 0x800, 0x7FFFF800, 0x7FFFFFFF, -0x80000000, 0x80000000, 0xFFFFFFFF, 0xFFFFF800 };
+    for (0..20000 + edge.len) |i| {
+        const v: i64 = if (i < edge.len) edge[i] else if (i % 2 == 0) r.int(i32) else r.int(u32);
+        cb.reset();
+        try Assembler32.init(&cb).li(.a0, v);
+        try t.expect(words(&cb).len <= 2);
+        try t.expectEqual(@as(u32, @truncate(@as(u64, @bitCast(v)))), evalLi32(words(&cb), @backingInt(X.a0)));
+    }
+}
+
+test "riscv: RV32 prolog/epilog use 4-byte slots" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler32.init(&cb);
+    const n = try a.prolog(&.{ .s1, .s2 }, 0);
+    try t.expectEqual(@as(i32, 16), n);
+    try a.epilog(&.{ .s1, .s2 }, n);
+    const w = words(&cb);
+    // addi sp,-16; sw ra,12(sp); sw s0,8(sp); sw s1,4(sp); sw s2,0(sp); addi s0,sp,16
+    const want = [_]u32{ 0xff010113, 0x00112623, 0x00812423, 0x00912223, 0x01212023, 0x01010413 };
+    for (want, w[0..want.len]) |e, g| try t.expectEqual(e, g);
+    try t.expectEqual(@as(u32, 0x00c12083), w[w.len - 3]); // lw ra, 12(sp)
     try t.expectEqual(@as(u32, 0x00008067), w[w.len - 1]); // ret
 }
