@@ -12,13 +12,15 @@
 //!     vD = const <int>          vD = copy vA
 //!     vD = add|sub|mul|and|or|xor|shl|shr|sar|sdiv|srem vA vB
 //!     vD = load vA <disp>       store vA <disp> vB         (64-bit memory at vA+disp)
-//!     vD = call <addr> vA ...   (up to 6 args, C calling convention)
+//!     vD = call <addr> vA ...   (up to 16 args, C calling convention)
 //!     br <label>                cbr <cond> vA vB <then> <else>
 //!     ret vA
 //!   conds: eq ne lt le gt ge ult ule ugt uge
 const std = @import("std");
 
 pub const VReg = u32;
+/// Maximum call arguments and function parameters (extra ones are passed on the stack).
+pub const max_args = 16;
 /// `shl/shr/sar` mask the count to 6 bits; `sdiv/srem` truncate toward zero and are
 /// undefined (trap in generated code) for a zero divisor or `minInt(i64) / -1`.
 pub const Arith = enum { add, sub, mul, @"and", @"or", xor, shl, shr, sar, sdiv, srem };
@@ -48,7 +50,7 @@ pub const Op = union(enum) {
         };
     }
     /// Writes used vregs into `buf`, returns the slice.
-    pub fn uses(o: Op, buf: *[8]VReg) []const VReg {
+    pub fn uses(o: Op, buf: *[max_args]VReg) []const VReg {
         return switch (o) {
             .@"const", .br => buf[0..0],
             .copy => |x| blk: {
@@ -120,7 +122,7 @@ pub const Func = struct {
     pub fn emit(f: *Func, block: u32, op: Op) !void {
         try f.blocks.items[block].ops.append(f.alloc(), op);
         if (op.def()) |d| f.num_vregs = @max(f.num_vregs, d + 1);
-        var buf: [8]VReg = undefined;
+        var buf: [max_args]VReg = undefined;
         for (op.uses(&buf)) |u| f.num_vregs = @max(f.num_vregs, u + 1);
     }
 
@@ -137,10 +139,10 @@ pub const Func = struct {
                 switch (o) {
                     .br => |tg| if (tg >= nb) return error.BadBlock,
                     .cbr => |c| if (c.then >= nb or c.@"else" >= nb) return error.BadBlock,
-                    .call => |c| if (c.args.len > 6) return error.TooManyArgs,
+                    .call => |c| if (c.args.len > max_args) return error.TooManyArgs,
                     else => {},
                 }
-                var buf: [8]VReg = undefined;
+                var buf: [max_args]VReg = undefined;
                 for (o.uses(&buf)) |u| if (u >= f.num_vregs) return error.BadVReg;
                 if (o.def()) |d| if (d >= f.num_vregs) return error.BadVReg;
             }
