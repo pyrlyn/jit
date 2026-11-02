@@ -65,6 +65,31 @@ pub inline fn ptrIdx(base: Gp, index: Gp, scale: Scale, disp: i32) Mem {
 }
 
 pub const Cond = enum(u4) { o, no, b, ae, e, ne, be, a, s, ns, p, np, l, ge, le, g };
+pub const ExtFrom = enum { byte, word };
+pub const SxFrom = enum { byte, word, dword };
+
+/// `set`/`cmov` + condition, using the LLVM mnemonic spelling of the generated table.
+fn ccMnemonic(comptime prefix: []const u8, comptime c: Cond) gp.Mnemonic {
+    const suffix = switch (c) {
+        .o => "o",
+        .no => "no",
+        .b => "b",
+        .ae => "nb",
+        .e => "z",
+        .ne => "nz",
+        .be => "be",
+        .a => "nbe",
+        .s => "s",
+        .ns => "ns",
+        .p => "p",
+        .np => "np",
+        .l => "l",
+        .ge => "nl",
+        .le => "le",
+        .g => "nle",
+    };
+    return @field(gp.Mnemonic, prefix ++ suffix);
+}
 
 /// Classic ALU group: `0x83/0x81 /digit` for imm forms, `op*8+1` (r/m,r), `op*8+3` (r,r/m).
 pub const Alu = enum(u3) { add = 0, @"or" = 1, adc = 2, sbb = 3, @"and" = 4, sub = 5, xor = 6, cmp = 7 };
@@ -433,6 +458,28 @@ pub fn AssemblerT(comptime opts: Options) type {
             if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = .gp, .ops = ops, .offset = start });
             try gp.emit(a.buf, mn, args);
             if (comptime @hasDecl(Hooks, "post")) h.post(.{ .id = .gp, .ops = ops, .offset = start, .bytes = a.buf.data[start..a.buf.len] });
+        }
+
+        // ---- typed wrappers over `inst` (condition codes, extension) -------------------
+        /// `setcc r8` (the low byte of `d`; spl/bpl/sil/dil get an empty REX).
+        pub fn setcc(a: Self, comptime c: Cond, d: Gp) (Error || gp.Error)!void {
+            return a.inst(comptime ccMnemonic("set", c), .{gp.r8(d)});
+        }
+        /// `cmovcc r64, r64`.
+        pub fn cmovcc(a: Self, comptime c: Cond, d: Gp, s: Gp) (Error || gp.Error)!void {
+            return a.inst(comptime ccMnemonic("cmov", c), .{ gp.r64(d), gp.r64(s) });
+        }
+        /// `movzx r32, r8/r16`: zero-extends into the full 64-bit register.
+        pub fn movzx(a: Self, comptime from: ExtFrom, d: Gp, s: Gp) (Error || gp.Error)!void {
+            return a.inst(.movzx, .{ gp.r32(d), if (from == .byte) gp.r8(s) else gp.r16(s) });
+        }
+        /// `movsx r64, r8/r16` or `movsxd r64, r32` (`from = .dword`).
+        pub fn movsx(a: Self, comptime from: SxFrom, d: Gp, s: Gp) (Error || gp.Error)!void {
+            return switch (from) {
+                .byte => a.inst(.movsx, .{ gp.r64(d), gp.r8(s) }),
+                .word => a.inst(.movsx, .{ gp.r64(d), gp.r16(s) }),
+                .dword => a.inst(.movsxd, .{ gp.r64(d), gp.r32(s) }),
+            };
         }
 
         /// Raw encoder + (validate mode) check of the emitted bytes against the AsmJit forms.
@@ -877,6 +924,34 @@ fn expectEnc(expected: []const u8, comptime f: anytype, args: anytype) !void {
     const a = Assembler.init(&cb);
     try @call(.auto, f, .{a} ++ args);
     try std.testing.expectEqualSlices(u8, expected, cb.code());
+}
+
+test "setcc, cmovcc, movzx, movsx" {
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    const a = AssemblerT(.{ .validate = true }).init(&cb);
+    try a.setcc(.e, .rax); // 0F 94 C0
+    try a.setcc(.l, .r10); // 41 0F 9C C2
+    try a.setcc(.ne, .rsi); // 40 0F 95 C6
+    try a.cmovcc(.l, .rax, .rcx); // 48 0F 4C C1
+    try a.cmovcc(.ae, .r8, .r9); // 4D 0F 43 C1
+    try a.movzx(.byte, .rax, .rcx); // 0F B6 C1
+    try a.movzx(.word, .rax, .rcx); // 0F B7 C1
+    try a.movsx(.byte, .rax, .rcx); // 48 0F BE C1
+    try a.movsx(.word, .rax, .rcx); // 48 0F BF C1
+    try a.movsx(.dword, .rax, .rcx); // 48 63 C1
+    try std.testing.expectEqualSlices(u8, &.{
+        0x0F, 0x94, 0xC0, 0x41, 0x0F, 0x9C, 0xC2, 0x40, 0x0F, 0x95, 0xC6,
+        0x48, 0x0F, 0x4C, 0xC1, 0x4D, 0x0F, 0x43, 0xC1, 0x0F, 0xB6, 0xC1,
+        0x0F, 0xB7, 0xC1, 0x48, 0x0F, 0xBE, 0xC1, 0x48, 0x0F, 0xBF, 0xC1,
+        0x48, 0x63, 0xC1,
+    }, cb.code());
+    // Every condition maps to an existing mnemonic.
+    inline for (0..16) |k| {
+        const c: Cond = @enumFromInt(k);
+        try a.setcc(c, .rdx);
+        try a.cmovcc(c, .rdx, .rbx);
+    }
 }
 
 test "mov" {
