@@ -9,7 +9,7 @@ const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const CodeBuffer = core.CodeBuffer;
 pub const Label = core.Label;
-pub const Error = core.Error || error{ InvalidOperand, InvalidLabel, UnsupportedCpuFeature, EncodingMismatch };
+pub const Error = core.Error || error{ InvalidOperand, InvalidLabel, UnsupportedCpuFeature, EncodingMismatch, InvalidImmediate };
 /// Generated from AsmJit's `db/isa_x86.json` (scripts/gen_isa_tables.py).
 pub const isa = @import("isa.zig");
 /// Host CPU feature detection.
@@ -21,6 +21,27 @@ pub const vec = @import("vec.zig");
 const safety = @import("../core/safety.zig");
 const build_opts = @import("pyrlyn_jit_options");
 pub const Options = safety.Options;
+
+/// Tagged small-integer layout for `movSmi`/`addSmi`/`cmpSmi`: `value << shift | tag`. With
+/// `shift <= 2` every i30 payload still fits imm32 (V8-style 31-bit SMIs use shift 1, tag 0).
+pub const Smi = struct {
+    shift: u2 = 1,
+    tag: u2 = 0,
+};
+/// Tagged encoding of `v` (comptime-checked layout: the tag must fit below the shift).
+pub fn smi(comptime layout: Smi, v: i30) i32 {
+    comptime if (layout.tag >= (@as(u3, 1) << layout.shift)) @compileError("Smi tag does not fit in shift bits");
+    return @intCast((@as(i64, v) << layout.shift) | layout.tag);
+}
+/// `v` as an i30 or `error.InvalidImmediate` (|v| outside -2^29 .. 2^29-1).
+pub fn checkI30(v: i64) error{InvalidImmediate}!i30 {
+    return std.math.cast(i30, v) orelse error.InvalidImmediate;
+}
+/// Portable cheap-constant class for compilers: fits in 30 bits (x86 imm32, AArch64 movz+movk,
+/// RISC-V lui+addi).
+pub fn fitsI30(v: i64) bool {
+    return std.math.cast(i30, v) != null;
+}
 
 /// Build-time feature gate from `-Dx86-features=sse4_2,avx2,...` (null: no gating). Names are
 /// `isa.Feature` tags, matched case-insensitively and ignoring `_` (`avx512f` = `AVX512_F`).
@@ -904,6 +925,42 @@ pub fn AssemblerT(comptime opts: Options) type {
             if (tmp == dst) return error.InvalidOperand;
             try a.movRI(tmp, imm);
             return a.aluRR(op, dst, tmp);
+        }
+        // ---- 30-bit immediates (TODO-ARCHES §7) --------------------------------------------
+        // A 30-bit value always fits imm32: signed values sign-extend from imm32 (or imm8),
+        // unsigned ones zero-extend through `mov r32` (5/6 bytes). No `movabs`, no temp register.
+        // `i30`/`u30` parameters make out-of-range constants a compile error; the `*Checked`
+        // variants take an i64 and return `error.InvalidImmediate` outside the range.
+
+        /// `dst = v` (sign-extended to 64 bits).
+        pub inline fn movI30(a: Self, dst: Gp, v: i30) Error!void {
+            return a.movRI(dst, v);
+        }
+        /// `dst = v` (zero-extended: `mov r32, imm32`).
+        pub inline fn movU30(a: Self, dst: Gp, v: u30) Error!void {
+            return a.movRI(dst, v);
+        }
+        /// `op dst, v` (imm8 when it fits, else imm32).
+        pub inline fn aluI30(a: Self, comptime op: Alu, dst: Gp, v: i30) Error!void {
+            return a.aluRI(op, dst, v);
+        }
+        pub fn movI30Checked(a: Self, dst: Gp, v: i64) Error!void {
+            return a.movI30(dst, try checkI30(v));
+        }
+        pub fn aluI30Checked(a: Self, comptime op: Alu, dst: Gp, v: i64) Error!void {
+            return a.aluI30(op, dst, try checkI30(v));
+        }
+        /// `dst = smi(v)`: a tagged small integer (`v << shift | tag`).
+        pub inline fn movSmi(a: Self, comptime layout: Smi, dst: Gp, v: i30) Error!void {
+            return a.movRI(dst, smi(layout, v));
+        }
+        /// `dst += v` on a tagged value (the delta is shifted, the tag is preserved).
+        pub inline fn addSmi(a: Self, comptime layout: Smi, dst: Gp, v: i30) Error!void {
+            return a.aluRI(.add, dst, @intCast(@as(i64, v) << layout.shift));
+        }
+        /// `cmp dst, smi(v)`.
+        pub inline fn cmpSmi(a: Self, comptime layout: Smi, dst: Gp, v: i30) Error!void {
+            return a.aluRI(.cmp, dst, @intCast(smi(layout, v)));
         }
         /// `cmp dst, imm64`.
         pub fn cmpRI64(a: Self, dst: Gp, imm: i64, tmp: Gp) Error!void {

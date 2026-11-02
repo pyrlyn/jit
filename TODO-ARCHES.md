@@ -170,6 +170,13 @@ imm64. "30-bit" values matter as a *range*: constants that fit in 30 bits (|v| <
 or < 2^30 unsigned), e.g. tagged small integers in JS/Lisp-style runtimes (31/30-bit SMIs),
 offsets into a heap below 1 GiB, or AArch64/RISC-V-compatible constant ranges in a shared IR.
 
+**Status: done.** `movI30`/`movU30`/`aluI30` (i30/u30 parameters: out-of-range constants are
+compile errors), `movI30Checked`/`aluI30Checked` (`error.InvalidImmediate`), `checkI30`,
+`fitsI30` (portable cheap-constant class), and tagged-int helpers `Smi` / `smi` / `movSmi` /
+`addSmi` / `cmpSmi` in `x86_64/assembler.zig`; tests in `src/imm30_tests.zig` (boundaries
+byte-exact vs llvm-mc, validation, execution). Note: for non-negative values `mov r64, v`
+uses the 5-byte `mov r32, imm32` (LLVM keeps `48 C7 /0` for `mov rax, imm`; same result).
+
 ### Current state
 - Any 30-bit value already fits imm32, so it is encoded as imm32 (or imm8 when it fits in i8).
 - `movRI` picks 5 B `mov r32, imm32` for non-negative values and 7 B `mov r/m64, imm32` for
