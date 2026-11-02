@@ -100,6 +100,16 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
+    // 32-bit x86 Compiler execution tests (x86-linux; runs natively on x86_64 Linux kernels).
+    const x86_32_mod = b.createModule(.{
+        .root_source_file = b.path("src/x86_32_tests.zig"),
+        .target = b.resolveTargetQuery(.{ .cpu_arch = .x86, .os_tag = .linux }),
+        .link_libc = true,
+        .optimize = optimize,
+    });
+    x86_32_mod.addOptions("pyrlyn_jit_options", opts);
+    b.step("test-x86-32", "Run the x86 (32-bit) Compiler execution tests as an x86-linux process").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = x86_32_mod })).step);
+
     // ---- C ABI library (include/pyrlyn_jit.h) + examples in C, C++, Rust, Zig ----------------
     const capi_mod = b.createModule(.{
         .root_source_file = b.path("src/c_api.zig"),
