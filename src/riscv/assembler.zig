@@ -1129,7 +1129,7 @@ fn halves(cb: *const CodeBuffer) []align(1) const u16 {
     return std.mem.bytesAsSlice(u16, cb.code());
 }
 
-test "riscv: C extension CL/CS/CB/CA/CIW forms (GNU as reference values)" {
+test "riscv: C extension CL/CS/CB/CA/CIW forms (llvm-mc reference values)" {
     var cb = CodeBuffer.init(t.allocator);
     defer cb.deinit();
     const a = Assembler.init(&cb);
@@ -1156,6 +1156,18 @@ test "riscv: C extension CL/CS/CB/CA/CIW forms (GNU as reference values)" {
     const want = [_]u16{ 0x4188, 0xC188, 0x6188, 0xE188, 0x6588, 0x8D0D, 0x8D2D, 0x8D4D, 0x8D6D, 0x9D0D, 0x9D2D, 0x8105, 0x8505, 0x8905, 0x6505, 0x7139, 0x0800, 0x0808, 0x9502, 0x9002 };
     for (want, halves(&cb)) |w, g| try t.expectEqual(w, g);
     try t.expectEqual(want.len * 2, cb.code().len);
+    // Range edges (llvm-mc 23 -triple=riscv64 -mattr=+c).
+    cb.reset();
+    try a.cAddi4spn(.a0, 1020); // 1fe8
+    try a.cAddi16sp(496); // 617d
+    try a.cAddi16sp(-512); // 7101
+    try a.cLd(.a5, 248, .a5); // 7ffc
+    try a.cSd(.a5, 248, .a5); // fffc
+    try a.cLw(.a5, 124, .a5); // 5ffc
+    try a.cSrli(.a0, 63); // 917d
+    try a.cLui(.a0, -32); // 7501
+    const edge = [_]u16{ 0x1FE8, 0x617D, 0x7101, 0x7FFC, 0xFFFC, 0x5FFC, 0x917D, 0x7501 };
+    for (edge, halves(&cb)) |w, g| try t.expectEqual(w, g);
     try t.expectError(error.InvalidOperand, a.cLw(.a0, 0, .sp)); // base not x8..x15
     try t.expectError(error.InvalidOperand, a.cLw(.t0, 0, .a1));
     try t.expectError(error.InvalidOperand, a.cLw(.a0, 2, .a1));
