@@ -22,7 +22,61 @@
 //! `verifySsa` checks single definitions; `lowerBlockParams` rewrites edges into copies
 //! (splitting `cbr` edges that carry arguments) so the compilers see plain mutable vregs.
 //!   conds: eq ne lt le gt ge ult ule ugt uge
+//!
+//! Typed values (f32/f64 scalars, 128-bit vectors v4i32/v2i64/v4f32/v2f64). Untyped ops work on
+//! i64; a vreg's type comes from its definition (`typeCheck` infers and checks them):
+//!   vD = fconst.<f32|f64> <float>          vD = <add|sub|mul|div|min|max|and|or|xor>.<type> vA vB
+//!   vD = fcmp.<f32|f64> <eq|ne|lt|le|gt|ge> vA vB   (i64 0/1; ordered, false on NaN except ne)
+//!   vD = cvt.<to>.<from> vA        (i64 <-> f32/f64, f32 <-> f64; float -> i64 truncates)
+//!   vD = splat.<vector> vA         vD = extract.<vector> vA <lane>   (lane scalar: i64/f32/f64)
+//!   vD = load.<type> vA <disp>     store.<type> vA <disp> vB
+//! `div`/`min`/`max` are float-only; `and`/`or`/`xor` integer-vector-only. Vector integer lanes
+//! wrap; `splat.v4i32` truncates the i64, `extract.v4i32` sign-extends.
 const std = @import("std");
+
+pub const Type = enum {
+    i64,
+    f32,
+    f64,
+    v4i32,
+    v2i64,
+    v4f32,
+    v2f64,
+    pub fn isFloat(tp: Type) bool {
+        return tp == .f32 or tp == .f64 or tp == .v4f32 or tp == .v2f64;
+    }
+    pub fn isVector(tp: Type) bool {
+        return @backingInt(tp) >= @backingInt(Type.v4i32);
+    }
+    /// Scalar type of one lane (`i64` for integer lanes).
+    pub fn lane(tp: Type) Type {
+        return switch (tp) {
+            .v4i32, .v2i64 => .i64,
+            .v4f32 => .f32,
+            .v2f64 => .f64,
+            else => tp,
+        };
+    }
+    pub fn lanes(tp: Type) u8 {
+        return switch (tp) {
+            .v4i32, .v4f32 => 4,
+            .v2i64, .v2f64 => 2,
+            else => 1,
+        };
+    }
+    /// Size in memory (`load`/`store`).
+    pub fn size(tp: Type) u8 {
+        return switch (tp) {
+            .f32 => 4,
+            .i64, .f64 => 8,
+            else => 16,
+        };
+    }
+};
+pub const TArith = enum { add, sub, mul, div, min, max, @"and", @"or", xor };
+pub const FCond = enum { eq, ne, lt, le, gt, ge };
+/// Raw value of a vreg in the interpreter (scalars in the low bits).
+pub const Val = u128;
 
 pub const VReg = u32;
 /// Maximum call arguments and function parameters (extra ones are passed on the stack).
@@ -36,8 +90,16 @@ pub const Op = union(enum) {
     @"const": struct { dst: VReg, imm: i64 },
     copy: struct { dst: VReg, src: VReg },
     arith: struct { op: Arith, dst: VReg, a: VReg, b: VReg },
-    load: struct { dst: VReg, base: VReg, disp: i32 },
-    store: struct { base: VReg, disp: i32, src: VReg },
+    load: struct { dst: VReg, base: VReg, disp: i32, ty: Type = .i64 },
+    store: struct { base: VReg, disp: i32, src: VReg, ty: Type = .i64 },
+    /// Float constant: `bits` holds the f32 (low 32 bits) or f64 bit pattern.
+    fconst: struct { dst: VReg, ty: Type, bits: u64 },
+    /// Typed arithmetic on f32/f64 or vector values (both operands and the result of `ty`).
+    typed: struct { op: TArith, ty: Type, dst: VReg, a: VReg, b: VReg },
+    fcmp: struct { cond: FCond, ty: Type, dst: VReg, a: VReg, b: VReg },
+    cvt: struct { to: Type, from: Type, dst: VReg, src: VReg },
+    splat: struct { ty: Type, dst: VReg, src: VReg },
+    extract: struct { ty: Type, dst: VReg, src: VReg, lane: u8 },
     call: struct { dst: VReg, addr: usize, args: []const VReg },
     br: u32,
     cbr: struct { cond: CondCode, a: VReg, b: VReg, then: u32, @"else": u32 },
@@ -55,14 +117,28 @@ pub const Op = union(enum) {
     }
     pub fn def(o: Op) ?VReg {
         return switch (o) {
-            inline .@"const", .copy, .arith, .load, .call => |x| x.dst,
+            inline .@"const", .copy, .arith, .load, .call, .fconst, .typed, .fcmp, .cvt, .splat, .extract => |x| x.dst,
             else => null,
         };
     }
     /// Writes used vregs into `buf`, returns the slice.
     pub fn uses(o: Op, buf: *[max_args]VReg) []const VReg {
         return switch (o) {
-            .@"const", .br => buf[0..0],
+            .@"const", .br, .fconst => buf[0..0],
+            .typed => |x| blk: {
+                buf[0] = x.a;
+                buf[1] = x.b;
+                break :blk buf[0..2];
+            },
+            .fcmp => |x| blk: {
+                buf[0] = x.a;
+                buf[1] = x.b;
+                break :blk buf[0..2];
+            },
+            inline .cvt, .splat, .extract => |x| blk: {
+                buf[0] = x.src;
+                break :blk buf[0..1];
+            },
             .copy => |x| blk: {
                 buf[0] = x.src;
                 break :blk buf[0..1];
@@ -206,6 +282,142 @@ pub const Func = struct {
         }
     }
 
+    /// True if the function only uses untyped (i64) operations (what the compilers support).
+    pub fn isIntOnly(f: *const Func) bool {
+        for (f.blocks.items) |b| for (b.ops.items) |o| switch (o) {
+            .fconst, .typed, .fcmp, .cvt, .splat, .extract => return false,
+            .load => |x| if (x.ty != .i64) return false,
+            .store => |x| if (x.ty != .i64) return false,
+            else => {},
+        };
+        return true;
+    }
+
+    pub const TypeError = error{ TypeMismatch, OutOfMemory };
+    /// Infers the type of every vreg (parameters i64, `copy`/block parameters from their
+    /// sources) and checks operand types. Returns `types[v]` (caller frees with `gpa`).
+    pub fn typeCheck(f: *const Func, gpa: std.mem.Allocator) TypeError![]Type {
+        const ty = try gpa.alloc(?Type, @max(f.num_vregs, 1));
+        defer gpa.free(ty);
+        @memset(ty, null);
+        for (0..f.params) |i| ty[i] = .i64;
+        const set = struct {
+            fn f_(t_: []?Type, v: VReg, want: Type) error{TypeMismatch}!bool {
+                if (t_[v]) |have| {
+                    if (have != want) return error.TypeMismatch;
+                    return false;
+                }
+                t_[v] = want;
+                return true;
+            }
+        }.f_;
+        // Defs with fixed types, then propagate copies / block arguments to a fixpoint.
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (f.blocks.items) |b| for (b.ops.items) |o| {
+                const r: ?struct { VReg, Type } = switch (o) {
+                    .@"const" => |x| .{ x.dst, .i64 },
+                    .arith => |x| .{ x.dst, .i64 },
+                    .call => |x| .{ x.dst, .i64 },
+                    .load => |x| .{ x.dst, x.ty },
+                    .fconst => |x| .{ x.dst, x.ty },
+                    .typed => |x| .{ x.dst, x.ty },
+                    .fcmp => |x| .{ x.dst, .i64 },
+                    .cvt => |x| .{ x.dst, x.to },
+                    .splat => |x| .{ x.dst, x.ty },
+                    .extract => |x| .{ x.dst, x.ty.lane() },
+                    .copy => |x| if (ty[x.src]) |st| .{ x.dst, st } else null,
+                    .bra => |x| blk: {
+                        for (x.args, f.blocks.items[x.target].params) |a, p| if (ty[a]) |at| {
+                            if (try set(ty, p, at)) changed = true;
+                        };
+                        break :blk null;
+                    },
+                    .cbra => |x| blk: {
+                        for (x.then_args, f.blocks.items[x.then].params) |a, p| if (ty[a]) |at| {
+                            if (try set(ty, p, at)) changed = true;
+                        };
+                        for (x.else_args, f.blocks.items[x.@"else"].params) |a, p| if (ty[a]) |at| {
+                            if (try set(ty, p, at)) changed = true;
+                        };
+                        break :blk null;
+                    },
+                    else => null,
+                };
+                if (r) |d| if (try set(ty, d[0], d[1])) {
+                    changed = true;
+                };
+            };
+        }
+        const out = try gpa.alloc(Type, @max(f.num_vregs, 1));
+        errdefer gpa.free(out);
+        for (ty, 0..) |t_, i| out[i] = t_ orelse .i64; // never defined: reads as i64 0
+        const T = struct {
+            fn is(o_: []const Type, v: VReg, want: Type) error{TypeMismatch}!void {
+                if (o_[v] != want) return error.TypeMismatch;
+            }
+        };
+        for (f.blocks.items) |b| for (b.ops.items) |o| switch (o) {
+            .arith => |x| {
+                try T.is(out, x.a, .i64);
+                try T.is(out, x.b, .i64);
+            },
+            .cbr => |x| {
+                try T.is(out, x.a, .i64);
+                try T.is(out, x.b, .i64);
+            },
+            .cbra => |x| {
+                try T.is(out, x.a, .i64);
+                try T.is(out, x.b, .i64);
+            },
+            .ret => |v| try T.is(out, v, .i64),
+            .call => |x| for (x.args) |a| try T.is(out, a, .i64),
+            .load => |x| try T.is(out, x.base, .i64),
+            .store => |x| {
+                try T.is(out, x.base, .i64);
+                try T.is(out, x.src, x.ty);
+            },
+            .fconst => |x| if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch,
+            .typed => |x| {
+                if (x.ty == .i64) return error.TypeMismatch;
+                const fl = x.ty.isFloat();
+                switch (x.op) {
+                    .div, .min, .max => if (!fl) return error.TypeMismatch,
+                    .@"and", .@"or", .xor => if (fl) return error.TypeMismatch,
+                    else => {},
+                }
+                try T.is(out, x.a, x.ty);
+                try T.is(out, x.b, x.ty);
+            },
+            .fcmp => |x| {
+                if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
+                try T.is(out, x.a, x.ty);
+                try T.is(out, x.b, x.ty);
+            },
+            .cvt => |x| {
+                const ok = switch (x.to) {
+                    .i64 => x.from == .f32 or x.from == .f64,
+                    .f32 => x.from == .i64 or x.from == .f64,
+                    .f64 => x.from == .i64 or x.from == .f32,
+                    else => false,
+                };
+                if (!ok) return error.TypeMismatch;
+                try T.is(out, x.src, x.from);
+            },
+            .splat => |x| {
+                if (!x.ty.isVector()) return error.TypeMismatch;
+                try T.is(out, x.src, x.ty.lane());
+            },
+            .extract => |x| {
+                if (!x.ty.isVector() or x.lane >= x.ty.lanes()) return error.TypeMismatch;
+                try T.is(out, x.src, x.ty);
+            },
+            else => {},
+        };
+        return out;
+    }
+
     pub fn hasBlockParams(f: *const Func) bool {
         for (f.blocks.items) |b| if (b.params.len != 0) return true;
         return false;
@@ -271,8 +483,17 @@ pub const Func = struct {
                     .@"const" => |x| try out.print(gpa, "v{d} = const {d}", .{ x.dst, x.imm }),
                     .copy => |x| try out.print(gpa, "v{d} = copy v{d}", .{ x.dst, x.src }),
                     .arith => |x| try out.print(gpa, "v{d} = {s} v{d} v{d}", .{ x.dst, @tagName(x.op), x.a, x.b }),
-                    .load => |x| try out.print(gpa, "v{d} = load v{d} {d}", .{ x.dst, x.base, x.disp }),
-                    .store => |x| try out.print(gpa, "store v{d} {d} v{d}", .{ x.base, x.disp, x.src }),
+                    .load => |x| try out.print(gpa, "v{d} = load{s} v{d} {d}", .{ x.dst, tySuffix(x.ty), x.base, x.disp }),
+                    .store => |x| try out.print(gpa, "store{s} v{d} {d} v{d}", .{ tySuffix(x.ty), x.base, x.disp, x.src }),
+                    .fconst => |x| if (x.ty == .f32)
+                        try out.print(gpa, "v{d} = fconst.f32 {e}", .{ x.dst, @as(f32, @bitCast(@as(u32, @truncate(x.bits)))) })
+                    else
+                        try out.print(gpa, "v{d} = fconst.f64 {e}", .{ x.dst, @as(f64, @bitCast(x.bits)) }),
+                    .typed => |x| try out.print(gpa, "v{d} = {s}.{s} v{d} v{d}", .{ x.dst, @tagName(x.op), @tagName(x.ty), x.a, x.b }),
+                    .fcmp => |x| try out.print(gpa, "v{d} = fcmp.{s} {s} v{d} v{d}", .{ x.dst, @tagName(x.ty), @tagName(x.cond), x.a, x.b }),
+                    .cvt => |x| try out.print(gpa, "v{d} = cvt.{s}.{s} v{d}", .{ x.dst, @tagName(x.to), @tagName(x.from), x.src }),
+                    .splat => |x| try out.print(gpa, "v{d} = splat.{s} v{d}", .{ x.dst, @tagName(x.ty), x.src }),
+                    .extract => |x| try out.print(gpa, "v{d} = extract.{s} v{d} {d}", .{ x.dst, @tagName(x.ty), x.src, x.lane }),
                     .call => |x| {
                         try out.print(gpa, "v{d} = call 0x{x}", .{ x.dst, x.addr });
                         for (x.args) |a| try out.print(gpa, " v{d}", .{a});
@@ -296,6 +517,22 @@ pub const Func = struct {
         }
     }
 };
+
+fn tySuffix(t_: Type) []const u8 {
+    return switch (t_) {
+        .i64 => "",
+        inline else => |tt| "." ++ @tagName(tt),
+    };
+}
+
+/// `mn.suffix` -> (mn, suffix) (suffix empty when there is no '.').
+fn splitMn(mn: []const u8) struct { []const u8, []const u8 } {
+    const d = std.mem.indexOfScalar(u8, mn, '.') orelse return .{ mn, "" };
+    return .{ mn[0..d], mn[d + 1 ..] };
+}
+fn parseType(s: []const u8) ParseError!Type {
+    return std.meta.stringToEnum(Type, s) orelse error.Syntax;
+}
 
 pub const ParseError = error{ Syntax, UnknownLabel, DuplicateLabel, OutOfMemory, InvalidCharacter, Overflow };
 
@@ -388,14 +625,50 @@ pub fn parse(gpa: std.mem.Allocator, src: []const u8) ParseError!Func {
             break :blk2 .{ .cbra = .{ .cond = c, .a = a, .b = b, .then = th, .@"else" = el, .then_args = ta.items, .else_args = ea.items } };
         } else if (std.mem.eql(u8, first, "ret"))
             .{ .ret = try parseVReg(it.next()) }
-        else if (std.mem.eql(u8, first, "store")) blk2: {
+        else if (std.mem.eql(u8, splitMn(first)[0], "store")) blk2: {
+            const sfx = splitMn(first)[1];
+            const sty: Type = if (sfx.len == 0) .i64 else try parseType(sfx);
             const base = try parseVReg(it.next());
             const disp = try parseInt(i32, it.next());
-            break :blk2 .{ .store = .{ .base = base, .disp = disp, .src = try parseVReg(it.next()) } };
+            break :blk2 .{ .store = .{ .base = base, .disp = disp, .src = try parseVReg(it.next()), .ty = sty } };
         } else blk2: {
             const dst = try parseVReg(first);
             if (!std.mem.eql(u8, it.next() orelse "", "=")) return error.Syntax;
-            const mn = it.next() orelse return error.Syntax;
+            const full = it.next() orelse return error.Syntax;
+            const mn, const sfx = splitMn(full);
+            if (sfx.len != 0) {
+                if (std.mem.eql(u8, mn, "load")) {
+                    const base = try parseVReg(it.next());
+                    break :blk2 .{ .load = .{ .dst = dst, .base = base, .disp = try parseInt(i32, it.next()), .ty = try parseType(sfx) } };
+                }
+                if (std.mem.eql(u8, mn, "fconst")) {
+                    const fty = try parseType(sfx);
+                    const v = std.fmt.parseFloat(f64, it.next() orelse return error.Syntax) catch return error.Syntax;
+                    const bits: u64 = switch (fty) {
+                        .f32 => @as(u32, @bitCast(@as(f32, @floatCast(v)))),
+                        .f64 => @bitCast(v),
+                        else => return error.Syntax,
+                    };
+                    break :blk2 .{ .fconst = .{ .dst = dst, .ty = fty, .bits = bits } };
+                }
+                if (std.mem.eql(u8, mn, "fcmp")) {
+                    const c = std.meta.stringToEnum(FCond, it.next() orelse return error.Syntax) orelse return error.Syntax;
+                    const a = try parseVReg(it.next());
+                    break :blk2 .{ .fcmp = .{ .cond = c, .ty = try parseType(sfx), .dst = dst, .a = a, .b = try parseVReg(it.next()) } };
+                }
+                if (std.mem.eql(u8, mn, "cvt")) {
+                    const to_s, const from_s = splitMn(sfx);
+                    break :blk2 .{ .cvt = .{ .to = try parseType(to_s), .from = try parseType(from_s), .dst = dst, .src = try parseVReg(it.next()) } };
+                }
+                if (std.mem.eql(u8, mn, "splat")) break :blk2 .{ .splat = .{ .ty = try parseType(sfx), .dst = dst, .src = try parseVReg(it.next()) } };
+                if (std.mem.eql(u8, mn, "extract")) {
+                    const src_v = try parseVReg(it.next());
+                    break :blk2 .{ .extract = .{ .ty = try parseType(sfx), .dst = dst, .src = src_v, .lane = try parseInt(u8, it.next()) } };
+                }
+                const top = std.meta.stringToEnum(TArith, mn) orelse return error.Syntax;
+                const a = try parseVReg(it.next());
+                break :blk2 .{ .typed = .{ .op = top, .ty = try parseType(sfx), .dst = dst, .a = a, .b = try parseVReg(it.next()) } };
+            }
             if (std.mem.eql(u8, mn, "const")) break :blk2 .{ .@"const" = .{ .dst = dst, .imm = try parseInt(i64, it.next()) } };
             if (std.mem.eql(u8, mn, "copy")) break :blk2 .{ .copy = .{ .dst = dst, .src = try parseVReg(it.next()) } };
             if (std.mem.eql(u8, mn, "load")) {
@@ -421,10 +694,10 @@ pub fn parse(gpa: std.mem.Allocator, src: []const u8) ParseError!Func {
 /// Reference interpreter. `mem` backs load/store (vA is an address inside it). Calls go to
 /// real function pointers. Returns error.StepLimit after `max_steps` instructions.
 pub fn interpret(f: *const Func, args: []const i64, max_steps: usize) !i64 {
-    var regs = try std.heap.page_allocator.alloc(i64, @max(f.num_vregs, 1));
+    const regs = try std.heap.page_allocator.alloc(Val, @max(f.num_vregs, 1));
     defer std.heap.page_allocator.free(regs);
     @memset(regs, 0);
-    for (args, 0..) |a, i| regs[i] = a;
+    for (args, 0..) |a, i| regs[i] = fromI(a);
     var b: u32 = 0;
     var steps: usize = 0;
     while (true) {
@@ -432,23 +705,44 @@ pub fn interpret(f: *const Func, args: []const i64, max_steps: usize) !i64 {
             steps += 1;
             if (steps > max_steps) return error.StepLimit;
             switch (o) {
-                .@"const" => |x| regs[x.dst] = x.imm,
+                .@"const" => |x| regs[x.dst] = fromI(x.imm),
                 .copy => |x| regs[x.dst] = regs[x.src],
-                .arith => |x| regs[x.dst] = arith(x.op, regs[x.a], regs[x.b]),
-                .load => |x| regs[x.dst] = @as(*const i64, @ptrFromInt(@as(usize, @truncate(@as(u64, @bitCast(regs[x.base] +% x.disp)))))).*,
-                .store => |x| @as(*i64, @ptrFromInt(@as(usize, @truncate(@as(u64, @bitCast(regs[x.base] +% x.disp)))))).* = regs[x.src],
+                .arith => |x| regs[x.dst] = fromI(arith(x.op, toI(regs[x.a]), toI(regs[x.b]))),
+                .load => |x| {
+                    const p: [*]const u8 = @ptrFromInt(@as(usize, @truncate(@as(u64, @bitCast(toI(regs[x.base]) +% x.disp)))));
+                    var v: Val = 0;
+                    @memcpy(std.mem.asBytes(&v)[0..x.ty.size()], p[0..x.ty.size()]);
+                    regs[x.dst] = v;
+                },
+                .store => |x| {
+                    const p: [*]u8 = @ptrFromInt(@as(usize, @truncate(@as(u64, @bitCast(toI(regs[x.base]) +% x.disp)))));
+                    @memcpy(p[0..x.ty.size()], std.mem.asBytes(&regs[x.src])[0..x.ty.size()]);
+                },
                 .call => |x| {
                     var a: [6]i64 = @splat(0);
-                    for (x.args, 0..) |v, i| a[i] = regs[v];
+                    for (x.args, 0..) |v, i| a[i] = toI(regs[v]);
                     const F = *const fn (i64, i64, i64, i64, i64, i64) callconv(.c) i64;
-                    regs[x.dst] = @as(F, @ptrFromInt(x.addr))(a[0], a[1], a[2], a[3], a[4], a[5]);
+                    regs[x.dst] = fromI(@as(F, @ptrFromInt(x.addr))(a[0], a[1], a[2], a[3], a[4], a[5]));
                 },
+                .fconst => |x| regs[x.dst] = x.bits,
+                .typed => |x| regs[x.dst] = typedArith(x.op, x.ty, regs[x.a], regs[x.b]),
+                .fcmp => |x| regs[x.dst] = @intFromBool(if (x.ty == .f32)
+                    fcond(x.cond, getF32(regs[x.a]), getF32(regs[x.b]))
+                else
+                    fcond(x.cond, getF64(regs[x.a]), getF64(regs[x.b]))),
+                .cvt => |x| regs[x.dst] = convert(x.to, x.from, regs[x.src]),
+                .splat => |x| {
+                    var v: Val = 0;
+                    for (0..x.ty.lanes()) |l| v = setLane(x.ty, v, @intCast(l), regs[x.src]);
+                    regs[x.dst] = v;
+                },
+                .extract => |x| regs[x.dst] = getLane(x.ty, regs[x.src], x.lane),
                 .br => |tg| {
                     b = tg;
                     break;
                 },
                 .cbr => |x| {
-                    b = if (cond(x.cond, regs[x.a], regs[x.b])) x.then else x.@"else";
+                    b = if (cond(x.cond, toI(regs[x.a]), toI(regs[x.b]))) x.then else x.@"else";
                     break;
                 },
                 .bra => |x| {
@@ -457,19 +751,116 @@ pub fn interpret(f: *const Func, args: []const i64, max_steps: usize) !i64 {
                     break;
                 },
                 .cbra => |x| {
-                    const taken = cond(x.cond, regs[x.a], regs[x.b]);
+                    const taken = cond(x.cond, toI(regs[x.a]), toI(regs[x.b]));
                     b = if (taken) x.then else x.@"else";
                     assignParams(regs, f.blocks.items[b].params, if (taken) x.then_args else x.else_args);
                     break;
                 },
-                .ret => |v| return regs[v],
+                .ret => |v| return toI(regs[v]),
             }
         }
     }
 }
 
-fn assignParams(regs: []i64, params: []const VReg, args: []const VReg) void {
-    var tmp: [max_args]i64 = undefined;
+fn fromI(v: i64) Val {
+    return @as(u64, @bitCast(v));
+}
+fn toI(v: Val) i64 {
+    return @bitCast(@as(u64, @truncate(v)));
+}
+pub fn getF32(v: Val) f32 {
+    return @bitCast(@as(u32, @truncate(v)));
+}
+pub fn getF64(v: Val) f64 {
+    return @bitCast(@as(u64, @truncate(v)));
+}
+pub fn fromF32(x: f32) Val {
+    return @as(u32, @bitCast(x));
+}
+pub fn fromF64(x: f64) Val {
+    return @as(u64, @bitCast(x));
+}
+fn fcond(c: FCond, a: anytype, b: @TypeOf(a)) bool {
+    return switch (c) {
+        .eq => a == b,
+        .ne => a != b,
+        .lt => a < b,
+        .le => a <= b,
+        .gt => a > b,
+        .ge => a >= b,
+    };
+}
+/// Lane `l` of vector type `t` as a scalar value (integer lanes sign-extended to i64).
+pub fn getLane(tp: Type, v: Val, l: u8) Val {
+    return switch (tp) {
+        .v4i32 => fromI(@as(i32, @bitCast(@as(u32, @truncate(v >> (32 * @as(u7, @intCast(l)))))))),
+        .v4f32 => @as(u32, @truncate(v >> (32 * @as(u7, @intCast(l))))),
+        .v2i64, .v2f64 => @as(u64, @truncate(v >> (64 * @as(u7, @intCast(l))))),
+        else => v,
+    };
+}
+fn setLane(tp: Type, v: Val, l: u8, x: Val) Val {
+    const w: u7 = if (tp == .v4i32 or tp == .v4f32) 32 else 64;
+    const sh: u7 = w * @as(u7, @intCast(l));
+    const mask: Val = (@as(Val, 1) << w) - 1;
+    return (v & ~(mask << sh)) | ((x & mask) << sh);
+}
+fn scalarArith(op: TArith, tp: Type, a: Val, b: Val) Val {
+    switch (tp) {
+        .f32, .f64 => {
+            const F = struct {
+                fn run(comptime T: type, o: TArith, x: T, y: T) T {
+                    return switch (o) {
+                        .add => x + y,
+                        .sub => x - y,
+                        .mul => x * y,
+                        .div => x / y,
+                        // x86 minss/maxss semantics: the second operand when unordered or equal.
+                        .min => if (x < y) x else y,
+                        .max => if (x > y) x else y,
+                        else => unreachable,
+                    };
+                }
+            };
+            return if (tp == .f32) fromF32(F.run(f32, op, getF32(a), getF32(b))) else fromF64(F.run(f64, op, getF64(a), getF64(b)));
+        },
+        else => {
+            const x = toI(a);
+            const y = toI(b);
+            return fromI(switch (op) {
+                .add => x +% y,
+                .sub => x -% y,
+                .mul => x *% y,
+                .@"and" => x & y,
+                .@"or" => x | y,
+                .xor => x ^ y,
+                else => unreachable,
+            });
+        },
+    }
+}
+pub fn typedArith(op: TArith, tp: Type, a: Val, b: Val) Val {
+    if (!tp.isVector()) return scalarArith(op, tp, a, b);
+    var r: Val = 0;
+    for (0..tp.lanes()) |l| r = setLane(tp, r, @intCast(l), scalarArith(op, tp.lane(), getLane(tp, a, @intCast(l)), getLane(tp, b, @intCast(l))));
+    return r;
+}
+fn convert(to: Type, from: Type, v: Val) Val {
+    return switch (to) {
+        .i64 => fromI(if (from == .f32) floatToI(getF32(v)) else floatToI(getF64(v))),
+        .f32 => if (from == .i64) fromF32(@floatFromInt(toI(v))) else fromF32(@floatCast(getF64(v))),
+        .f64 => if (from == .i64) fromF64(@floatFromInt(toI(v))) else fromF64(getF32(v)),
+        else => unreachable,
+    };
+}
+/// Truncating float -> i64 (x86 `cvttsd2si`: NaN / out of range give minInt(i64)).
+fn floatToI(x: anytype) i64 {
+    if (std.math.isNan(x) or x >= 9.223372036854775807e18 or x < -9.223372036854775808e18) return std.math.minInt(i64);
+    return @intFromFloat(x);
+}
+
+fn assignParams(regs: []Val, params: []const VReg, args: []const VReg) void {
+    var tmp: [max_args]Val = undefined;
     for (args, 0..) |a, i| tmp[i] = regs[a];
     for (params, 0..) |p, i| regs[p] = tmp[i];
 }
@@ -636,4 +1027,94 @@ test "ir: block parameters - parallel swap and verifier errors" {
     defer nossa.deinit();
     try nossa.verify();
     try t.expectError(error.MultipleDefs, nossa.verifySsa(t.allocator));
+}
+
+test "ir: typed values - parse, type check, print round-trip, interpret" {
+    const src =
+        \\func k 2
+        \\e:
+        \\  v2 = cvt.f64.i64 v0
+        \\  v3 = fconst.f64 0.5
+        \\  v4 = mul.f64 v2 v3
+        \\  v5 = cvt.f32.f64 v4
+        \\  v6 = splat.v4f32 v5
+        \\  v7 = add.v4f32 v6 v6
+        \\  v8 = extract.v4f32 v7 3
+        \\  v9 = cvt.i64.f32 v8
+        \\  v10 = splat.v4i32 v1
+        \\  v11 = mul.v4i32 v10 v10
+        \\  v12 = extract.v4i32 v11 2
+        \\  v13 = add v9 v12
+        \\  v14 = fcmp.f64 lt v2 v4
+        \\  v15 = add v13 v14
+        \\  ret v15
+    ;
+    var f = try parse(t.allocator, src);
+    defer f.deinit();
+    try f.verify();
+    try t.expect(!f.isIntOnly());
+    const ty = try f.typeCheck(t.allocator);
+    defer t.allocator.free(ty);
+    try t.expectEqual(Type.f64, ty[4]);
+    try t.expectEqual(Type.v4f32, ty[7]);
+    try t.expectEqual(Type.f32, ty[8]);
+    try t.expectEqual(Type.i64, ty[12]);
+    // v0 = 6: 6*0.5 = 3 -> f32 3 -> splat+add 6 -> i64 6; v1 = 5: 25; lt(6.0, 3.0) = 0
+    try t.expectEqual(@as(i64, 31), try interpret(&f, &.{ 6, 5 }, 100));
+    // negative: lt(-4.0, -2.0) = 1; -2 -> -4 ; v1 = -3 -> 9 => -4 + 9 + 1
+    try t.expectEqual(@as(i64, 6), try interpret(&f, &.{ -4, -3 }, 100));
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(t.allocator);
+    try f.print(t.allocator, &out);
+    var g = try parse(t.allocator, out.items);
+    defer g.deinit();
+    var out2: std.ArrayList(u8) = .empty;
+    defer out2.deinit(t.allocator);
+    try g.print(t.allocator, &out2);
+    try t.expectEqualStrings(out.items, out2.items);
+    try t.expectEqual(@as(i64, 31), try interpret(&g, &.{ 6, 5 }, 100));
+}
+
+test "ir: typed memory and type errors" {
+    var mem: [4]f64 = .{ 1.5, 2.25, 0, 0 };
+    const p: i64 = @bitCast(@intFromPtr(&mem));
+    const src =
+        \\func m 1
+        \\e:
+        \\  v1 = load.v2f64 v0 0
+        \\  v2 = add.v2f64 v1 v1
+        \\  store.v2f64 v0 16 v2
+        \\  v3 = load.f64 v0 24
+        \\  v4 = cvt.i64.f64 v3
+        \\  ret v4
+    ;
+    var f = try parse(t.allocator, src);
+    defer f.deinit();
+    const ty = try f.typeCheck(t.allocator);
+    t.allocator.free(ty);
+    try t.expectEqual(@as(i64, 4), try interpret(&f, &.{p}, 100));
+    try t.expectEqual(@as(f64, 3.0), mem[2]);
+    const bad = [_][]const u8{
+        "func b 1\ne:\n  v1 = fconst.f64 1\n  v2 = add v1 v0\n  ret v2\n", // i64 add on f64
+        "func b 1\ne:\n  v1 = div.v4i32 v0 v0\n  ret v0\n", // div on int vector (and operand types)
+        "func b 1\ne:\n  v1 = fconst.f32 1\n  ret v1\n", // ret needs i64
+        "func b 1\ne:\n  v1 = splat.v2f64 v0\n  ret v0\n", // lane type f64, got i64
+        "func b 1\ne:\n  v1 = fconst.f64 1\n  v2 = extract.v2f64 v1 0\n  ret v0\n",
+        "func b 1\ne:\n  v1 = fconst.f64 1\n  v1 = fconst.f32 1\n  ret v0\n", // conflicting defs
+    };
+    for (bad) |b| {
+        var g = try parse(t.allocator, b);
+        defer g.deinit();
+        try t.expectError(error.TypeMismatch, g.typeCheck(t.allocator));
+    }
+}
+
+test "ir: int-only check" {
+    var f = try parse(t.allocator, fib_src);
+    defer f.deinit();
+    try t.expect(f.isIntOnly());
+    var g = try parse(t.allocator, "func b 0\ne:\n  v0 = fconst.f64 1\n  v1 = cvt.i64.f64 v0\n  ret v1\n");
+    defer g.deinit();
+    try t.expect(!g.isIntOnly());
+    try t.expectEqual(@as(i64, 1), try interpret(&g, &.{}, 10));
 }
