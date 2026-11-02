@@ -9,7 +9,9 @@
 //!   `mov r10, a; op r10, b; mov dst, r10`);
 //! - frame: `push rbp; mov rbp, rsp; push <used callee-saved>; sub rsp, slots` (16-aligned),
 //!   spill slot k at [rbp - 8*(saved+1+k)]; one shared epilog label.
-//! Not yet: AArch64 lowering, shifts/div (fixed rcx/rax/rdx), stack-passed arguments,
+//! - shifts use `rcx` and division uses `rax`/`rdx`: rcx/rdx are argument registers (never
+//!   allocated), and rax is saved in r11 around `cqo; idiv`.
+//! Not yet: AArch64 lowering, stack-passed arguments,
 //! immediate and memory-operand folding, cmp/branch fusion beyond `cbr`.
 const std = @import("std");
 const x = @import("assembler.zig");
@@ -146,6 +148,23 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
                 const rb = try ctx.get(c.b, s1);
                 if (ra_ != s0) try b.movRR(s0, ra_);
                 switch (c.op) {
+                    .shl, .shr, .sar => {
+                        try b.movRR(.rcx, rb);
+                        try b.shiftRCl(switch (c.op) {
+                            .shl => .shl,
+                            .shr => .shr,
+                            else => .sar,
+                        }, s0);
+                    },
+                    .sdiv, .srem => {
+                        try b.movRR(.rcx, rb);
+                        try b.movRR(s1, .rax);
+                        try b.movRR(.rax, s0);
+                        try b.cqo();
+                        try b.idivR(.rcx);
+                        try b.movRR(s0, if (c.op == .sdiv) .rax else .rdx);
+                        try b.movRR(.rax, s1);
+                    },
                     .add => try b.aluRR(.add, s0, rb),
                     .sub => try b.aluRR(.sub, s0, rb),
                     .@"and" => try b.aluRR(.@"and", s0, rb),
@@ -294,6 +313,38 @@ test "compiler: execution - fib, loops, calls, memory, spills" {
     try t.expectEqual(@as(i64, 51), mem[1]);
 }
 
+test "compiler: shifts and signed division match the interpreter" {
+    if (!can_run) return error.SkipZigTest;
+    // Many values live at once so rax holds one across the idiv.
+    const src =
+        \\func f 2
+        \\e:
+        \\  v2 = shl v0 v1
+        \\  v3 = shr v0 v1
+        \\  v4 = sar v0 v1
+        \\  v9 = const 7
+        \\  v5 = sdiv v0 v9
+        \\  v6 = srem v0 v9
+        \\  v7 = sdiv v2 v0
+        \\  v8 = add v2 v3
+        \\  v8 = xor v8 v4
+        \\  v8 = add v8 v5
+        \\  v8 = sub v8 v6
+        \\  v8 = add v8 v7
+        \\  v8 = add v8 v1
+        \\  ret v8
+    ;
+    var f = try ir.parse(t.allocator, src);
+    defer f.deinit();
+    try f.verify();
+    const cases = [_][2]i64{ .{ 1, 0 }, .{ -1, 62 }, .{ 12345, 3 }, .{ -98765, 65 }, .{ std.math.maxInt(i64), 1 }, .{ -7, 2 } };
+    for (cases) |c| {
+        const want = try ir.interpret(&f, &c, 1000);
+        try t.expectEqual(want, try run(&f, .{}, &c));
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx) }, &c));
+    }
+}
+
 test "compiler: differential vs interpreter on random programs" {
     if (!can_run) return error.SkipZigTest;
     var prng = std.Random.DefaultPrng.init(7);
@@ -314,7 +365,7 @@ test "compiler: differential vs interpreter on random programs" {
                 const d = r.uintLessThan(u32, nv);
                 if (r.boolean()) {
                     try f.emit(blk, .{ .@"const" = .{ .dst = d, .imm = r.int(i32) } });
-                } else try f.emit(blk, .{ .arith = .{ .op = r.enumValue(ir.Arith), .dst = d, .a = r.uintLessThan(u32, nv), .b = r.uintLessThan(u32, nv) } });
+                } else try f.emit(blk, .{ .arith = .{ .op = @enumFromInt(r.uintLessThan(u8, @intFromEnum(ir.Arith.sdiv))), .dst = d, .a = r.uintLessThan(u32, nv), .b = r.uintLessThan(u32, nv) } });
             }
             // forward-only control flow => always terminates
             if (bi + 1 == nb) {

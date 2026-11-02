@@ -69,7 +69,7 @@ interpreter. `src/x86_64/compiler.zig` (`pyrlyn_jit.x86_64_compiler`): regalloc
 calls to absolute addresses, only-used callee-saved registers in prolog/epilog, spill slots.
 Tested by execution under Rosetta (fib, calls, memory, forced spills) and a differential fuzz
 vs the interpreter. This branch carries copies of `builder.zig` and `regalloc.zig` from
-feat/builder and feat/regalloc (uncommitted dependency). Not yet: shifts/div, stack-passed
+feat/builder and feat/regalloc (uncommitted dependency). Shifts (`shl/shr/sar`, count in rcx) and signed division (`sdiv/srem` via `cqo; idiv`) are supported. Not yet: stack-passed
 args, immediate/memory folding, AArch64 lowering.
 
 Goal: compile a minimal IR to machine code through the Builder.

@@ -10,7 +10,7 @@
 //!   func <name> <params>
 //!   <label>:
 //!     vD = const <int>          vD = copy vA
-//!     vD = add|sub|mul|and|or|xor vA vB
+//!     vD = add|sub|mul|and|or|xor|shl|shr|sar|sdiv|srem vA vB
 //!     vD = load vA <disp>       store vA <disp> vB         (64-bit memory at vA+disp)
 //!     vD = call <addr> vA ...   (up to 6 args, C calling convention)
 //!     br <label>                cbr <cond> vA vB <then> <else>
@@ -19,7 +19,9 @@
 const std = @import("std");
 
 pub const VReg = u32;
-pub const Arith = enum { add, sub, mul, @"and", @"or", xor };
+/// `shl/shr/sar` mask the count to 6 bits; `sdiv/srem` truncate toward zero and are
+/// undefined (trap in generated code) for a zero divisor or `minInt(i64) / -1`.
+pub const Arith = enum { add, sub, mul, @"and", @"or", xor, shl, shr, sar, sdiv, srem };
 pub const CondCode = enum { eq, ne, lt, le, gt, ge, ult, ule, ugt, uge };
 
 pub const Op = union(enum) {
@@ -309,6 +311,12 @@ pub fn arith(op: Arith, a: i64, b: i64) i64 {
         .@"and" => a & b,
         .@"or" => a | b,
         .xor => a ^ b,
+        .shl => @bitCast(@as(u64, @bitCast(a)) << @intCast(b & 63)),
+        .shr => @bitCast(@as(u64, @bitCast(a)) >> @intCast(b & 63)),
+        .sar => a >> @intCast(b & 63),
+        // Undefined cases (b == 0, minInt / -1) return 0 here; callers must avoid them.
+        .sdiv => if (b == 0 or (a == std.math.minInt(i64) and b == -1)) 0 else @divTrunc(a, b),
+        .srem => if (b == 0 or (a == std.math.minInt(i64) and b == -1)) 0 else @rem(a, b),
     };
 }
 pub fn cond(c: CondCode, a: i64, b: i64) bool {
