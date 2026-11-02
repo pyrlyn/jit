@@ -112,6 +112,15 @@ pub fn build(b: *std.Build) void {
     x86_32_mod.addOptions("pyrlyn_jit_options", opts);
     b.step("test-x86-32", "Run the x86 (32-bit) Compiler execution tests as an x86-linux process").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = x86_32_mod })).step);
 
+    // RISC-V 64 execution tests (riscv64-linux-musl, static so qemu-user needs no sysroot; run with `-fqemu` and qemu-riscv64 on PATH).
+    const rv64_mod = b.createModule(.{
+        .root_source_file = b.path("src/riscv_exec_tests.zig"),
+        .target = b.resolveTargetQuery(.{ .cpu_arch = .riscv64, .os_tag = .linux, .abi = .musl }),
+        .link_libc = true,
+        .optimize = optimize,
+    });
+    b.step("test-riscv64", "Run the RISC-V 64 execution tests as a riscv64-linux process (use -fqemu)").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rv64_mod })).step);
+
     // ---- C ABI library (include/pyrlyn_jit.h) + examples in C, C++, Rust, Zig ----------------
     const capi_mod = b.createModule(.{
         .root_source_file = b.path("src/c_api.zig"),

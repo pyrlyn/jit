@@ -36,6 +36,11 @@ const is_darwin = builtin.os.tag.isDarwin();
 const MAP_PRIVATE = 0x02;
 const MAP_ANON: c_int = if (is_darwin) 0x1000 else 0x20;
 const MAP_JIT = 0x800;
+/// Architectures whose instruction cache is not coherent with data writes.
+const needs_icache_flush = switch (builtin.cpu.arch) {
+    .aarch64, .riscv64, .riscv32 => true,
+    else => false,
+};
 const use_map_jit = is_darwin and builtin.cpu.arch == .aarch64;
 const MAP_FAILED: usize = std.math.maxInt(usize);
 
@@ -81,7 +86,7 @@ pub fn add(cb: *const CodeBuffer) Error!Function {
             _ = munmap(mem.ptr, size);
             return error.ProtectFailed;
         }
-        if (builtin.cpu.arch == .aarch64) __clear_cache(mem.ptr, mem.ptr + code.len);
+        if (needs_icache_flush) __clear_cache(mem.ptr, mem.ptr + code.len);
     }
     return .{ .mem = mem };
 }
@@ -154,7 +159,7 @@ pub fn underRosetta() bool {
 pub const dual_mapping_supported = is_darwin or builtin.os.tag == .linux;
 
 fn flush(p: [*]u8, len: usize) void {
-    if (builtin.cpu.arch != .aarch64) return;
+    if (!needs_icache_flush) return;
     if (is_darwin) sys_icache_invalidate(p, len) else __clear_cache(p, p + len);
 }
 
