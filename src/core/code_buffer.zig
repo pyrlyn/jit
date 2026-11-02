@@ -21,6 +21,10 @@ pub const FixupKind = enum(u8) {
     /// RISC-V `auipc` + I-type pair (jalr/addi/ld): hi20 at `at`, lo12 at `at + 4`, ±2 GiB,
     /// relative to the auipc.
     rv_pcrel_pair,
+    /// RISC-V CB-type (c.beqz/c.bnez): imm[8:1] scattered in a 16-bit parcel, ±256 B.
+    rv_cb9,
+    /// RISC-V CJ-type (c.j/c.jal): imm[11:1] scattered in a 16-bit parcel, ±2 KiB.
+    rv_cj12,
 };
 
 pub const Fixup = struct {
@@ -221,6 +225,7 @@ pub const CodeBuffer = struct {
                 .rel8 => 1,
                 .rel32, .a64_imm26, .a64_imm19, .rv_b12, .rv_j20 => 4,
                 .rv_pcrel_pair => 8,
+                .rv_cb9, .rv_cj12 => 2,
             };
             if (@as(usize, f.at) + width > self.len or f.base > self.len) return error.InvalidFixup;
             const target = self.labels.items[f.label];
@@ -234,6 +239,8 @@ pub const CodeBuffer = struct {
                 .rv_b12 => @mod(disp, 2) == 0 and disp >= -(1 << 12) and disp < (1 << 12),
                 .rv_j20 => @mod(disp, 2) == 0 and disp >= -(1 << 20) and disp < (1 << 20),
                 .rv_pcrel_pair => disp >= -(1 << 31) - 0x800 and disp < (1 << 31) - 0x800,
+                .rv_cb9 => @mod(disp, 2) == 0 and disp >= -(1 << 8) and disp < (1 << 8),
+                .rv_cj12 => @mod(disp, 2) == 0 and disp >= -(1 << 11) and disp < (1 << 11),
             };
             if (!ok) return error.DisplacementOutOfRange;
         }
@@ -249,6 +256,11 @@ pub const CodeBuffer = struct {
                     var w = std.mem.readInt(u32, p[0..4], .little);
                     w = if (f.kind == .rv_b12) rvPatchB(w, disp) else rvPatchJ(w, disp);
                     std.mem.writeInt(u32, p[0..4], w, .little);
+                },
+                .rv_cb9, .rv_cj12 => {
+                    var h = std.mem.readInt(u16, p[0..2], .little);
+                    h = if (f.kind == .rv_cb9) rvPatchCB(h, disp) else rvPatchCJ(h, disp);
+                    std.mem.writeInt(u16, p[0..2], h, .little);
                 },
                 .rv_pcrel_pair => {
                     const ws = rvPatchPcrelPair(std.mem.readInt(u32, p[0..4], .little), std.mem.readInt(u32, p[4..8], .little), disp);
@@ -278,6 +290,19 @@ pub fn rvPatchB(w: u32, disp: i64) u32 {
     const v: u32 = @truncate(@as(u64, @bitCast(disp)));
     const enc = ((v >> 12) & 1) << 31 | ((v >> 5) & 0x3F) << 25 | ((v >> 1) & 0xF) << 8 | ((v >> 11) & 1) << 7;
     return (w & 0x01FFF07F) | enc;
+}
+/// Inserts a CB-type offset (imm[8|4:3] at 12:10, imm[7:6|2:1|5] at 6:2).
+pub fn rvPatchCB(h: u16, disp: i64) u16 {
+    const v: u16 = @truncate(@as(u64, @bitCast(disp)));
+    const enc = (v >> 8 & 1) << 12 | (v >> 3 & 3) << 10 | (v >> 6 & 3) << 5 | (v >> 1 & 3) << 3 | (v >> 5 & 1) << 2;
+    return (h & 0xE383) | enc;
+}
+/// Inserts a CJ-type offset (imm[11|4|9:8|10|6|7|3:1|5] at 12:2).
+pub fn rvPatchCJ(h: u16, disp: i64) u16 {
+    const v: u16 = @truncate(@as(u64, @bitCast(disp)));
+    const enc = (v >> 11 & 1) << 12 | (v >> 4 & 1) << 11 | (v >> 8 & 3) << 9 | (v >> 10 & 1) << 8 |
+        (v >> 6 & 1) << 7 | (v >> 7 & 1) << 6 | (v >> 1 & 7) << 3 | (v >> 5 & 1) << 2;
+    return (h & 0xE003) | enc;
 }
 /// Inserts a J-type offset (imm[20|10:1|11|19:12] at 31:12).
 /// Splits `disp` into auipc hi20 (rounded so the sign-extended lo12 compensates) and the
