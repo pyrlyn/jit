@@ -6,7 +6,9 @@
 //! M extension (mul/div/rem + W forms), pseudo-instructions `li` (any 64-bit constant,
 //! lui/addiw/slli/addi chains), `mv`, `nop`, `ret`, `j`, `callAbs`, and an RV64 prolog/epilog.
 //! A extension (RV64A): `lr`/`sc` and all AMOs for .w/.d with aq/rl ordering bits, `fence`.
-//! Not yet: F/D, C (compressed), RV32, far branches (auipc+jalr pairs).
+//! F/D extensions: flw/fld/fsw/fsd, add/sub/mul/div/sqrt/min/max/sgnj, fused multiply-add,
+//! compares, int<->fp conversions, fmv between register files, s<->d conversion.
+//! Not yet: C (compressed), RV32, far branches (auipc+jalr pairs).
 const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const CodeBuffer = core.CodeBuffer;
@@ -83,6 +85,53 @@ fn fitsI12(v: i64) bool {
 }
 
 pub const Options = struct { validate: bool = true };
+
+/// f0..f31 (floating-point registers; ABI names ft0.., fa0.. are f0.., f10..).
+pub const F = enum(u5) {
+    f0,
+    f1,
+    f2,
+    f3,
+    f4,
+    f5,
+    f6,
+    f7,
+    f8,
+    f9,
+    f10,
+    f11,
+    f12,
+    f13,
+    f14,
+    f15,
+    f16,
+    f17,
+    f18,
+    f19,
+    f20,
+    f21,
+    f22,
+    f23,
+    f24,
+    f25,
+    f26,
+    f27,
+    f28,
+    f29,
+    f30,
+    f31,
+    pub fn n(r: F) u32 {
+        return @backingInt(r);
+    }
+};
+/// Floating-point format field: single or double.
+pub const Fmt = enum(u2) { s = 0, d = 1 };
+/// Rounding mode (`dyn` = use fcsr.frm).
+pub const Rm = enum(u3) { rne = 0, rtz = 1, rdn = 2, rup = 3, rmm = 4, dyn = 7 };
+pub const FArith = enum(u5) { add = 0b00000, sub = 0b00001, mul = 0b00010, div = 0b00011 };
+pub const FCmp = enum(u3) { le = 0, lt = 1, eq = 2 };
+/// Integer side of fcvt: w (i32), wu (u32), l (i64), lu (u64).
+pub const IntKind = enum(u5) { w = 0, wu = 1, l = 2, lu = 3 };
 
 pub fn AssemblerT(comptime opts: Options) type {
     return struct {
@@ -296,6 +345,66 @@ pub fn AssemblerT(comptime opts: Options) type {
             return a.word(@as(u32, pred) << 24 | @as(u32, succ) << 20 | 0x0F);
         }
 
+        // ---- F/D extensions ----------------------------------------------------------
+        fn fpR(a: Self, f5: u32, fmt: Fmt, rs2: u32, rs1: u32, f3: u32, rd: u32) Error!void {
+            return a.word(f5 << 27 | @as(u32, @backingInt(fmt)) << 25 | rs2 << 20 | rs1 << 15 | f3 << 12 | rd << 7 | 0x53);
+        }
+        /// `flw/fld rd, off(rs1)`.
+        pub fn fload(a: Self, fmt: Fmt, rd: F, off: i64, rs1: X) Error!void {
+            return a.word(try imm12(off) << 20 | rs1.n() << 15 | (@as(u32, @backingInt(fmt)) + 2) << 12 | rd.n() << 7 | 0x07);
+        }
+        /// `fsw/fsd rs2, off(rs1)`.
+        pub fn fstore(a: Self, fmt: Fmt, rs2: F, off: i64, rs1: X) Error!void {
+            const v = try imm12(off);
+            return a.word((v >> 5) << 25 | rs2.n() << 20 | rs1.n() << 15 | (@as(u32, @backingInt(fmt)) + 2) << 12 | (v & 0x1F) << 7 | 0x27);
+        }
+        /// `fadd/fsub/fmul/fdiv.<s|d> rd, rs1, rs2` (rounding `rm`).
+        pub fn farith(a: Self, op: FArith, fmt: Fmt, rd: F, rs1: F, rs2: F, rm: Rm) Error!void {
+            return a.fpR(@backingInt(op), fmt, rs2.n(), rs1.n(), @backingInt(rm), rd.n());
+        }
+        pub fn fsqrt(a: Self, fmt: Fmt, rd: F, rs1: F, rm: Rm) Error!void {
+            return a.fpR(0b01011, fmt, 0, rs1.n(), @backingInt(rm), rd.n());
+        }
+        pub fn fmin(a: Self, fmt: Fmt, rd: F, rs1: F, rs2: F) Error!void {
+            return a.fpR(0b00101, fmt, rs2.n(), rs1.n(), 0, rd.n());
+        }
+        pub fn fmax(a: Self, fmt: Fmt, rd: F, rs1: F, rs2: F) Error!void {
+            return a.fpR(0b00101, fmt, rs2.n(), rs1.n(), 1, rd.n());
+        }
+        /// `fsgnj` (j = 0), `fsgnjn` (1), `fsgnjx` (2); `fmv.d rd, rs` = `fsgnj(.d, 0, rd, rs, rs)`.
+        pub fn fsgnj(a: Self, fmt: Fmt, kind: u2, rd: F, rs1: F, rs2: F) Error!void {
+            return a.fpR(0b00100, fmt, rs2.n(), rs1.n(), kind, rd.n());
+        }
+        /// `fmadd.<s|d> rd, rs1, rs2, rs3` = rs1 * rs2 + rs3.
+        pub fn fmadd(a: Self, fmt: Fmt, rd: F, rs1: F, rs2: F, rs3: F, rm: Rm) Error!void {
+            return a.word(rs3.n() << 27 | @as(u32, @backingInt(fmt)) << 25 | rs2.n() << 20 | rs1.n() << 15 | @as(u32, @backingInt(rm)) << 12 | rd.n() << 7 | 0x43);
+        }
+        /// `feq/flt/fle.<s|d> rd, rs1, rs2` (rd is an integer register).
+        pub fn fcmp(a: Self, c: FCmp, fmt: Fmt, rd: X, rs1: F, rs2: F) Error!void {
+            return a.fpR(0b10100, fmt, rs2.n(), rs1.n(), @backingInt(c), rd.n());
+        }
+        /// `fcvt.<w|wu|l|lu>.<s|d> rd, rs1` (float -> integer).
+        pub fn fcvtToInt(a: Self, k: IntKind, fmt: Fmt, rd: X, rs1: F, rm: Rm) Error!void {
+            return a.fpR(0b11000, fmt, @backingInt(k), rs1.n(), @backingInt(rm), rd.n());
+        }
+        /// `fcvt.<s|d>.<w|wu|l|lu> rd, rs1` (integer -> float).
+        pub fn fcvtFromInt(a: Self, k: IntKind, fmt: Fmt, rd: F, rs1: X, rm: Rm) Error!void {
+            return a.fpR(0b11010, fmt, @backingInt(k), rs1.n(), @backingInt(rm), rd.n());
+        }
+        /// `fcvt.s.d` (to = .s) or `fcvt.d.s` (to = .d).
+        pub fn fcvtFmt(a: Self, to: Fmt, rd: F, rs1: F, rm: Rm) Error!void {
+            const from: u32 = if (to == .s) 1 else 0;
+            return a.fpR(0b01000, to, from, rs1.n(), @backingInt(rm), rd.n());
+        }
+        /// `fmv.x.w/fmv.x.d rd, rs1` (raw bits float -> integer register).
+        pub fn fmvToInt(a: Self, fmt: Fmt, rd: X, rs1: F) Error!void {
+            return a.fpR(0b11100, fmt, 0, rs1.n(), 0, rd.n());
+        }
+        /// `fmv.w.x/fmv.d.x rd, rs1` (raw bits integer -> float register).
+        pub fn fmvFromInt(a: Self, fmt: Fmt, rd: F, rs1: X) Error!void {
+            return a.fpR(0b11110, fmt, 0, rs1.n(), 0, rd.n());
+        }
+
         pub fn mulw(a: Self, rd: X, rs1: X, rs2: X) Error!void {
             return a.rType(1, rs2, rs1, 0, rd, 0x3B);
         }
@@ -400,6 +509,24 @@ test "riscv: A extension and fence (spec reference values)" {
     try a.amo(.maxu, .d, .rl, .a0, .a1, .a2); // amomaxu.d.rl a0, a1, (a2)
     try a.fence(0b0011, 0b0011); // fence rw, rw
     const want = [_]u32{ 0x1005B52F, 0x18D5B62F, 0x00B6252F, 0x0E63B2AF, 0x1405A52F, 0xE2B6352F, 0x0330000F };
+    for (want, 0..) |w, i| try t.expectEqual(w, std.mem.readInt(u32, cb.code()[4 * i ..][0..4], .little));
+}
+
+test "riscv: F/D extensions (GNU as reference values)" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler.init(&cb);
+    try a.farith(.add, .d, .f10, .f10, .f11, .dyn); // fadd.d fa0, fa0, fa1
+    try a.fload(.d, .f10, 8, .a0); // fld fa0, 8(a0)
+    try a.fstore(.d, .f10, 8, .a0); // fsd fa0, 8(a0)
+    try a.fmvToInt(.d, .a0, .f10); // fmv.x.d a0, fa0
+    try a.fcvtFromInt(.l, .d, .f10, .a0, .dyn); // fcvt.d.l fa0, a0
+    try a.fcmp(.eq, .d, .a0, .f10, .f11); // feq.d a0, fa0, fa1
+    try a.fload(.s, .f1, -4, .sp); // flw ft1, -4(sp)
+    try a.fmadd(.d, .f0, .f1, .f2, .f3, .rne); // fmadd.d ft0, ft1, ft2, ft3, rne
+    try a.fcvtToInt(.w, .s, .a1, .f2, .rtz); // fcvt.w.s a1, ft2, rtz
+    try a.fcvtFmt(.d, .f4, .f5, .dyn); // fcvt.d.s ft4, ft5
+    const want = [_]u32{ 0x02B57553, 0x00853507, 0x00A53427, 0xE2050553, 0xD2257553, 0xA2B52553, 0xFFC12087, 0x1A208043, 0xC00115D3, 0x4202F253 };
     for (want, 0..) |w, i| try t.expectEqual(w, std.mem.readInt(u32, cb.code()[4 * i ..][0..4], .little));
 }
 
