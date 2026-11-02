@@ -116,8 +116,13 @@ Estimate: 2–3 weeks (sizes + RIP + extra forms), mostly mechanical once the ge
 **Status:** every SSE..AVX-512/AMX form of the generated vector table is reachable from the
 Assembler as `a.vinst(mn, args, extra)` (hooked as `Inst.vec`): zmm/ymm/xmm 0..31, `{k}`/`{z}`,
 `{1toN}`, `{er}`/`{sae}`, VSIB, disp8*N. `src/avx512_tests.zig` (scripts/gen_avx512_tests.py)
-checks 95 AVX-512 forms byte-exact vs LLVM. Not yet: per-form CPU feature checks for vector
-forms, runtime AVX-512 execution tests (no AVX-512 on CI/Rosetta).
+checks 95 AVX-512 forms byte-exact vs LLVM. CPU features: every vector form carries the
+features of its LLVM `Predicates` (`Form.features`; AVX-512 VL folded into AVX512_F);
+`vinst` checks the *selected* form against `target_features` (`cpu_check = .target`) or CPUID
+(`.host`, `cpu.info()` / `CpuInfo`); `-Dx86-features=sse4_2,avx2,...` removes forms needing
+other features at compile time (a mnemonic with no form left, or a GP/typed instruction needing
+an excluded feature, is a compile error; baseline SSE/SSE2/x87/MMX/CMOV always allowed).
+Not yet: runtime AVX-512 execution tests (no AVX-512 on CI/Rosetta).
 
 ### Order
 1. SSE, SSE2 (baseline on x86-64), SSE3, SSSE3, SSE4.1, SSE4.2.

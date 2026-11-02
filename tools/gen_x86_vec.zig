@@ -14,6 +14,7 @@
 //! mnemonic spellings, mnemonics not offered, the GP-table mnemonics that also have forms here,
 //! a few forms LLVM does not define, and the form-selection hints (`lowprio`, `late_vex`).
 const std = @import("std");
+const eql = std.mem.eql;
 const lj = @import("llvm_json.zig");
 const gp = @import("gen_x86_gp.zig");
 
@@ -49,10 +50,59 @@ pub const Form = struct {
     late_vex: bool = false,
     exact_mem: bool = false,
     mode: []const u8 = "any",
+    /// CPU features (isa.Feature names) from the record's LLVM `Predicates`.
+    features: []const []const u8 = &.{},
 };
 
+/// LLVM predicate -> isa.Feature. Predicates without an entry (mode, NoVLX, HasVLX, HasEVEX512,
+/// optimisation hints, ...) add no feature; AVX-512 VL is implied by AVX512_F here.
+const pred_features = [_][2][]const u8{
+    .{ "HasSSE1", "SSE" },                         .{ "UseSSE1", "SSE" },                    .{ "HasSSE2", "SSE2" },
+    .{ "UseSSE2", "SSE2" },                        .{ "HasSSE3", "SSE3" },                   .{ "UseSSE3", "SSE3" },
+    .{ "UseSSSE3", "SSSE3" },                      .{ "HasSSSE3", "SSSE3" },                 .{ "UseSSE41", "SSE4_1" },
+    .{ "HasSSE41", "SSE4_1" },                     .{ "UseSSE42", "SSE4_2" },                .{ "HasSSE42", "SSE4_2" },
+    .{ "HasSSE4A", "SSE4A" },                      .{ "HasAVX", "AVX" },                     .{ "UseAVX", "AVX" },
+    .{ "HasAVX1Only", "AVX" },                     .{ "HasAVX2", "AVX2" },                   .{ "HasFMA", "FMA" },
+    .{ "HasFMA4", "FMA4" },                        .{ "HasXOP", "XOP" },                     .{ "HasF16C", "F16C" },
+    .{ "HasAVX512", "AVX512_F" },                  .{ "HasBWI", "AVX512_BW" },               .{ "HasDQI", "AVX512_DQ" },
+    .{ "HasCDI", "AVX512_CD" },                    .{ "HasFP16", "AVX512_FP16" },            .{ "HasBF16", "AVX512_BF16" },
+    .{ "HasVBMI", "AVX512_VBMI" },                 .{ "HasVBMI2", "AVX512_VBMI2" },          .{ "HasIFMA", "AVX512_IFMA" },
+    .{ "HasVNNI", "AVX512_VNNI" },                 .{ "HasBITALG", "AVX512_BITALG" },        .{ "HasVPOPCNTDQ", "AVX512_VPOPCNTDQ" },
+    .{ "HasVP2INTERSECT", "AVX512_VP2INTERSECT" }, .{ "HasAVX10_2", "AVX10_2" },             .{ "HasAES", "AESNI" },
+    .{ "HasPCLMUL", "PCLMULQDQ" },                 .{ "HasVAES", "VAES" },                   .{ "HasVPCLMULQDQ", "VPCLMULQDQ" },
+    .{ "HasGFNI", "GFNI" },                        .{ "HasSHA", "SHA" },                     .{ "HasSHA512", "SHA512" },
+    .{ "HasSM3", "SM3" },                          .{ "HasSM4", "SM4" },                     .{ "HasAVXVNNI", "AVX_VNNI" },
+    .{ "HasAVXIFMA", "AVX_IFMA" },                 .{ "HasAVXNECONVERT", "AVX_NE_CONVERT" }, .{ "HasAVXVNNIINT8", "AVX_VNNI_INT8" },
+    .{ "HasAVXVNNIINT16", "AVX_VNNI_INT16" },      .{ "HasMMX", "MMX" },                     .{ "HasBMI", "BMI" },
+    .{ "HasBMI2", "BMI2" },                        .{ "HasTBM", "TBM" },                     .{ "HasLWP", "LWP" },
+    .{ "HasAMXTILE", "AMX_TILE" },                 .{ "HasAMXINT8", "AMX_INT8" },            .{ "HasAMXBF16", "AMX_BF16" },
+    .{ "HasAMXFP16", "AMX_FP16" },                 .{ "HasAMXCOMPLEX", "AMX_COMPLEX" },      .{ "HasAMXFP8", "AMX_FP8" },
+    .{ "HasAMXMOVRS", "AMX_MOVRS" },               .{ "HasAMXAVX512", "AMX_AVX512" },        .{ "HasKL", "KL" },
+    .{ "HasWIDEKL", "KL" },                        .{ "HasCMPCCXADD", "CMPCCXADD" },         .{ "HasRAOINT", "RAO_INT" },
+    .{ "HasMOVRS", "MOVRS" },                      .{ "HasUSERMSR", "USER_MSR" },            .{ "HasX87", "FPU" },
+    .{ "HasCRC32", "SSE4_2" },                     .{ "HasPOPCNT", "POPCNT" },               .{ "HasLZCNT", "LZCNT" },
+    .{ "HasMOVBE", "MOVBE" },                      .{ "HasCLFLUSHOPT", "CLFLUSHOPT" },       .{ "HasCLWB", "CLWB" },
+    .{ "HasRDRAND", "RDRAND" },                    .{ "HasRDSEED", "RDSEED" },               .{ "HasFSGSBase", "FSGSBASE" },
+    .{ "HasSSEPrefetch", "SSE" },                  .{ "HasMWAITX", "MONITORX" },             .{ "HasCX16", "CMPXCHG16B" },
+    .{ "HasCX8", "CMPXCHG8B" },                    .{ "HasCMOV", "CMOV" },
+};
+
+fn featuresOf(a: std.mem.Allocator, preds: []const []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (preds) |p| for (pred_features) |pf| if (eql(u8, pf[0], p)) {
+        for (out.items) |o| {
+            if (eql(u8, o, pf[1])) break;
+        } else try out.append(a, pf[1]);
+    };
+    std.mem.sort([]const u8, out.items, {}, struct {
+        fn lt(_: void, x_: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x_, y);
+        }
+    }.lt);
+    return out.items;
+}
+
 const Skip = error{Skip};
-const eql = std.mem.eql;
 
 fn has(list: []const []const u8, s: []const u8) bool {
     for (list) |x| if (eql(u8, x, s)) return true;
@@ -548,7 +598,12 @@ pub fn line(a: std.mem.Allocator, f: Form) ![]const u8 {
         if (i != 0) try ops.appendSlice(a, ", ");
         try ops.print(a, ".{{ .k = .{s}, .size = {d}, .bcst = {d} }}", .{ o.k, o.size, o.bcst });
     }
-    const mode = if (eql(u8, f.mode, "any")) "" else try std.fmt.allocPrint(a, ", .mode = .{s}", .{f.mode});
+    var mode: []const u8 = if (eql(u8, f.mode, "any")) "" else try std.fmt.allocPrint(a, ", .mode = .{s}", .{f.mode});
+    if (f.features.len != 0) {
+        var fl: std.ArrayList(u8) = .empty;
+        for (f.features, 0..) |x_, i| try fl.print(a, "{s}.{f}", .{ if (i != 0) ", " else "", std.zig.fmtId(x_) });
+        mode = try std.fmt.allocPrint(a, "{s}, .features = &.{{ {s} }}", .{ mode, fl.items });
+    }
     return std.fmt.allocPrint(a, ".{{ .ops = &.{{{s}}}, .enc = .{s}, .pre = &.{{{s}}}, .rexw = {}, .map = {d}, .op = &.{{{s}}}, .digit = {s}, .imm = {d}, .pp = {d}, .w = {d}, .l = {d}, .reg = {s}, .rm = {s}, .vvvv = {s}, .is4 = {s}, .plus = {s}, .mask = {d}, .er = {}, .sae = {}, .n = {d}, .lowprio = {}, .late_vex = {}, .exact_mem = {}{s} }}", .{
         ops.items,              @tagName(f.enc),       try hexList(a, f.pre), f.rexw,                f.map,       try hexList(a, f.op),
         try optStr(a, f.digit), f.imm,                 f.pp,                  f.w,                   f.l,         try optStr(a, f.reg),
@@ -679,6 +734,7 @@ pub fn build(a: std.mem.Allocator, db: lj.Db) !std.StringArrayHashMapUnmanaged(s
                 if (has(&.{ "HasAVXVNNI", "HasAVXIFMA", "HasAVXNECONVERT" }, p)) late = true;
             }
             if (avx10 and !other) f.lowprio = true;
+            f.features = try featuresOf(a, preds);
             if (f.enc == .vex and late) f.late_vex = true;
             const gop = try by.getOrPut(a, f.mn);
             if (!gop.found_existing) gop.value_ptr.* = .empty;

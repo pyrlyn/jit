@@ -28,6 +28,7 @@ jobs:
       - run: zig build fmt-check
       - run: zig build test --summary all
       - run: zig build test-x86-32 --summary all
+      - run: zig build lib -Dx86-features=sse4_2,popcnt,avx2
       - name: Cancel whole run on failure
         if: failure()
         env:

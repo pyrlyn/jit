@@ -22,6 +22,44 @@ const safety = @import("../core/safety.zig");
 const build_opts = @import("pyrlyn_jit_options");
 pub const Options = safety.Options;
 
+/// Build-time feature gate from `-Dx86-features=sse4_2,avx2,...` (null: no gating). Names are
+/// `isa.Feature` tags, matched case-insensitively and ignoring `_` (`avx512f` = `AVX512_F`).
+/// Baseline x86-64 (SSE, SSE2, FPU, MMX, CMOV, CMPXCHG8B, FXSR) is always included.
+pub const build_gate: ?isa.Features = blk: {
+    if (!@hasDecl(build_opts, "x86_features") or build_opts.x86_features.len == 0) break :blk null;
+    break :blk parseFeatureList(build_opts.x86_features);
+};
+
+/// Parses a comma-separated feature list (see `build_gate`) at compile time.
+pub fn parseFeatureList(comptime list: []const u8) isa.Features {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        var set = isa.featureSet(&.{ .SSE, .SSE2, .FPU, .MMX, .CMOV, .CMPXCHG8B, .FXSR });
+        var it = std.mem.tokenizeScalar(u8, list, ',');
+        outer: while (it.next()) |raw| {
+            const name = std.mem.trim(u8, raw, " ");
+            for (std.meta.fieldNames(isa.Feature)) |fname| if (looseEql(fname, name)) {
+                set.insert(@field(isa.Feature, fname));
+                continue :outer;
+            };
+            @compileError("-Dx86-features: unknown CPU feature '" ++ name ++ "'");
+        }
+        return set;
+    }
+}
+fn looseEql(comptime a: []const u8, comptime b: []const u8) bool {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (true) {
+        while (i < a.len and a[i] == '_') i += 1;
+        while (j < b.len and b[j] == '_') j += 1;
+        if (i == a.len or j == b.len) return i == a.len and j == b.len;
+        if (std.ascii.toLower(a[i]) != std.ascii.toLower(b[j])) return false;
+        i += 1;
+        j += 1;
+    }
+}
+
 pub const Gp = enum(u4) {
     rax,
     rcx,
@@ -428,8 +466,18 @@ pub fn AssemblerT(comptime opts: Options) type {
             }
         }
 
+        /// Features every form of a vector mnemonic needs (for the deny list).
+        fn vecUnion(comptime forms: []const vec.Form) isa.Features {
+            comptime {
+                @setEvalBranchQuota(1_000_000);
+                var all: isa.Features = .full;
+                for (forms) |f| all = all.intersectWith(isa.featureSet(f.features));
+                return if (forms.len == 0) .empty else all;
+            }
+        }
         fn checkDeny(comptime need: isa.Features, comptime name: []const u8) void {
             comptime {
+                if (build_gate) |g| if (!need.subsetOf(g)) @compileError("instruction " ++ name ++ " needs CPU features outside -Dx86-features");
                 const deny = safety.featureSet(isa.Feature, opts.deny_features);
                 if (need.intersectWith(deny).count() != 0) @compileError("instruction " ++ name ++ " needs a CPU feature in deny_features");
             }
@@ -466,12 +514,25 @@ pub fn AssemblerT(comptime opts: Options) type {
         /// `a.vinst(.vaddps, .{ vec.zmm(1), vec.zmm(2), vec.bcst(vec.mem(ptr(.rax, 0), 4), 16) }, .{ .k = 1, .z = true })`.
         /// Hooks see it as `Inst.vec` with `Ops.mn` set.
         pub fn vinst(a: Self, comptime mn: vec.Mnemonic, args: anytype, e: vec.Extra) (Error || vec.Error)!void {
-            if (comptime !has_hooks) return vec.emit(a.buf, mn, args, e);
-            const h = a.hooks orelse return vec.emit(a.buf, mn, args, e);
+            const forms = comptime if (build_gate) |g| vec.gatedForms(mn, g) else &@field(vec.tbl.table, @tagName(mn));
+            comptime checkDeny(vecUnion(forms), @tagName(mn));
+            if (comptime opts.validate and opts.cpu_check != .none) {
+                // Per selected form: `addps xmm` needs SSE, `vaddps zmm` AVX512_F.
+                const need = vec.selectedFeatures(.x64, forms, args, e) orelse return error.InvalidOperand;
+                var set: isa.Features = .empty;
+                for (need) |f| set.insert(f);
+                switch (opts.cpu_check) {
+                    .none => {},
+                    .target => try checkFeatureSet(set, comptime safety.featureSet(isa.Feature, opts.target_features)),
+                    .host => try checkFeatureSet(set, cpu.host() orelse return error.UnsupportedCpuFeature),
+                }
+            }
+            if (comptime !has_hooks) return vec.emitFormsIn(.x64, a.buf, forms, args, e);
+            const h = a.hooks orelse return vec.emitFormsIn(.x64, a.buf, forms, args, e);
             const ops: Ops = .{ .mn = @tagName(mn) };
             const start: u32 = @intCast(a.buf.len);
             if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = .vec, .ops = ops, .offset = start });
-            try vec.emit(a.buf, mn, args, e);
+            try vec.emitFormsIn(.x64, a.buf, forms, args, e);
             if (comptime @hasDecl(Hooks, "post")) h.post(.{ .id = .vec, .ops = ops, .offset = start, .bytes = a.buf.data[start..a.buf.len] });
         }
 

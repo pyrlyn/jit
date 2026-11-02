@@ -14,6 +14,7 @@ const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const x = @import("assembler.zig");
 const gp = @import("gp.zig");
+const isa = @import("isa.zig");
 pub const tbl = @import("vec_table.zig");
 pub const Mnemonic = tbl.Mnemonic;
 const CodeBuffer = core.CodeBuffer;
@@ -60,6 +61,8 @@ pub const Form = struct {
     /// Memory operand must be explicitly sized (`mov word_ptr, sreg` takes 66, unsized does not).
     exact_mem: bool = false,
     mode: gp.Mode = .any,
+    /// CPU features this form needs (from LLVM `Predicates`; AVX-512 VL is folded into AVX512_F).
+    features: []const isa.Feature = &.{},
 };
 
 pub const Cls = enum(u4) { xmm, ymm, zmm, mm, k, tmm, st, seg, cr, dr };
@@ -473,9 +476,43 @@ pub fn encodeFormIn(comptime cm: gp.CpuMode, f: *const Form, ops: []const Op, e:
 /// order at compile time; each candidate is then checked and encoded with its form as a comptime
 /// constant (register-class tests and the encoder fold to a few compares and stores).
 pub inline fn emitIn(comptime cm: gp.CpuMode, buf: *CodeBuffer, comptime mn: Mnemonic, args: anytype, e: Extra) Error!void {
+    return emitFormsIn(cm, buf, &@field(tbl.table, @tagName(mn)), args, e);
+}
+
+/// Forms of `mn` whose CPU features are all in `allowed` (forms without features are kept).
+/// Used for build-time gating (`-Dx86-features`): an empty result is a compile error.
+pub fn gatedForms(comptime mn: Mnemonic, comptime allowed: isa.Features) []const Form {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        const all = &@field(tbl.table, @tagName(mn));
+        var out: [all.len]Form = undefined;
+        var n: usize = 0;
+        for (all) |f| {
+            if (!isa.featureSet(f.features).subsetOf(allowed)) continue;
+            out[n] = f;
+            n += 1;
+        }
+        if (n == 0) @compileError("instruction " ++ @tagName(mn) ++ " has no form allowed by -Dx86-features");
+        const final = out[0..n].*;
+        return &final;
+    }
+}
+
+/// CPU features of the form `emitIn` would pick for these operands (null: no form matches).
+pub fn selectedFeatures(comptime cm: gp.CpuMode, comptime all: []const Form, args: anytype, e: Extra) ?[]const isa.Feature {
     var ops: [args.len]Op = undefined;
     inline for (args, 0..) |a, i| ops[i] = toOp(a);
-    const all = &@field(tbl.table, @tagName(mn));
+    if (pick(cm, comptime narrow(all, @TypeOf(args)), &ops, e)) |f| return f.features;
+    if (pick(cm, all, &ops, e)) |f| return f.features;
+    var tmp: [8]Op = undefined;
+    if (ops.len <= tmp.len) if (pickAliased(cm, all, &ops, e, &tmp)) |a| return a.f.features;
+    return null;
+}
+
+/// `emitIn` over an explicit (comptime) form list, e.g. `gatedForms(...)`.
+pub inline fn emitFormsIn(comptime cm: gp.CpuMode, buf: *CodeBuffer, comptime all: []const Form, args: anytype, e: Extra) Error!void {
+    var ops: [args.len]Op = undefined;
+    inline for (args, 0..) |a, i| ops[i] = toOp(a);
     const Args = @TypeOf(args);
     if (comptime specializable(Args)) {
         const sorted = comptime prioritized(all, Args);

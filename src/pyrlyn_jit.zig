@@ -47,6 +47,7 @@ test {
     _ = @import("enc_tests.zig");
     _ = @import("gp_tests.zig");
     _ = @import("simd_tests.zig");
+    if (opts.x86_64) _ = @import("cpu_feature_tests.zig");
     _ = @import("avx512_tests.zig");
     _ = @import("vec_table_tests.zig");
     _ = @import("a64_sve_tests.zig");
