@@ -15,7 +15,7 @@ Builder, Compiler and register allocator: [docs/ROADMAP.md](docs/ROADMAP.md).
 GP API (mov/lea/ALU/test/imul/inc/dec/push/pop/ret imm16/call/jmp/jcc with labels, absolute
 moffs), cdecl/stdcall/fastcall/SysV-i386 data, prolog/epilog, generic `inst()` over the shared
 GP table in 32-bit mode (already covered by the 8310 AsmJit x86 cases). Tests byte-exact vs
-`clang -target i386`. Mode is a comptime `gp.CpuMode` parameter (`emitIn(.x86, ...)`; no global state). Not yet: hooks, SIMD
+`clang -target i386`. Mode is a comptime `gp.CpuMode` parameter (`emitIn(.x86, ...)`; no global state). Hooks: `Options.Hooks` (pre/post, same events as x86-64). Not yet: SIMD
 wrapper, Builder/Compiler support, execution tests (no 32-bit host).
 - Module `src/x86/`; share REX-less encoder pieces with `x86_64` through a comptime
   `mode: enum { x86, x86_64 }` parameter, not a runtime flag.

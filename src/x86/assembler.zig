@@ -12,6 +12,25 @@ pub const gp = @import("../x86_64/gp.zig");
 const CodeBuffer = core.CodeBuffer;
 pub const Label = core.Label;
 pub const Error = core.Error || gp.Error || error{InvalidOperand};
+const safety = @import("../core/safety.zig");
+
+/// Instruction id seen by hooks: `.gp` for everything emitted through `inst` (all typed GP
+/// wrappers), the rest for the hand-encoded control-flow emitters.
+pub const Inst = enum { gp, mov_ri, inc, dec, push, pop, push_i, ret, ret_n, nop, int3, call_r, jmp_r, jmp, call, jcc };
+/// Operands passed to hooks. Unused fields are null.
+pub const Ops = struct {
+    /// `.gp`: the mnemonic (operands are not decoded into `Ops`).
+    mn: ?[]const u8 = null,
+    r0: ?Gp = null,
+    imm: ?i64 = null,
+    label: ?Label = null,
+    cond: ?Cond = null,
+};
+pub const PreEvent = safety.PreEvent(Inst, Ops);
+pub const Event = safety.Event(Inst, Ops);
+pub const CountingHooks = safety.CountingHooks;
+pub const LogHooks = safety.LogHooks;
+pub const CallbackHooks = safety.CallbackHooks(Event);
 
 pub const Gp = enum(u3) {
     eax,
@@ -66,15 +85,39 @@ pub const CallConv = struct {
     pub const fastcall: CallConv = .{ .reg_args = &.{ .ecx, .edx }, .callee_pops = true };
 };
 
-pub const Options = struct { validate: bool = true };
+pub const Options = struct {
+    validate: bool = true,
+    /// Hook type (`pre`/`post`, see core/safety.zig); `void` compiles hooks out.
+    Hooks: type = void,
+};
 
 pub fn AssemblerT(comptime opts: Options) type {
     return struct {
         const Self = @This();
+        pub const options = opts;
+        pub const Hooks = opts.Hooks;
+        const has_hooks = Hooks != void;
         buf: *CodeBuffer,
+        /// Hook instance; null = no hook attached (only exists when `Hooks != void`).
+        hooks: if (has_hooks) ?*Hooks else void = if (has_hooks) null else {},
 
         pub fn init(buf: *CodeBuffer) Self {
             return .{ .buf = buf };
+        }
+        pub fn initHooks(buf: *CodeBuffer, h: *Hooks) Self {
+            return .{ .buf = buf, .hooks = h };
+        }
+        /// Runs `f(args)` between the `pre` and `post` hooks (a plain call without hooks).
+        inline fn hooked(a: Self, comptime id: Inst, ops: Ops, comptime f: anytype, args: anytype) Error!void {
+            if (comptime !has_hooks) return @call(.auto, f, args);
+            const h = a.hooks orelse return @call(.auto, f, args);
+            const start: u32 = @intCast(a.buf.len);
+            if (comptime @hasDecl(Hooks, "pre")) try h.pre(.{ .id = id, .ops = ops, .offset = start });
+            try @call(.auto, f, args);
+            if (comptime @hasDecl(Hooks, "post")) h.post(.{ .id = id, .ops = ops, .offset = start, .bytes = a.buf.data[start..a.buf.len] });
+        }
+        fn bytes(a: Self, b: []const u8) Error!void {
+            return a.buf.emitBytes(b);
         }
         pub fn newLabel(a: Self) Error!Label {
             return a.buf.newLabel();
@@ -93,7 +136,7 @@ pub fn AssemblerT(comptime opts: Options) type {
         /// memory, immediates): `a.inst(.movzx, .{ gp.r32(.rax), gp.byte(...) })`.
         /// 64-bit registers and REX-only registers are rejected by the encoder.
         pub fn inst(a: Self, comptime mn: gp.Mnemonic, args: anytype) Error!void {
-            return gp.emitIn(.x86, a.buf, mn, args);
+            return a.hooked(.gp, .{ .mn = @tagName(mn) }, gp.emitIn, .{ .x86, a.buf, mn, args });
         }
         inline fn r(g: Gp) gp.Reg {
             return gp.r32(g.wide());
@@ -121,9 +164,9 @@ pub fn AssemblerT(comptime opts: Options) type {
         pub fn movRI(a: Self, d: Gp, i: i64) Error!void {
             if (i < std.math.minInt(i32) or i > std.math.maxInt(u32)) return error.InvalidOperand;
             const v: u32 = @truncate(@as(u64, @bitCast(i)));
-            try a.buf.ensure(5);
-            a.buf.put8(0xB8 + @as(u8, @backingInt(d)));
-            a.buf.put32(v);
+            var e: [5]u8 = .{ 0xB8 + @as(u8, @backingInt(d)), 0, 0, 0, 0 };
+            std.mem.writeInt(u32, e[1..5], v, .little);
+            return a.hooked(.mov_ri, .{ .r0 = d, .imm = i }, bytes, .{ a, &e });
         }
         pub fn lea(a: Self, d: Gp, s: Mem) Error!void {
             try checkMem(s);
@@ -166,42 +209,42 @@ pub fn AssemblerT(comptime opts: Options) type {
         }
         /// One-byte `inc r32` (0x40+r), legal only in 32-bit mode.
         pub fn inc(a: Self, d: Gp) Error!void {
-            try a.buf.emitBytes(&.{0x40 + @as(u8, @backingInt(d))});
+            return a.hooked(.inc, .{ .r0 = d }, bytes, .{ a, &[_]u8{0x40 + @as(u8, @backingInt(d))} });
         }
         pub fn dec(a: Self, d: Gp) Error!void {
-            try a.buf.emitBytes(&.{0x48 + @as(u8, @backingInt(d))});
+            return a.hooked(.dec, .{ .r0 = d }, bytes, .{ a, &[_]u8{0x48 + @as(u8, @backingInt(d))} });
         }
         pub fn push(a: Self, g: Gp) Error!void {
-            try a.buf.emitBytes(&.{0x50 + @as(u8, @backingInt(g))});
+            return a.hooked(.push, .{ .r0 = g }, bytes, .{ a, &[_]u8{0x50 + @as(u8, @backingInt(g))} });
         }
         pub fn pop(a: Self, g: Gp) Error!void {
-            try a.buf.emitBytes(&.{0x58 + @as(u8, @backingInt(g))});
+            return a.hooked(.pop, .{ .r0 = g }, bytes, .{ a, &[_]u8{0x58 + @as(u8, @backingInt(g))} });
         }
         pub fn pushI(a: Self, i: i32) Error!void {
-            if (std.math.cast(i8, i)) |b| return a.buf.emitBytes(&.{ 0x6A, @bitCast(b) });
+            if (std.math.cast(i8, i)) |b| return a.hooked(.push_i, .{ .imm = i }, bytes, .{ a, &[_]u8{ 0x6A, @bitCast(b) } });
             var e: [5]u8 = .{ 0x68, 0, 0, 0, 0 };
             std.mem.writeInt(i32, e[1..5], i, .little);
-            return a.buf.emitBytes(&e);
+            return a.hooked(.push_i, .{ .imm = i }, bytes, .{ a, &e });
         }
         pub fn ret(a: Self) Error!void {
-            return a.buf.emitBytes(&.{0xC3});
+            return a.hooked(.ret, .{}, bytes, .{ a, &[_]u8{0xC3} });
         }
         /// `ret imm16` (callee pops `n` bytes: stdcall/fastcall).
         pub fn retN(a: Self, n: u16) Error!void {
             if (n == 0) return a.ret();
-            return a.buf.emitBytes(&.{ 0xC2, @truncate(n), @truncate(n >> 8) });
+            return a.hooked(.ret_n, .{ .imm = n }, bytes, .{ a, &[_]u8{ 0xC2, @truncate(n), @truncate(n >> 8) } });
         }
         pub fn nop(a: Self) Error!void {
-            return a.buf.emitBytes(&.{0x90});
+            return a.hooked(.nop, .{}, bytes, .{ a, &[_]u8{0x90} });
         }
         pub fn int3(a: Self) Error!void {
-            return a.buf.emitBytes(&.{0xCC});
+            return a.hooked(.int3, .{}, bytes, .{ a, &[_]u8{0xCC} });
         }
         pub fn callR(a: Self, g: Gp) Error!void {
-            return a.buf.emitBytes(&.{ 0xFF, 0xD0 + @as(u8, @backingInt(g)) });
+            return a.hooked(.call_r, .{ .r0 = g }, bytes, .{ a, &[_]u8{ 0xFF, 0xD0 + @as(u8, @backingInt(g)) } });
         }
         pub fn jmpR(a: Self, g: Gp) Error!void {
-            return a.buf.emitBytes(&.{ 0xFF, 0xE0 + @as(u8, @backingInt(g)) });
+            return a.hooked(.jmp_r, .{ .r0 = g }, bytes, .{ a, &[_]u8{ 0xFF, 0xE0 + @as(u8, @backingInt(g)) } });
         }
         fn branch(a: Self, short_op: []const u8, long_op: []const u8, l: Label) Error!void {
             if (!a.buf.isValidLabel(l)) return error.InvalidLabel;
@@ -223,14 +266,14 @@ pub fn AssemblerT(comptime opts: Options) type {
             try a.buf.addFixup(.{ .at = at, .base = at + 4, .label = l.id, .kind = .rel32 });
         }
         pub fn jmp(a: Self, l: Label) Error!void {
-            return a.branch(&.{0xEB}, &.{0xE9}, l);
+            return a.hooked(.jmp, .{ .label = l }, branch, .{ a, &[_]u8{0xEB}, &[_]u8{0xE9}, l });
         }
         pub fn call(a: Self, l: Label) Error!void {
-            return a.branch(&.{}, &.{0xE8}, l);
+            return a.hooked(.call, .{ .label = l }, branch, .{ a, &[_]u8{}, &[_]u8{0xE8}, l });
         }
         pub fn jcc(a: Self, c: Cond, l: Label) Error!void {
             const cc: u8 = @backingInt(c);
-            return a.branch(&.{0x70 + cc}, &.{ 0x0F, 0x80 + cc }, l);
+            return a.hooked(.jcc, .{ .label = l, .cond = c }, branch, .{ a, &[_]u8{0x70 + cc}, &[_]u8{ 0x0F, 0x80 + cc }, l });
         }
         /// `mov eax, addr; call eax` (eax is caller-saved in every 32-bit convention).
         pub fn callAbs(a: Self, addr: u32) Error!void {
@@ -352,4 +395,48 @@ test "x86: stdcall prolog/epilog and generic inst path" {
     // push ebp; mov ebp,esp; push ebx; sub esp,4; mov eax,[ebp+8]; movzx ecx, byte [eax];
     // add esp,4; pop ebx; pop ebp; ret 8
     try t.expectEqualSlices(u8, &.{ 0x55, 0x89, 0xE5, 0x53, 0x83, 0xEC, 0x04, 0x8B, 0x45, 0x08, 0x0F, 0xB6, 0x08, 0x83, 0xC4, 0x04, 0x5B, 0x5D, 0xC2, 0x08, 0x00 }, cb.code());
+}
+
+test "x86: hooks see every instruction (pre veto, post bytes, compiled out by default)" {
+    const H = struct {
+        n: u32 = 0,
+        bytes: u32 = 0,
+        jcc: u32 = 0,
+        veto_int3: bool = true,
+        pub fn pre(h: *@This(), ev: PreEvent) Error!void {
+            if (h.veto_int3 and ev.id == .int3) return error.InvalidOperand;
+        }
+        pub fn post(h: *@This(), ev: Event) void {
+            h.n += 1;
+            h.bytes += @intCast(ev.bytes.len);
+            if (ev.id == .jcc) h.jcc += 1;
+        }
+    };
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    var h: H = .{};
+    const a = AssemblerT(.{ .Hooks = H }).initHooks(&cb, &h);
+    const l = try a.newLabel();
+    try a.bind(l);
+    try a.movRR(.eax, .ecx); // gp
+    try a.addRI(.eax, 1); // gp
+    try a.jcc(.ne, l); // jcc rel8
+    try a.callR(.eax);
+    try a.retN(8);
+    try t.expectError(error.InvalidOperand, a.int3());
+    try t.expectEqual(@as(u32, 5), h.n);
+    try t.expectEqual(@as(u32, 1), h.jcc);
+    try t.expectEqual(@as(u32, @intCast(cb.code().len)), h.bytes);
+    // Hook type set but no instance attached: plain emission.
+    const b = AssemblerT(.{ .Hooks = H }).init(&cb);
+    try b.nop();
+    try t.expectEqual(@as(u32, 5), h.n);
+    try t.expectEqual(@sizeOf(*CodeBuffer), @sizeOf(Assembler));
+    // CountingHooks works unchanged.
+    var c: CountingHooks = .{};
+    const ca = AssemblerT(.{ .Hooks = CountingHooks }).initHooks(&cb, &c);
+    const before = cb.code().len;
+    _ = try ca.prolog(&.{.ebx}, 0); // push ebp; mov ebp, esp; push ebx; sub esp, 4
+    try t.expectEqual(@as(usize, 4), c.instructions);
+    try t.expectEqual(cb.code().len - before, c.bytes);
 }
