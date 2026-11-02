@@ -117,19 +117,19 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
             return switch (s.locs[v]) {
                 .reg => |r| @fromBackingInt(@intCast(r)),
                 .stack => |k| blk: {
-                    try s.b.movRM(scratch, s.slot(k));
+                    try s.b.emit(.movRM, .{ scratch, s.slot(k) });
                     break :blk scratch;
                 },
                 .none => blk: { // undefined value: reads as 0
-                    try s.b.movRI(scratch, 0);
+                    try s.b.emit(.movRI, .{ scratch, 0 });
                     break :blk scratch;
                 },
             };
         }
         fn put(s: @This(), v: ir.VReg, src: Gp) !void {
             switch (s.locs[v]) {
-                .reg => |r| if (@as(Gp, @fromBackingInt(@intCast(r))) != src) try s.b.movRR(@fromBackingInt(@intCast(r)), src),
-                .stack => |k| try s.b.movMR(s.slot(k), src),
+                .reg => |r| if (@as(Gp, @fromBackingInt(@intCast(r))) != src) try s.b.emit(.movRR, .{ @fromBackingInt(@intCast(r)), src }),
+                .stack => |k| try s.b.emit(.movMR, .{ s.slot(k), src }),
                 .none => {},
             }
         }
@@ -138,15 +138,15 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
 
     // ---- prolog ----
     try b.comment(f.name);
-    try b.push(.rbp);
-    try b.movRR(.rbp, .rsp);
-    for (saved.items) |r| try b.push(r);
-    if (adj != 0) try b.subRI(.rsp, @intCast(adj));
+    try b.emit(.push, .{.rbp});
+    try b.emit(.movRR, .{ .rbp, .rsp });
+    for (saved.items) |r| try b.emit(.push, .{r});
+    if (adj != 0) try b.emit(.subRI, .{ .rsp, @intCast(adj) });
     for (0..f.params) |i| {
         if (i < cc.args.len) {
             try ctx.put(@intCast(i), cc.args[i]);
         } else {
-            try b.movRM(s0, cc.stackArg(i));
+            try b.emit(.movRM, .{ s0, cc.stackArg(i) });
             try ctx.put(@intCast(i), s0);
         }
     }
@@ -171,9 +171,9 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
             };
             switch (o) {
                 .@"const" => |c| switch (res.locs[c.dst]) {
-                    .reg => |r| try b.movRI(@fromBackingInt(@intCast(r)), c.imm),
+                    .reg => |r| try b.emit(.movRI, .{ @fromBackingInt(@intCast(r)), c.imm }),
                     else => {
-                        try b.movRI(s0, c.imm);
+                        try b.emit(.movRI, .{ s0, c.imm });
                         try ctx.put(c.dst, s0);
                     },
                 },
@@ -191,18 +191,18 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                         if (known[c.b]) |k| if (std.math.cast(i32, k)) |imm| {
                             const ra0 = try ctx.get(c.a, s0);
                             if (alu) |op| {
-                                if (ra0 != s0) try b.movRR(s0, ra0);
-                                try b.aluRI(op, s0, imm);
-                            } else try b.imulRRI(s0, ra0, imm);
+                                if (ra0 != s0) try b.emit(.movRR, .{ s0, ra0 });
+                                try b.emit(.aluRI, .{ op, s0, imm });
+                            } else try b.emit(.imulRRI, .{ s0, ra0, imm });
                             try ctx.put(c.dst, s0);
                             folded_imm += 1;
                             break :fold;
                         };
                         if (res.locs[c.b] == .stack) {
                             const ra0 = try ctx.get(c.a, s0);
-                            if (ra0 != s0) try b.movRR(s0, ra0);
+                            if (ra0 != s0) try b.emit(.movRR, .{ s0, ra0 });
                             const m = ctx.slot(res.locs[c.b].stack);
-                            if (alu) |op| try b.aluRM(op, s0, m) else try b.imulRM(s0, m);
+                            if (alu) |op| try b.emit(.aluRM, .{ op, s0, m }) else try b.emit(.imulRM, .{ s0, m });
                             try ctx.put(c.dst, s0);
                             folded_mem += 1;
                             break :fold;
@@ -210,84 +210,84 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     }
                     const ra_ = try ctx.get(c.a, s0);
                     const rb = try ctx.get(c.b, s1);
-                    if (ra_ != s0) try b.movRR(s0, ra_);
+                    if (ra_ != s0) try b.emit(.movRR, .{ s0, ra_ });
                     switch (c.op) {
                         .shl, .shr, .sar => {
-                            try b.movRR(.rcx, rb);
-                            try b.shiftRCl(switch (c.op) {
+                            try b.emit(.movRR, .{ .rcx, rb });
+                            try b.emit(.shiftRCl, .{ switch (c.op) {
                                 .shl => .shl,
                                 .shr => .shr,
                                 else => .sar,
-                            }, s0);
+                            }, s0 });
                         },
                         .sdiv, .srem => {
-                            try b.movRR(.rcx, rb);
-                            try b.movRR(s1, .rax);
-                            try b.movRR(.rax, s0);
-                            try b.cqo();
-                            try b.idivR(.rcx);
-                            try b.movRR(s0, if (c.op == .sdiv) .rax else .rdx);
-                            try b.movRR(.rax, s1);
+                            try b.emit(.movRR, .{ .rcx, rb });
+                            try b.emit(.movRR, .{ s1, .rax });
+                            try b.emit(.movRR, .{ .rax, s0 });
+                            try b.add(.cqo);
+                            try b.emit(.idivR, .{.rcx});
+                            try b.emit(.movRR, .{ s0, if (c.op == .sdiv) .rax else .rdx });
+                            try b.emit(.movRR, .{ .rax, s1 });
                         },
-                        .add => try b.aluRR(.add, s0, rb),
-                        .sub => try b.aluRR(.sub, s0, rb),
-                        .@"and" => try b.aluRR(.@"and", s0, rb),
-                        .@"or" => try b.aluRR(.@"or", s0, rb),
-                        .xor => try b.aluRR(.xor, s0, rb),
-                        .mul => try b.imulRR(s0, rb),
+                        .add => try b.emit(.aluRR, .{ .add, s0, rb }),
+                        .sub => try b.emit(.aluRR, .{ .sub, s0, rb }),
+                        .@"and" => try b.emit(.aluRR, .{ .@"and", s0, rb }),
+                        .@"or" => try b.emit(.aluRR, .{ .@"or", s0, rb }),
+                        .xor => try b.emit(.aluRR, .{ .xor, s0, rb }),
+                        .mul => try b.emit(.imulRR, .{ s0, rb }),
                     }
                     try ctx.put(c.dst, s0);
                 },
                 .load => |c| {
                     const base = try ctx.get(c.base, s1);
-                    try b.movRM(s0, x.ptr(base, c.disp));
+                    try b.emit(.movRM, .{ s0, x.ptr(base, c.disp) });
                     try ctx.put(c.dst, s0);
                 },
                 .store => |c| {
                     const base = try ctx.get(c.base, s1);
                     const v = try ctx.get(c.src, s0);
-                    try b.movMR(x.ptr(base, c.disp), v);
+                    try b.emit(.movMR, .{ x.ptr(base, c.disp), v });
                 },
                 .call => |c| {
                     // Split ranges: save caller-saved registers live across this call.
                     for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
-                        try b.movMR(ctx.slot(res.save_slot[v].?), @fromBackingInt(@intCast(res.locs[v].reg)));
+                        try b.emit(.movMR, .{ ctx.slot(res.save_slot[v].?), @fromBackingInt(@intCast(res.locs[v].reg)) });
                     };
                     // Argument registers are never allocated: plain moves, no parallel-move cycles.
                     // Stack arguments: pushed right to left, padded so rsp stays 16-aligned.
                     const nreg = @min(c.args.len, cc.args.len);
                     const nstack = c.args.len - nreg;
                     const pad: u32 = if (nstack % 2 == 1) 8 else 0;
-                    if (pad != 0) try b.subRI(.rsp, @intCast(pad));
+                    if (pad != 0) try b.emit(.subRI, .{ .rsp, @intCast(pad) });
                     var k = c.args.len;
                     while (k > nreg) {
                         k -= 1;
-                        try b.push(try ctx.get(c.args[k], s0));
+                        try b.emit(.push, .{try ctx.get(c.args[k], s0)});
                     }
                     for (c.args[0..nreg], 0..) |a, i| {
                         const r = try ctx.get(a, s0);
-                        if (r != cc.args[i]) try b.movRR(cc.args[i], r);
+                        if (r != cc.args[i]) try b.emit(.movRR, .{ cc.args[i], r });
                     }
-                    if (cc.shadow != 0) try b.subRI(.rsp, @intCast(cc.shadow));
-                    try b.callAbs(c.addr);
+                    if (cc.shadow != 0) try b.emit(.subRI, .{ .rsp, @intCast(cc.shadow) });
+                    try b.emit(.callAbs, .{c.addr});
                     const pop: u32 = cc.shadow + pad + 8 * @as(u32, @intCast(nstack));
-                    if (pop != 0) try b.addRI(.rsp, @intCast(pop));
+                    if (pop != 0) try b.emit(.addRI, .{ .rsp, @intCast(pop) });
                     var restored = false;
                     for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
-                        if (!restored) try b.movRR(s1, .rax);
+                        if (!restored) try b.emit(.movRR, .{ s1, .rax });
                         restored = true;
-                        try b.movRM(@fromBackingInt(@intCast(res.locs[v].reg)), ctx.slot(res.save_slot[v].?));
+                        try b.emit(.movRM, .{ @fromBackingInt(@intCast(res.locs[v].reg)), ctx.slot(res.save_slot[v].?) });
                     };
                     try ctx.put(c.dst, if (restored) s1 else .rax);
                 },
                 .bra, .cbra => unreachable, // removed by lowerBlockParams
-                .br => |tg| try b.jmp(labels[tg]),
+                .br => |tg| try b.emit(.jmp, .{labels[tg]}),
                 .cbr => |c| {
                     const ra_ = try ctx.get(c.a, s0);
                     if (known[c.b]) |k| if (std.math.cast(i32, k)) |imm| {
-                        try b.cmpRI(ra_, imm);
+                        try b.emit(.cmpRI, .{ ra_, imm });
                         folded_imm += 1;
-                    } else try b.cmpRR(ra_, try ctx.get(c.b, s1)) else try b.cmpRR(ra_, try ctx.get(c.b, s1));
+                    } else try b.emit(.cmpRR, .{ ra_, try ctx.get(c.b, s1) }) else try b.emit(.cmpRR, .{ ra_, try ctx.get(c.b, s1) });
                     const cond: x.Cond = switch (c.cond) {
                         .eq => .e,
                         .ne => .ne,
@@ -300,26 +300,26 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                         .ugt => .a,
                         .uge => .ae,
                     };
-                    try b.jcc(cond, labels[c.then]);
-                    try b.jmp(labels[c.@"else"]);
+                    try b.emit(.jcc, .{ cond, labels[c.then] });
+                    try b.emit(.jmp, .{labels[c.@"else"]});
                 },
                 .ret => |v| {
                     const r = try ctx.get(v, s0);
-                    if (r != .rax) try b.movRR(.rax, r);
-                    try b.jmp(epilog);
+                    if (r != .rax) try b.emit(.movRR, .{ .rax, r });
+                    try b.emit(.jmp, .{epilog});
                 },
             }
         }
     }
     try b.bind(epilog);
-    if (adj != 0) try b.addRI(.rsp, @intCast(adj));
+    if (adj != 0) try b.emit(.addRI, .{ .rsp, @intCast(adj) });
     var i = saved.items.len;
     while (i > 0) {
         i -= 1;
-        try b.pop(saved.items[i]);
+        try b.emit(.pop, .{saved.items[i]});
     }
-    try b.pop(.rbp);
-    try b.ret();
+    try b.emit(.pop, .{.rbp});
+    try b.add(.ret);
     return .{ .spills = res.spills, .slots = res.num_slots, .nodes = b.count(), .folded_imm = folded_imm, .folded_mem = folded_mem };
 }
 
