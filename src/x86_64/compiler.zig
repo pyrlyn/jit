@@ -365,7 +365,7 @@ test "compiler: differential vs interpreter on random programs" {
                 const d = r.uintLessThan(u32, nv);
                 if (r.boolean()) {
                     try f.emit(blk, .{ .@"const" = .{ .dst = d, .imm = r.int(i32) } });
-                } else try f.emit(blk, .{ .arith = .{ .op = @enumFromInt(r.uintLessThan(u8, @intFromEnum(ir.Arith.sdiv))), .dst = d, .a = r.uintLessThan(u32, nv), .b = r.uintLessThan(u32, nv) } });
+                } else try f.emit(blk, .{ .arith = .{ .op = @fromBackingInt(@intCast(r.uintLessThan(u8, @backingInt(ir.Arith.sdiv)))), .dst = d, .a = r.uintLessThan(u32, nv), .b = r.uintLessThan(u32, nv) } });
             }
             // forward-only control flow => always terminates
             if (bi + 1 == nb) {
