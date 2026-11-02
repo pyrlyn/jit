@@ -10,7 +10,8 @@
 //! compares, int<->fp conversions, fmv between register files, s<->d conversion.
 //! Far control flow: `callFar`/`jFar`/`la` (auipc pairs, ±2 GiB, fixup `rv_pcrel_pair`) and
 //! `bFar` (inverted branch over `jal`, ±1 MiB).
-//! Not yet: C (compressed), RV32, far branches (auipc+jalr pairs).
+//! C extension subset (explicit `c*` emitters: c.nop/addi/addiw/li/slli/mv/add/jr/ret/ldsp/sdsp).
+//! Not yet: rest of C (compressed branches, c.ld/c.sd with x8..x15), RV32.
 const std = @import("std");
 const core = @import("../core/code_buffer.zig");
 const CodeBuffer = core.CodeBuffer;
@@ -149,6 +150,74 @@ pub fn AssemblerT(comptime opts: Options) type {
         pub fn bind(a: Self, l: Label) Error!void {
             return a.buf.bind(l);
         }
+        // ---- C extension (RV64C subset): explicit 16-bit forms, never chosen implicitly ----
+        fn half(a: Self, h: u16) Error!void {
+            var hb: [2]u8 = undefined;
+            std.mem.writeInt(u16, &hb, h, .little);
+            return a.buf.emitBytes(&hb);
+        }
+        fn imm6(v: i64) Error!u16 {
+            if (v < -32 or v > 31) return error.InvalidOperand;
+            return @truncate(@as(u64, @bitCast(v)) & 0x3F);
+        }
+        fn ci(a: Self, f3: u16, rd: X, imm: u16, op: u16) Error!void {
+            return a.half(f3 << 13 | (imm >> 5 & 1) << 12 | @as(u16, @intCast(rd.n())) << 7 | (imm & 0x1F) << 2 | op);
+        }
+        /// `c.nop`.
+        pub fn cNop(a: Self) Error!void {
+            return a.half(0x0001);
+        }
+        /// `c.addi rd, imm` (rd != zero, imm != 0, -32..31).
+        pub fn cAddi(a: Self, rd: X, imm: i64) Error!void {
+            if (rd == .zero or imm == 0) return error.InvalidOperand;
+            return a.ci(0b000, rd, try imm6(imm), 0b01);
+        }
+        /// `c.addiw rd, imm` (rd != zero, -32..31).
+        pub fn cAddiw(a: Self, rd: X, imm: i64) Error!void {
+            if (rd == .zero) return error.InvalidOperand;
+            return a.ci(0b001, rd, try imm6(imm), 0b01);
+        }
+        /// `c.li rd, imm` (rd != zero, -32..31).
+        pub fn cLi(a: Self, rd: X, imm: i64) Error!void {
+            if (rd == .zero) return error.InvalidOperand;
+            return a.ci(0b010, rd, try imm6(imm), 0b01);
+        }
+        /// `c.slli rd, shamt` (rd != zero, 1..63).
+        pub fn cSlli(a: Self, rd: X, shamt: u6) Error!void {
+            if (rd == .zero or shamt == 0) return error.InvalidOperand;
+            return a.ci(0b000, rd, shamt, 0b10);
+        }
+        /// `c.mv rd, rs2` (both != zero).
+        pub fn cMv(a: Self, rd: X, rs2: X) Error!void {
+            if (rd == .zero or rs2 == .zero) return error.InvalidOperand;
+            return a.half(0b1000 << 12 | @as(u16, @intCast(rd.n())) << 7 | @as(u16, @intCast(rs2.n())) << 2 | 0b10);
+        }
+        /// `c.add rd, rs2` (both != zero).
+        pub fn cAdd(a: Self, rd: X, rs2: X) Error!void {
+            if (rd == .zero or rs2 == .zero) return error.InvalidOperand;
+            return a.half(0b1001 << 12 | @as(u16, @intCast(rd.n())) << 7 | @as(u16, @intCast(rs2.n())) << 2 | 0b10);
+        }
+        /// `c.jr rs1` (rs1 != zero); `c.jr ra` is `c.ret`.
+        pub fn cJr(a: Self, rs1: X) Error!void {
+            if (rs1 == .zero) return error.InvalidOperand;
+            return a.half(0b1000 << 12 | @as(u16, @intCast(rs1.n())) << 7 | 0b10);
+        }
+        pub fn cRet(a: Self) Error!void {
+            return a.cJr(.ra);
+        }
+        /// `c.ldsp rd, off(sp)` (rd != zero, off multiple of 8, 0..504).
+        pub fn cLdsp(a: Self, rd: X, off: u32) Error!void {
+            if (rd == .zero or off % 8 != 0 or off > 504) return error.InvalidOperand;
+            const o: u16 = @intCast(off);
+            return a.half(0b011 << 13 | (o >> 5 & 1) << 12 | @as(u16, @intCast(rd.n())) << 7 | (o >> 3 & 3) << 5 | (o >> 6 & 7) << 2 | 0b10);
+        }
+        /// `c.sdsp rs2, off(sp)` (off multiple of 8, 0..504).
+        pub fn cSdsp(a: Self, rs2: X, off: u32) Error!void {
+            if (off % 8 != 0 or off > 504) return error.InvalidOperand;
+            const o: u16 = @intCast(off);
+            return a.half(0b111 << 13 | (o >> 3 & 7) << 10 | (o >> 6 & 7) << 7 | @as(u16, @intCast(rs2.n())) << 2 | 0b10);
+        }
+
         fn word(a: Self, w: u32) Error!void {
             try a.buf.ensure(4);
             a.buf.put32(w);
@@ -617,6 +686,29 @@ test "riscv: far branches (auipc pairs and bFar)" {
     try a.la(.a2, back);
     try t.expectEqual(@as(i64, 0), rd.simm(rd.w(cb.code(), cb.code().len - 8), 20, 12));
     try t.expectError(error.InvalidOperand, a.jFar(.zero, back));
+}
+
+test "riscv: C extension subset (GNU as reference values)" {
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const a = Assembler.init(&cb);
+    try a.cNop(); // 0001
+    try a.cMv(.a0, .a1); // 852e
+    try a.cAdd(.a0, .a1); // 952e
+    try a.cLi(.a0, 1); // 4505
+    try a.cAddi(.a0, 1); // 0505
+    try a.cRet(); // 8082
+    try a.cLdsp(.ra, 8); // 60a2
+    try a.cSdsp(.ra, 8); // e406
+    try a.cAddi(.sp, -16); // 1141
+    try a.cSlli(.a0, 3); // 050e
+    try a.cAddiw(.a0, -1); // 357d
+    const want = [_]u16{ 0x0001, 0x852E, 0x952E, 0x4505, 0x0505, 0x8082, 0x60A2, 0xE406, 0x1141, 0x050E, 0x357D };
+    for (want, 0..) |w, i| try t.expectEqual(w, std.mem.readInt(u16, cb.code()[2 * i ..][0..2], .little));
+    try t.expectError(error.InvalidOperand, a.cAddi(.a0, 0));
+    try t.expectError(error.InvalidOperand, a.cLi(.a0, 32));
+    try t.expectError(error.InvalidOperand, a.cLdsp(.a0, 12));
+    try t.expectError(error.InvalidOperand, a.cMv(.a0, .zero));
 }
 
 test "riscv: branches and jal with labels (forward fixups and backward)" {
