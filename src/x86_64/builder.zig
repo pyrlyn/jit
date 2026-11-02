@@ -16,8 +16,19 @@ const Gp = x.Gp;
 const Mem = x.Mem;
 const Alu = x.Alu;
 const Cond = x.Cond;
+const gp = @import("gp.zig");
 
 pub const Error = x.Error;
+
+/// Shift kind for `shiftRCl` (count in cl, masked to 6 bits by the CPU).
+pub const Shift = enum { shl, shr, sar };
+
+fn mapGp(e: anyerror) Error {
+    return switch (e) {
+        error.NoMatchingForm => error.InvalidOperand,
+        else => |x_| @errorCast(x_),
+    };
+}
 
 /// Builder-side label (index into the builder's label table; mapped to buffer labels at serialize).
 pub const Label = struct { id: u32 };
@@ -39,6 +50,12 @@ pub const Instr = union(enum) {
     imul_rr: struct { Gp, Gp },
     imul_rm: struct { Gp, Mem },
     imul_rri: struct { Gp, Gp, i32 },
+    /// `shl/shr/sar r64, cl`.
+    shift_rcl: struct { Shift, Gp },
+    /// `idiv r64` (rdx:rax / r).
+    idiv_r: Gp,
+    /// `cqo` (sign-extend rax into rdx:rax).
+    cqo,
     push: Gp,
     pop: Gp,
     ret,
@@ -252,6 +269,15 @@ pub const Builder = struct {
     pub fn testRR(b: *Builder, d: Gp, s: Gp) Error!void {
         return b.add(.{ .test_rr = .{ d, s } });
     }
+    pub fn shiftRCl(b: *Builder, op: Shift, d: Gp) Error!void {
+        return b.add(.{ .shift_rcl = .{ op, d } });
+    }
+    pub fn idivR(b: *Builder, s: Gp) Error!void {
+        return b.add(.{ .idiv_r = s });
+    }
+    pub fn cqo(b: *Builder) Error!void {
+        return b.add(.cqo);
+    }
     pub fn imulRR(b: *Builder, d: Gp, s: Gp) Error!void {
         return b.add(.{ .imul_rr = .{ d, s } });
     }
@@ -347,6 +373,11 @@ pub const Builder = struct {
             .imul_rr => |o| try a.imulRR(o[0], o[1]),
             .imul_rm => |o| try a.imulRM(o[0], o[1]),
             .imul_rri => |o| try a.imulRRI(o[0], o[1], o[2]),
+            .shift_rcl => |o| switch (o[0]) {
+                inline else => |op| a.inst(@field(gp.Mnemonic, @tagName(op)), .{ gp.r64(o[1]), gp.r8(.rcx) }) catch |e| return mapGp(e),
+            },
+            .idiv_r => |r| a.inst(.idiv, .{gp.r64(r)}) catch |e| return mapGp(e),
+            .cqo => a.inst(.cqo, .{}) catch |e| return mapGp(e),
             .push => |r| try a.push(r),
             .pop => |r| try a.pop(r),
             .ret => try a.ret(),
@@ -453,6 +484,9 @@ fn formatInst(gpa: std.mem.Allocator, out: *std.ArrayList(u8), i: Instr) !void {
         .test_rr => |o| try out.print(gpa, "test {s}, {s}", .{ @tagName(o[0]), @tagName(o[1]) }),
         .imul_rr => |o| try out.print(gpa, "imul {s}, {s}", .{ @tagName(o[0]), @tagName(o[1]) }),
         .imul_rri => |o| try out.print(gpa, "imul {s}, {s}, {d}", .{ @tagName(o[0]), @tagName(o[1]), o[2] }),
+        .shift_rcl => |o| try out.print(gpa, "{s} {s}, cl", .{ @tagName(o[0]), @tagName(o[1]) }),
+        .idiv_r => |r| try out.print(gpa, "idiv {s}", .{@tagName(r)}),
+        .cqo => try out.print(gpa, "cqo", .{}),
         .push => |r| try out.print(gpa, "push {s}", .{@tagName(r)}),
         .pop => |r| try out.print(gpa, "pop {s}", .{@tagName(r)}),
         .ret => try out.appendSlice(gpa, "ret"),
