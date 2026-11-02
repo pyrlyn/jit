@@ -133,7 +133,7 @@ Estimate: 3–4 weeks for x86-64, +1–2 weeks AArch64.
 `src/core/regalloc.zig` (`pyrlyn_jit.regalloc`): arch-agnostic (register masks), bitset liveness
 over the CFG, one interval per vreg, linear scan with furthest-end spilling and spill-slot
 reuse, callee-saved-only for call-crossing values, pre-colored vregs, and an interference
-checker (`verify`) exercised by a random-program fuzz test. Not yet: splitting, lifetime
+checker (`verify`) exercised by a random-program fuzz test. Splitting at calls (first version): call-crossing values may use caller-saved registers, saved/restored around each call. Not yet: general splitting, lifetime
 holes, edge move resolution, loop-depth spill weights, two-address hints, graph coloring.
 
 ### Choice

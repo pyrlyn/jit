@@ -35,6 +35,9 @@ fn bit(r: Gp) ra.RegMask {
 pub const Options = struct {
     /// Restrict the allocatable set (spill stress tests).
     allocatable: ra.RegMask = allocatable,
+    /// Keep call-crossing values in caller-saved registers when no callee-saved one is free,
+    /// saving/restoring them around each call (`regalloc.Config.split_at_calls`).
+    split_at_calls: bool = true,
     shorten_branches: bool = true,
 };
 
@@ -85,7 +88,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
         blocks[bi] = .{ .insts = insts, .succs = succs };
     }
     const rf: ra.Func = .{ .blocks = blocks, .num_vregs = @max(f.num_vregs, 1) };
-    const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable };
+    const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls };
     var res = try ra.allocate(gpa, rf, rcfg);
     defer res.deinit(gpa);
     std.debug.assert(ra.verify(rf, rcfg, res));
@@ -157,10 +160,12 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     const known = try A.alloc(?i64, @max(f.num_vregs, 1));
     var folded_imm: u32 = 0;
     var folded_mem: u32 = 0;
+    var pos: u32 = 1; // regalloc position: entry block starts with the parameter-def inst
     for (f.blocks.items, 0..) |blk, bi| {
         try b.bind(labels[bi]);
         @memset(known, null);
         for (blk.ops.items) |o| {
+            defer pos += 1;
             defer if (o.def()) |d| {
                 known[d] = if (o == .@"const") o.@"const".imm else null;
             };
@@ -244,6 +249,10 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     try b.movMR(x.ptr(base, c.disp), v);
                 },
                 .call => |c| {
+                    // Split ranges: save caller-saved registers live across this call.
+                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                        try b.movMR(ctx.slot(res.save_slot[v].?), @fromBackingInt(@intCast(res.locs[v].reg)));
+                    };
                     // Argument registers are never allocated: plain moves, no parallel-move cycles.
                     // Stack arguments: pushed right to left, padded so rsp stays 16-aligned.
                     const nreg = @min(c.args.len, cc.args.len);
@@ -263,7 +272,13 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     try b.callAbs(c.addr);
                     const pop: u32 = cc.shadow + pad + 8 * @as(u32, @intCast(nstack));
                     if (pop != 0) try b.addRI(.rsp, @intCast(pop));
-                    try ctx.put(c.dst, .rax);
+                    var restored = false;
+                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                        if (!restored) try b.movRR(s1, .rax);
+                        restored = true;
+                        try b.movRM(@fromBackingInt(@intCast(res.locs[v].reg)), ctx.slot(res.save_slot[v].?));
+                    };
+                    try ctx.put(c.dst, if (restored) s1 else .rax);
                 },
                 .bra, .cbra => unreachable, // removed by lowerBlockParams
                 .br => |tg| try b.jmp(labels[tg]),
@@ -385,6 +400,12 @@ test "compiler: execution - fib, loops, calls, memory, spills" {
     const p: i64 = @bitCast(@intFromPtr(&mem));
     try t.expectEqual(@as(i64, 3 * 4 * 4 + 3), try run(&g, .{}, &.{ 3, 4, p }));
     try t.expectEqual(@as(i64, 51), mem[1]);
+    // Only caller-saved rax: v0/v2 cross the call in rax, split (saved/restored) around it.
+    for ([_]bool{ true, false }) |split| {
+        mem = .{ 0, 0 };
+        try t.expectEqual(@as(i64, 3 * 4 * 4 + 3), try run(&g, .{ .allocatable = bit(.rax), .split_at_calls = split }, &.{ 3, 4, p }));
+        try t.expectEqual(@as(i64, 51), mem[1]);
+    }
 }
 
 test "compiler: stack-passed parameters and call arguments" {

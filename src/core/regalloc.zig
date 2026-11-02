@@ -17,7 +17,13 @@
 //! 4. `verify` checks that no two overlapping intervals share a register (run in tests and
 //!    available to callers in Debug).
 //!
-//! Not yet: interval splitting, lifetime holes, edge move resolution, spill weights by loop
+//! 5. Splitting at calls (`Config.split_at_calls`, first version of live-range splitting): a
+//!    call-crossing interval that finds no free callee-saved register may take a caller-saved
+//!    one; its range is split around each call it crosses: the value is stored to
+//!    `Result.save_slot[v]` before the call and reloaded after it (by the code generator,
+//!    using `crossesCallAt`). Callee-saved registers are still preferred.
+//!
+//! Not yet: general interval splitting, lifetime holes, edge move resolution, spill weights by loop
 //! depth, two-address hints/coalescing, graph coloring.
 const std = @import("std");
 
@@ -48,6 +54,8 @@ pub const Config = struct {
     allocatable: RegMask,
     /// Subset preserved across calls.
     callee_saved: RegMask = 0,
+    /// Allow caller-saved registers for call-crossing intervals, saved/restored around calls.
+    split_at_calls: bool = false,
 };
 
 pub const Loc = union(enum) {
@@ -63,9 +71,16 @@ pub const Result = struct {
     intervals: []Interval,
     num_slots: u32,
     spills: u32,
+    /// Per vreg: spill slot used to save its caller-saved register around calls (split range).
+    save_slot: []?u32,
     pub fn deinit(r: *Result, gpa: std.mem.Allocator) void {
         gpa.free(r.locs);
         gpa.free(r.intervals);
+        gpa.free(r.save_slot);
+    }
+    /// True if `v` must be saved/restored around the call at instruction position `pos`.
+    pub fn savedAcross(r: Result, v: VReg, pos: u32) bool {
+        return r.save_slot[v] != null and crossesCallAt(r.intervals[v], pos);
     }
 };
 
@@ -166,6 +181,11 @@ pub fn buildIntervals(gpa: std.mem.Allocator, f: Func) Error![]Interval {
     return iv;
 }
 
+/// Interval is live before and after the instruction at position `pos`.
+pub fn crossesCallAt(iv: Interval, pos: u32) bool {
+    return iv.start != none and iv.start < 2 * pos and iv.end > 2 * pos + 1;
+}
+
 fn crossesCall(call_pos: []const u32, iv: Interval) bool {
     for (call_pos) |c| {
         if (iv.start < 2 * c and iv.end > 2 * c + 1) return true;
@@ -249,7 +269,7 @@ pub fn allocate(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
         }
 
         var mask = cfg.allocatable;
-        if (crossesCall(calls.items, cur)) mask &= cfg.callee_saved;
+        const crosses = crossesCall(calls.items, cur);
         for (active.items) |a| if (locs[a.vreg] == .reg) {
             mask &= ~(@as(RegMask, 1) << @intCast(locs[a.vreg].reg));
         };
@@ -257,6 +277,7 @@ pub fn allocate(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
             mask &= ~(@as(RegMask, 1) << @intCast(r));
         };
 
+        if (crosses and (mask & cfg.callee_saved != 0 or !cfg.split_at_calls)) mask &= cfg.callee_saved;
         if (mask != 0) {
             locs[cur.vreg] = .{ .reg = @intCast(@ctz(mask)) };
             try insertByEnd(gpa, &active, cur);
@@ -273,7 +294,7 @@ pub fn allocate(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
             const r = locs[a.vreg].reg;
             const bit = @as(RegMask, 1) << @intCast(r);
             var ok = cfg.allocatable & bit != 0;
-            if (crossesCall(calls.items, cur) and cfg.callee_saved & bit == 0) ok = false;
+            if (crosses and !cfg.split_at_calls and cfg.callee_saved & bit == 0) ok = false;
             for (fixed_iv.items, fixed_reg.items) |fi, fr| if (fr == r and overlaps(fi, cur)) {
                 ok = false;
             };
@@ -301,7 +322,17 @@ pub fn allocate(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
         try slot_in_use.append(gpa, .{ .slot = slot, .end = spilled.end });
         spills += 1;
     }
-    return .{ .locs = locs, .intervals = iv, .num_slots = num_slots, .spills = spills };
+    // Split ranges: caller-saved registers holding call-crossing values get a save slot.
+    const save = try gpa.alloc(?u32, f.num_vregs);
+    @memset(save, null);
+    for (iv, 0..) |x, v| {
+        if (locs[v] != .reg or !crossesCall(calls.items, x)) continue;
+        if (cfg.callee_saved & (@as(RegMask, 1) << @intCast(locs[v].reg)) != 0) continue;
+        if (f.fixed.len > v and f.fixed[v] != null) continue;
+        save[v] = num_slots;
+        num_slots += 1;
+    }
+    return .{ .locs = locs, .intervals = iv, .num_slots = num_slots, .spills = spills, .save_slot = save };
 }
 
 fn insertByEnd(gpa: std.mem.Allocator, list: *std.ArrayList(Interval), x: Interval) !void {
@@ -320,7 +351,7 @@ pub fn verify(f: Func, cfg: Config, r: Result) bool {
             if (x.start < 2 * pos and x.end > 2 * pos + 1) switch (r.locs[x.vreg]) {
                 .reg => |reg| if (cfg.callee_saved & (@as(RegMask, 1) << @intCast(reg)) == 0) {
                     const is_fixed = f.fixed.len > x.vreg and f.fixed[x.vreg] != null;
-                    if (!is_fixed) return false;
+                    if (!is_fixed and r.save_slot[x.vreg] == null) return false;
                 },
                 else => {},
             };
@@ -469,4 +500,34 @@ test "regalloc: random programs always verify" {
         defer r.deinit(t.allocator);
         try t.expect(verify(f, cfg, r));
     }
+}
+
+test "regalloc: split at calls uses caller-saved registers with save slots" {
+    // v0 defined, call, v0 used; only caller-saved registers r0, r1 exist.
+    const blocks = [_]Block{.{ .insts = &.{
+        .{ .defs = &.{0} },
+        .{ .defs = &.{1}, .is_call = true },
+        .{ .uses = &.{ 0, 1 } },
+    } }};
+    const f: Func = .{ .blocks = &blocks, .num_vregs = 2 };
+    var plain = try allocate(t.allocator, f, .{ .allocatable = 0b11 });
+    defer plain.deinit(t.allocator);
+    try t.expect(plain.locs[0] == .stack); // no callee-saved: whole range spilled
+    try t.expect(verify(f, .{ .allocatable = 0b11 }, plain));
+
+    const cfg: Config = .{ .allocatable = 0b11, .split_at_calls = true };
+    var r = try allocate(t.allocator, f, cfg);
+    defer r.deinit(t.allocator);
+    try t.expect(r.locs[0] == .reg);
+    try t.expect(r.save_slot[0] != null);
+    try t.expect(r.savedAcross(0, 1));
+    try t.expect(!r.savedAcross(1, 1)); // the call's result is defined there
+    try t.expect(verify(f, cfg, r));
+
+    // A free callee-saved register is still preferred (no save needed).
+    const cfg2: Config = .{ .allocatable = 0b111, .callee_saved = 0b100, .split_at_calls = true };
+    var r2 = try allocate(t.allocator, f, cfg2);
+    defer r2.deinit(t.allocator);
+    try t.expectEqual(@as(u8, 2), r2.locs[0].reg);
+    try t.expect(r2.save_slot[0] == null);
 }
