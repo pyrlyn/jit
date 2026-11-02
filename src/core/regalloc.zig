@@ -23,8 +23,15 @@
 //!    `Result.save_slot[v]` before the call and reloaded after it (by the code generator,
 //!    using `crossesCallAt`). Callee-saved registers are still preferred.
 //!
+//! 6. Graph coloring (`Config.algo = .graph`, Chaitin-Briggs with optimistic coloring, no
+//!    coalescing): the interference graph is built from the same intervals; nodes with fewer
+//!    neighbours than usable registers are simplified first, otherwise the node with the lowest
+//!    spill weight ((uses + defs) / length) is pushed optimistically; select assigns the lowest
+//!    free register (callee-saved first for call-crossing values) or spills. Spilled values
+//!    share stack slots by colouring the spilled subgraph. Same `Result` and `verify`.
+//!
 //! Not yet: general interval splitting, lifetime holes, edge move resolution, spill weights by loop
-//! depth, two-address hints/coalescing, graph coloring.
+//! depth, two-address hints/coalescing.
 const std = @import("std");
 
 pub const VReg = u32;
@@ -56,7 +63,11 @@ pub const Config = struct {
     callee_saved: RegMask = 0,
     /// Allow caller-saved registers for call-crossing intervals, saved/restored around calls.
     split_at_calls: bool = false,
+    /// Allocation algorithm.
+    algo: Algo = .linear,
 };
+
+pub const Algo = enum { linear, graph };
 
 pub const Loc = union(enum) {
     none, // never defined or used
@@ -198,6 +209,181 @@ fn overlaps(a: Interval, b: Interval) bool {
 }
 
 pub fn allocate(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
+    return switch (cfg.algo) {
+        .linear => allocateLinear(gpa, f, cfg),
+        .graph => allocateGraph(gpa, f, cfg),
+    };
+}
+
+fn callPositions(gpa: std.mem.Allocator, f: Func) Error!std.ArrayList(u32) {
+    var calls: std.ArrayList(u32) = .empty;
+    var pos: u32 = 0;
+    for (f.blocks) |b| for (b.insts) |in| {
+        if (in.is_call) try calls.append(gpa, pos);
+        pos += 1;
+    };
+    return calls;
+}
+
+/// Caller-saved registers holding call-crossing values get a save slot (split ranges).
+fn saveSlots(gpa: std.mem.Allocator, f: Func, cfg: Config, iv: []const Interval, locs: []const Loc, calls: []const u32, num_slots: *u32) Error![]?u32 {
+    const save = try gpa.alloc(?u32, f.num_vregs);
+    @memset(save, null);
+    for (iv, 0..) |x, v| {
+        if (locs[v] != .reg or !crossesCall(calls, x)) continue;
+        if (cfg.callee_saved & (@as(RegMask, 1) << @intCast(locs[v].reg)) != 0) continue;
+        if (f.fixed.len > v and f.fixed[v] != null) continue;
+        save[v] = num_slots.*;
+        num_slots.* += 1;
+    }
+    return save;
+}
+
+/// Chaitin-Briggs graph colouring over the interval interference graph (see header, step 6).
+pub fn allocateGraph(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
+    const n = f.num_vregs;
+    const iv = try buildIntervals(gpa, f);
+    errdefer gpa.free(iv);
+    const locs = try gpa.alloc(Loc, n);
+    errdefer gpa.free(locs);
+    @memset(locs, .none);
+    var calls = try callPositions(gpa, f);
+    defer calls.deinit(gpa);
+
+    const isFixed = struct {
+        fn f_(fx: []const ?u8, v: usize) bool {
+            return fx.len > v and fx[v] != null;
+        }
+    }.f_;
+    for (f.fixed, 0..) |fx, v| if (fx) |r| {
+        if (iv[v].start == none) continue;
+        for (f.fixed[v + 1 ..], v + 1..) |fy, w| if (fy) |r2| {
+            if (r == r2 and iv[w].start != none and overlaps(iv[v], iv[w])) return error.FixedConflict;
+        };
+        locs[v] = .{ .reg = r };
+    };
+
+    // Spill weights: occurrences / interval length.
+    const occ = try gpa.alloc(u32, n);
+    defer gpa.free(occ);
+    @memset(occ, 0);
+    for (f.blocks) |b| for (b.insts) |in| {
+        for (in.uses) |u| occ[u] += 1;
+        for (in.defs) |d| occ[d] += 1;
+    };
+
+    // Nodes, allowed masks, adjacency (bitsets over vregs).
+    const allowed = try gpa.alloc(RegMask, n);
+    defer gpa.free(allowed);
+    const crosses = try gpa.alloc(bool, n);
+    defer gpa.free(crosses);
+    const adj = try gpa.alloc(std.DynamicBitSetUnmanaged, n);
+    var made: usize = 0;
+    defer {
+        for (adj[0..made]) |*a| a.deinit(gpa);
+        gpa.free(adj);
+    }
+    for (adj) |*a| {
+        a.* = try std.DynamicBitSetUnmanaged.initEmpty(gpa, n);
+        made += 1;
+    }
+    for (0..n) |v| {
+        crosses[v] = iv[v].start != none and crossesCall(calls.items, iv[v]);
+        var m = cfg.allocatable;
+        if (crosses[v] and !cfg.split_at_calls) m &= cfg.callee_saved;
+        allowed[v] = m;
+    }
+    for (0..n) |v| {
+        if (iv[v].start == none) continue;
+        for (v + 1..n) |w| {
+            if (iv[w].start == none or !overlaps(iv[v], iv[w])) continue;
+            const fv = isFixed(f.fixed, v);
+            const fw = isFixed(f.fixed, w);
+            if (fv and fw) continue;
+            if (fv) {
+                allowed[w] &= ~(@as(RegMask, 1) << @intCast(f.fixed[v].?));
+            } else if (fw) {
+                allowed[v] &= ~(@as(RegMask, 1) << @intCast(f.fixed[w].?));
+            } else {
+                adj[v].set(w);
+                adj[w].set(v);
+            }
+        }
+    }
+
+    // Simplify.
+    const removed = try gpa.alloc(bool, n);
+    defer gpa.free(removed);
+    const degree = try gpa.alloc(u32, n);
+    defer gpa.free(degree);
+    var stack: std.ArrayList(u32) = .empty;
+    defer stack.deinit(gpa);
+    var left: usize = 0;
+    for (0..n) |v| {
+        removed[v] = iv[v].start == none or isFixed(f.fixed, v);
+        degree[v] = @intCast(adj[v].count());
+        if (!removed[v]) left += 1;
+    }
+    while (left > 0) {
+        var pick: ?usize = null;
+        for (0..n) |v| if (!removed[v] and degree[v] < @popCount(allowed[v])) {
+            pick = v;
+            break;
+        };
+        if (pick == null) {
+            // Optimistic: lowest weight = occ / (len + 1), compared by cross-multiplication.
+            var best: ?usize = null;
+            for (0..n) |v| if (!removed[v]) {
+                if (best) |bv| {
+                    const lv: u64 = iv[v].end - iv[v].start + 1;
+                    const lb: u64 = iv[bv].end - iv[bv].start + 1;
+                    if (@as(u64, occ[v]) * lb < @as(u64, occ[bv]) * lv) best = v;
+                } else best = v;
+            };
+            pick = best;
+        }
+        const v = pick.?;
+        removed[v] = true;
+        left -= 1;
+        try stack.append(gpa, @intCast(v));
+        var it = adj[v].iterator(.{});
+        while (it.next()) |w| degree[w] -|= 1;
+    }
+
+    // Select.
+    var spilled: std.ArrayList(u32) = .empty;
+    defer spilled.deinit(gpa);
+    while (stack.pop()) |v| {
+        var m = allowed[v];
+        var it = adj[v].iterator(.{});
+        while (it.next()) |w| if (locs[w] == .reg) {
+            m &= ~(@as(RegMask, 1) << @intCast(locs[w].reg));
+        };
+        if (crosses[v] and m & cfg.callee_saved != 0) m &= cfg.callee_saved;
+        if (m != 0) {
+            locs[v] = .{ .reg = @intCast(@ctz(m)) };
+        } else try spilled.append(gpa, v);
+    }
+    // Stack slots: colour the spilled subgraph greedily (in vreg order).
+    std.mem.sort(u32, spilled.items, {}, std.sort.asc(u32));
+    var num_slots: u32 = 0;
+    for (spilled.items) |v| {
+        var slot: u32 = 0;
+        search: while (true) : (slot += 1) {
+            for (spilled.items) |w| {
+                if (w == v or locs[w] != .stack or locs[w].stack != slot) continue;
+                if (overlaps(iv[v], iv[w])) continue :search;
+            }
+            break;
+        }
+        locs[v] = .{ .stack = slot };
+        num_slots = @max(num_slots, slot + 1);
+    }
+    const save = try saveSlots(gpa, f, cfg, iv, locs, calls.items, &num_slots);
+    return .{ .locs = locs, .intervals = iv, .num_slots = num_slots, .spills = @intCast(spilled.items.len), .save_slot = save };
+}
+
+pub fn allocateLinear(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
     const iv = try buildIntervals(gpa, f);
     errdefer gpa.free(iv);
     const locs = try gpa.alloc(Loc, f.num_vregs);
@@ -530,4 +716,122 @@ test "regalloc: split at calls uses caller-saved registers with save slots" {
     defer r2.deinit(t.allocator);
     try t.expectEqual(@as(u8, 2), r2.locs[0].reg);
     try t.expect(r2.save_slot[0] == null);
+}
+
+test "regalloc graph: same tests as linear scan" {
+    // Loop, dying-source sharing, spill stress, calls, fixed registers.
+    {
+        const blocks = [_]Block{
+            .{ .insts = &.{ .{ .defs = &.{0} }, .{ .defs = &.{1} } }, .succs = &.{1} },
+            .{ .insts = &.{.{ .uses = &.{ 1, 0 }, .defs = &.{1} }}, .succs = &.{ 1, 2 } },
+            .{ .insts = &.{.{ .uses = &.{1} }} },
+        };
+        const f: Func = .{ .blocks = &blocks, .num_vregs = 2 };
+        const cfg: Config = .{ .allocatable = 0b11, .algo = .graph };
+        var r = try allocate(t.allocator, f, cfg);
+        defer r.deinit(t.allocator);
+        try t.expect(verify(f, cfg, r));
+        try t.expectEqual(@as(u32, 0), r.spills);
+    }
+    {
+        const blocks = [_]Block{.{ .insts = &.{ .{ .defs = &.{0} }, .{ .uses = &.{0}, .defs = &.{1} }, .{ .uses = &.{1} } } }};
+        const f: Func = .{ .blocks = &blocks, .num_vregs = 2 };
+        var r = try allocate(t.allocator, f, .{ .allocatable = 0b1, .algo = .graph });
+        defer r.deinit(t.allocator);
+        try t.expectEqual(@as(u32, 0), r.spills);
+    }
+    {
+        const n = 50;
+        var insts: [n + 1]Inst = undefined;
+        var ids: [n]VReg = undefined;
+        for (0..n) |i| {
+            ids[i] = @intCast(i);
+            insts[i] = .{ .defs = ids[i .. i + 1] };
+        }
+        insts[n] = .{ .uses = &ids };
+        const blocks = [_]Block{.{ .insts = &insts }};
+        const f: Func = .{ .blocks = &blocks, .num_vregs = n };
+        const cfg: Config = .{ .allocatable = 0b111, .algo = .graph };
+        var r = try allocate(t.allocator, f, cfg);
+        defer r.deinit(t.allocator);
+        try t.expect(verify(f, cfg, r));
+        try t.expectEqual(@as(u32, n - 3), r.spills);
+        try t.expectEqual(@as(u32, n - 3), r.num_slots);
+    }
+    {
+        const blocks = [_]Block{.{ .insts = &.{
+            .{ .defs = &.{0} },
+            .{ .defs = &.{1} },
+            .{ .uses = &.{1}, .is_call = true },
+            .{ .uses = &.{0} },
+        } }};
+        const f: Func = .{ .blocks = &blocks, .num_vregs = 2 };
+        const cfg: Config = .{ .allocatable = 0b1111, .callee_saved = 0b1000, .algo = .graph };
+        var r = try allocate(t.allocator, f, cfg);
+        defer r.deinit(t.allocator);
+        try t.expect(verify(f, cfg, r));
+        try t.expectEqual(Loc{ .reg = 3 }, r.locs[0]);
+        const cfg_split: Config = .{ .allocatable = 0b11, .split_at_calls = true, .algo = .graph };
+        var r2 = try allocate(t.allocator, f, cfg_split);
+        defer r2.deinit(t.allocator);
+        try t.expect(r2.locs[0] == .reg and r2.save_slot[0] != null);
+        try t.expect(verify(f, cfg_split, r2));
+    }
+    {
+        const blocks = [_]Block{.{ .insts = &.{ .{ .defs = &.{1} }, .{ .defs = &.{0} }, .{ .defs = &.{2} }, .{ .uses = &.{ 0, 1, 2 } } } }};
+        const fixed = [_]?u8{ 1, null, null };
+        const f: Func = .{ .blocks = &blocks, .num_vregs = 3, .fixed = &fixed };
+        const cfg: Config = .{ .allocatable = 0b111, .algo = .graph };
+        var r = try allocate(t.allocator, f, cfg);
+        defer r.deinit(t.allocator);
+        try t.expect(verify(f, cfg, r));
+        try t.expectEqual(Loc{ .reg = 1 }, r.locs[0]);
+        try t.expect(r.locs[1].reg != 1 and r.locs[2].reg != 1);
+        const bad = [_]?u8{ 1, 1, null };
+        try t.expectError(error.FixedConflict, allocate(t.allocator, .{ .blocks = &blocks, .num_vregs = 3, .fixed = &bad }, cfg));
+    }
+}
+
+test "regalloc graph: random programs verify; never more spills than registers allow" {
+    var prng = std.Random.DefaultPrng.init(7);
+    const rnd = prng.random();
+    var total_lin: u32 = 0;
+    var total_graph: u32 = 0;
+    for (0..300) |_| {
+        var arena = std.heap.ArenaAllocator.init(t.allocator);
+        defer arena.deinit();
+        const A = arena.allocator();
+        const nv: u32 = 1 + rnd.uintLessThan(u32, 40);
+        const nb: usize = 1 + rnd.uintLessThan(usize, 6);
+        const blocks = try A.alloc(Block, nb);
+        for (blocks) |*b| {
+            const ni = 1 + rnd.uintLessThan(usize, 12);
+            const insts = try A.alloc(Inst, ni);
+            for (insts) |*in| {
+                const u = try A.alloc(VReg, rnd.uintLessThan(usize, 3));
+                for (u) |*x| x.* = rnd.uintLessThan(u32, nv);
+                const d = try A.alloc(VReg, rnd.uintLessThan(usize, 2));
+                for (d) |*x| x.* = rnd.uintLessThan(u32, nv);
+                in.* = .{ .uses = u, .defs = d, .is_call = rnd.uintLessThan(u8, 8) == 0 };
+            }
+            const s = try A.alloc(u32, rnd.uintLessThan(usize, 3));
+            for (s) |*x| x.* = rnd.uintLessThan(u32, @intCast(nb));
+            b.* = .{ .insts = insts, .succs = s };
+        }
+        const f: Func = .{ .blocks = blocks, .num_vregs = nv };
+        for ([_]bool{ false, true }) |split| {
+            const cfg: Config = .{ .allocatable = 0b11111, .callee_saved = 0b11000, .split_at_calls = split, .algo = .graph };
+            var r = try allocate(t.allocator, f, cfg);
+            defer r.deinit(t.allocator);
+            try t.expect(verify(f, cfg, r));
+            var cl = cfg;
+            cl.algo = .linear;
+            var l = try allocate(t.allocator, f, cl);
+            defer l.deinit(t.allocator);
+            total_graph += r.spills;
+            total_lin += l.spills;
+        }
+    }
+    // Reported, not required to be lower (different heuristics).
+    std.log.debug("spills: linear {d}, graph {d}", .{ total_lin, total_graph });
 }

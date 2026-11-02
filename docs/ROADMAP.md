@@ -18,7 +18,7 @@ Order: Builder -> Compiler -> register allocator -> x86-64 operands -> other arc
 2. Compiler: shifts and division, stack-passed arguments, immediate/memory folding, AArch64
    lowering, SSA with block parameters.
 3. Register allocator: live-range splitting, lifetime holes, edge move resolution, spill
-   weights, two-address hints; optional graph coloring.
+   weights, two-address hints (graph coloring: done, `Config.algo = .graph`).
 4. x86-64 operands: 8/16/32-bit sizes, RIP-relative with labels, imm64 fallbacks, more forms
    (movzx/movsx, cmovcc, setcc, div/idiv, ...), AVX-512/AVX10.
 5. x86-32 and RISC-V beyond the base step; MIPS and others only if needed.
@@ -134,7 +134,7 @@ Estimate: 3–4 weeks for x86-64, +1–2 weeks AArch64.
 over the CFG, one interval per vreg, linear scan with furthest-end spilling and spill-slot
 reuse, callee-saved-only for call-crossing values, pre-colored vregs, and an interference
 checker (`verify`) exercised by a random-program fuzz test. Splitting at calls (first version): call-crossing values may use caller-saved registers, saved/restored around each call. Not yet: general splitting, lifetime
-holes, edge move resolution, loop-depth spill weights, two-address hints, graph coloring.
+holes, edge move resolution, loop-depth spill weights, two-address hints. Graph coloring (Chaitin-Briggs, optimistic, no coalescing) is available as `Config.algo = .graph`.
 
 ### Choice
 - Default: **linear scan** (Poletto/Sarkar with lifetime holes and splitting, as in V8/HotSpot
