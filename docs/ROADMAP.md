@@ -70,7 +70,7 @@ calls to absolute addresses, only-used callee-saved registers in prolog/epilog, 
 Tested by execution under Rosetta (fib, calls, memory, forced spills) and a differential fuzz
 vs the interpreter. This branch carries copies of `builder.zig` and `regalloc.zig` from
 feat/builder and feat/regalloc (uncommitted dependency). Not yet: shifts/div, stack-passed
-args, immediate/memory folding, AArch64 lowering.
+args, AArch64 lowering. Immediate (block-local `const`, imm32) and spilled-operand memory folding are done.
 
 Goal: compile a minimal IR to machine code through the Builder.
 
