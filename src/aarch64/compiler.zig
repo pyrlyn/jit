@@ -41,8 +41,12 @@ pub const Options = struct {
 pub const Stats = struct { spills: u32 = 0, slots: u32 = 0 };
 
 /// Compiles `f` into `cb` through `a` (an `a64.AssemblerT(...)` instance on `cb`), not finalized.
-pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, a: anytype, opts: Options) !Stats {
-    try f.verify();
+/// Functions with block parameters are first rewritten by `ir.Func.lowerBlockParams`.
+pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Options) !Stats {
+    try f0.verify();
+    var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
+    defer if (lowered) |*g| g.deinit();
+    const f: *const ir.Func = if (lowered) |*g| g else f0;
     if (f.params > CC.args.len) return error.TooManyParams;
     for (f.blocks.items) |blk| for (blk.ops.items) |o| if (o == .call and o.call.args.len > CC.args.len) return error.TooManyArgs;
 
@@ -192,6 +196,7 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, a: anytype, opts: Option
                 try a.blr(s0);
                 try ctx.put(a, c.dst, CC.ret);
             },
+            .bra, .cbra => unreachable, // removed by lowerBlockParams
             .br => |tg| try a.b(labels[tg]),
             .cbr => |c| {
                 try a.cmp(try ctx.get(a, c.a, s0), try ctx.get(a, c.b, s1));
@@ -324,6 +329,20 @@ test "a64 compiler: shifts and signed division match the interpreter" {
         try t.expectEqual(want, try run(&f, .{}, &c));
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.x9) | bit(.x19) }, &c));
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.x19) }, &c)); // operands spilled
+    }
+}
+
+test "a64 compiler: block parameters (SSA input)" {
+    var f = try ir.parse(t.allocator, ir.fib_ssa_src);
+    defer f.deinit();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    _ = try compile(t.allocator, &f, &cb, .{});
+    if (!can_run) return;
+    for ([_]i64{ 0, 1, 10, 90 }) |n| {
+        const want = try ir.interpret(&f, &.{n}, 1 << 20);
+        try t.expectEqual(want, try run(&f, .{}, &.{n}));
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.x19) }, &.{n}));
     }
 }
 

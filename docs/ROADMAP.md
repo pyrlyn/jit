@@ -89,7 +89,7 @@ interpreter. `src/x86_64/compiler.zig` (`pyrlyn_jit.x86_64_compiler`): regalloc
 (`core/regalloc.zig`) -> Builder -> passes -> Assembler; host C ABI (SysV/Win64 shadow space),
 calls to absolute addresses, only-used callee-saved registers in prolog/epilog, spill slots.
 Tested by execution under Rosetta (fib, calls, memory, forced spills) and a differential fuzz
-vs the interpreter. Shifts (`shl/shr/sar`, count in rcx) and signed division (`sdiv/srem` via `cqo; idiv`) are supported. Stack-passed parameters and call arguments (up to 16) are supported. Immediate (block-local `const`, imm32) and spilled-operand memory folding are done.
+vs the interpreter. Shifts (`shl/shr/sar`, count in rcx) and signed division (`sdiv/srem` via `cqo; idiv`) are supported. Stack-passed parameters and call arguments (up to 16) are supported. Block parameters (SSA-style, `verifySsa`, `lowerBlockParams` to copies with edge splitting) are supported by both compilers. Immediate (block-local `const`, imm32) and spilled-operand memory folding are done.
 AArch64 lowering: `src/aarch64/compiler.zig` (`pyrlyn_jit.aarch64_compiler`), AAPCS64, up to 8 params/args, shifts (`lslv/lsrv/asrv`) and `sdiv`/`srem` (`sdiv` + `msub`), same IR and allocator, executed natively and fuzzed vs the interpreter.
 
 Goal: compile a minimal IR to machine code through the Builder.

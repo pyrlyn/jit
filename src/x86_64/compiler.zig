@@ -49,8 +49,12 @@ pub const Stats = struct {
 };
 
 /// Compiles `f` into `b` (a Builder). Run passes and serialize separately, or use `compile`.
-pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: Options) !Stats {
-    try f.verify();
+/// Functions with block parameters are first rewritten by `ir.Func.lowerBlockParams`.
+pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: Options) !Stats {
+    try f0.verify();
+    var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
+    defer if (lowered) |*g| g.deinit();
+    const f: *const ir.Func = if (lowered) |*g| g else f0;
     const cc = x.CallConv.host;
     if (f.params > ir.max_args) return error.TooManyParams;
 
@@ -261,6 +265,7 @@ pub fn lower(gpa: std.mem.Allocator, f: *const ir.Func, b: *bld.Builder, opts: O
                     if (pop != 0) try b.addRI(.rsp, @intCast(pop));
                     try ctx.put(c.dst, .rax);
                 },
+                .bra, .cbra => unreachable, // removed by lowerBlockParams
                 .br => |tg| try b.jmp(labels[tg]),
                 .cbr => |c| {
                     const ra_ = try ctx.get(c.a, s0);
@@ -482,6 +487,20 @@ test "compiler: immediate and memory operand folding (byte-level, any host)" {
     defer g.deinit();
     const st2 = try compile(t.allocator, &g, &cb2, .{ .allocatable = bit(.rbx) });
     try t.expect(st2.folded_mem > 0);
+}
+
+test "compiler: block parameters (SSA input)" {
+    var f = try ir.parse(t.allocator, ir.fib_ssa_src);
+    defer f.deinit();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    _ = try compile(t.allocator, &f, &cb, .{});
+    if (!can_run) return;
+    for ([_]i64{ 0, 1, 10, 90 }) |n| {
+        const want = try ir.interpret(&f, &.{n}, 1 << 20);
+        try t.expectEqual(want, try run(&f, .{}, &.{n}));
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rbx) }, &.{n}));
+    }
 }
 
 test "compiler: differential vs interpreter on random programs" {
