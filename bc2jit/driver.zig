@@ -3,6 +3,7 @@ const std = @import("std");
 const jit = @import("pyrlyn_jit");
 const bc = @import("bytecode.zig");
 const lower = @import("lower.zig");
+const lower_ir = @import("lower_ir.zig");
 
 /// Signature of every compiled function: four i64 arguments (unused ones ignored), i64 result.
 pub const Fn = *const fn (i64, i64, i64, i64) callconv(.c) i64;
@@ -30,14 +31,17 @@ pub const Compiled = struct {
 };
 
 /// Errors from `compile`.
-pub const Error = lower.Error || jit.JitRuntime.Error;
+pub const Error = lower.Error || lower_ir.Error || jit.JitRuntime.Error;
 
 /// Lowers `f` for `target`; maps it executable only if the target is the host.
+/// v0 modules use the direct register-per-slot lowering (`lower.zig`, SysV on x86-64); v1
+/// modules go through the IR Compilers (`lower_ir.zig`, host C ABI incl. Win64).
 pub fn compile(gpa: std.mem.Allocator, target: lower.Target, f: bc.Function) Error!Compiled {
     var cb = jit.CodeBuffer.init(gpa);
     errdefer cb.deinit();
-    try lower.lower(target, f, &cb);
-    const exec: ?jit.JitRuntime.Function = if (target.canExecute()) try jit.JitRuntime.add(&cb) else null;
+    if (f.version == bc.version) try lower.lower(target, f, &cb) else try lower_ir.lowerIr(gpa, target, f, &cb);
+    const runnable = if (f.version == bc.version) target.canExecute() else lower.Target.host() == target;
+    const exec: ?jit.JitRuntime.Function = if (runnable) try jit.JitRuntime.add(&cb) else null;
     return .{ .cb = cb, .exec = exec };
 }
 
@@ -47,6 +51,7 @@ pub fn errorMessage(e: Error) []const u8 {
         error.BackendNotBuilt => "backend not compiled into pyrlyn-jit (rebuild with -Dtargets=x86_64,aarch64)",
         error.MapFailed, error.ProtectFailed => "could not map executable memory",
         error.OutOfMemory => "out of memory",
+        error.CompileFailed => "IR compiler rejected the function",
         else => "machine code emission failed",
     };
 }

@@ -3,7 +3,7 @@
 A small AsmJit-style machine code generator in Zig 0.17 (stdlib only).
 
 - Backends are separate modules, picked at build time: **x86-64** and **AArch64**
-  (32-bit x86, RISC-V, MIPS: see [TODO-ARCHES.md](TODO-ARCHES.md)).
+  plus 32-bit x86 and RISC-V (MIPS and others: see [TODO-ARCHES.md](TODO-ARCHES.md)).
 - Host and target are independent. You can emit x86-64 on an arm64 Mac; running the code
   needs target == host (x86-64 runs under Rosetta 2).
 - No IR, no vtables, no runtime dispatch. Each method encodes one instruction directly into
@@ -55,7 +55,9 @@ Full build options, install, pkg-config, CMake and CPM: [docs/BUILDING.md](docs/
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): benchmark vs AsmJit.
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md): current limitations and implemented features.
 - [docs/llvm-tables.md](docs/llvm-tables.md): x86-64 GP table generated from LLVM.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md).
+- [bc2jit/README.md](bc2jit/README.md): KXBC bytecode (v0, v1) to machine code.
+- [bench/BENCH_TESTS.md](bench/BENCH_TESTS.md): benchmark regression tests (`zig build bench-test`).
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md) (current state and planned work).
 
 ## License
 
