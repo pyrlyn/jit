@@ -234,6 +234,9 @@ export fn pjit_a64_branch(b: ?*Buffer, cond: c_int, label: u32) c_int {
 // instruction. Ids are stable for one library build (they index the generated tables); the
 // string entry points stay for compatibility.
 
+const a64_mn_count = @typeInfo(a64.Mnemonic).@"enum".field_names.len;
+// a64.Mnemonic is an auto-numbered exhaustive enum (generated table), so ids are 0..len-1.
+
 /// AArch64 opcode id for `mnemonic`, or -1 if unknown.
 export fn pjit_a64_opcode(mnemonic: ?[*:0]const u8) i32 {
     const mn = lookup(a64_map, mnemonic) orelse return -1;
@@ -242,7 +245,9 @@ export fn pjit_a64_opcode(mnemonic: ?[*:0]const u8) i32 {
 
 export fn pjit_a64_emit_op(b: ?*Buffer, opcode: u32, ops: ?[*]const A64Op, n: usize) c_int {
     const p = b orelse return EINVAL;
-    const mn = std.enums.fromInt(a64.Mnemonic, opcode) orelse return @backingInt(Status.unknown_mnemonic);
+    // Mnemonic ids are dense (0..len-1): a range check, no table search.
+    if (opcode >= a64_mn_count) return @backingInt(Status.unknown_mnemonic);
+    const mn: a64.Mnemonic = @fromBackingInt(@as(@typeInfo(a64.Mnemonic).@"enum".tag_type, @intCast(opcode)));
     if (n > 8 or (n > 0 and ops == null)) return EINVAL;
     var conv: [8]a64.Op = undefined;
     for (0..n) |i| conv[i] = a64Op(ops.?[i]) orelse return EINVAL;

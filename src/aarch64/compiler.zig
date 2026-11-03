@@ -4,11 +4,13 @@
 //! Conventions:
 //! - allocatable: x9..x15 (caller-saved) and x19..x28 (callee-saved); x0..x7 (arguments)
 //!   are not allocated, so parameter and call-argument moves never conflict; x18 (platform
-//!   register on Apple) is never touched;
+//!   register on Apple) is never touched; in leaf functions (no calls, `Options.optimize`)
+//!   x0..x7 are allocatable too and parameters are pre-colored to their argument registers;
 //! - x8 is a scratch for `srem`; x16/x17 (IP0/IP1) are scratch for spilled operands, large offsets and call targets;
 //! - frame: `Assembler.prolog(used callee-saved, out + slots)`: outgoing stack arguments at
 //!   [sp + 8i], spill slot k at [sp + out + 8k] (sp never moves inside the body);
-//!   one shared epilog label.
+//!   one shared epilog label. Leaf functions without callee-saved registers, spill slots or
+//!   stack-passed parameters get no frame at all (`ret` inline).
 //! - A64 is three-address, so `dst = a op b` needs no two-address fix-up.
 //! - parameters and call arguments past x7 use 8-byte stack slots (up to `ir.max_args`);
 //!   incoming ones are read at [x29 + 16 + 8i].

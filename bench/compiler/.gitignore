@@ -1,0 +1,3 @@
+out/
+zig-out/
+.zig-cache/
