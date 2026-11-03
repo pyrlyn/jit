@@ -235,6 +235,36 @@ test "fp: memory displacements (negative, unaligned, large)" {
     }
 }
 
+test "fp: f64 keeps double precision and f32/f64 values coexist" {
+    if (!can_run) return error.SkipZigTest;
+    // 0.1 + 0.2 in f64 (0x3FD3333333333334) and in f32, in one function; fcmp of each vs 0.3.
+    const src =
+        \\func p 1
+        \\e:
+        \\  v1 = fconst.f64 0.1
+        \\  v2 = fconst.f64 0.2
+        \\  v3 = add.f64 v1 v2
+        \\  store.f64 v0 0 v3
+        \\  v4 = fconst.f32 0.1
+        \\  v5 = fconst.f32 0.2
+        \\  v6 = add.f32 v4 v5
+        \\  store.f32 v0 8 v6
+        \\  v7 = fconst.f64 0.3
+        \\  v8 = fcmp.f64 eq v3 v7
+        \\  v9 = fconst.f32 0.3
+        \\  v10 = fcmp.f32 eq v6 v9
+        \\  v11 = const 1
+        \\  v12 = shl v10 v11
+        \\  v13 = or v8 v12
+        \\  ret v13
+    ;
+    var mem: [2]u64 = @splat(0);
+    try checkProgram(src, &mem, .f64, .normal);
+    try t.expectEqual(@as(u64, 0x3FD3333333333334), mem[0]);
+    try t.expectEqual(@as(u64, @as(u32, @bitCast(@as(f32, 0.1) + @as(f32, 0.2)))), mem[1] & 0xFFFF_FFFF);
+    try checkProgram(src, &mem, .f64, .one_fp_reg);
+}
+
 test "fp: unsupported float IR is rejected, not miscompiled" {
     if (!can_run) return error.SkipZigTest;
     var f = try ir.parse(t.allocator,
