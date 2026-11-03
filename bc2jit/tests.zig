@@ -102,7 +102,7 @@ fn expectDecodeError(want: bc.Error, offset: usize, bytes: []const u8) !void {
 test "decoder: rejects malformed modules with offsets" {
     try expectDecodeError(error.Truncated, 0, "KXBC");
     try expectDecodeError(error.BadMagic, 0, "KXBX\x00\x00\x01\x00\xF0");
-    try expectDecodeError(error.UnsupportedVersion, 4, "KXBC\x01\x00\x01\x00\xF0");
+    try expectDecodeError(error.UnsupportedVersion, 4, "KXBC\x02\x00\x01\x00\xF0");
     try expectDecodeError(error.TooManyArgs, 5, "KXBC\x00\x05\x01\x00\xF0");
     try expectDecodeError(error.Truncated, 6, "KXBC\x00\x00\x02\x00\xF0");
     try expectDecodeError(error.TrailingBytes, 6, "KXBC\x00\x00\x01\x00\xF0\xF0");
@@ -241,4 +241,5 @@ test "driver: canExecute is exactly target == host" {
 
 test {
     _ = @import("tests_extra.zig");
+    _ = @import("tests_v1.zig");
 }

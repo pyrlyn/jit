@@ -20,6 +20,7 @@ const x = @import("assembler.zig");
 const bld = @import("builder.zig");
 const ir = @import("../core/ir.zig");
 const ra = @import("../core/regalloc.zig");
+const rc = @import("../core/reg_classes.zig");
 const CodeBuffer = @import("../core/code_buffer.zig").CodeBuffer;
 const Gp = x.Gp;
 
@@ -27,6 +28,13 @@ pub const allocatable: ra.RegMask = bit(.rax) | bit(.rbx) | bit(.r12) | bit(.r13
 pub const callee_saved: ra.RegMask = bit(.rbx) | bit(.r12) | bit(.r13) | bit(.r14) | bit(.r15);
 const s0: Gp = .r10;
 const s1: Gp = .r11;
+
+/// FP class (scalar f32/f64 in xmm registers, `core/reg_classes.zig`). Every xmm register is
+/// caller-saved on SysV; on Win64 xmm6..15 are callee-saved, so only xmm0..5 are used there.
+const win = x.CallConv.host.shadow != 0;
+pub const fp_allocatable: ra.RegMask = if (win) 0b1111 else 0x3FFF; // xmm0..3 / xmm0..13
+const fs0: bld.Xmm = if (win) 4 else 14;
+const fs1: bld.Xmm = if (win) 5 else 15;
 
 fn bit(r: Gp) ra.RegMask {
     return @as(ra.RegMask, 1) << @backingInt(r);
@@ -42,6 +50,8 @@ pub const Options = struct {
     algo: ra.Algo = .linear,
     /// Per-block register segments for spilled values (`regalloc.Config.split`).
     split: bool = true,
+    /// Restrict the FP (xmm) allocatable set (spill stress tests).
+    fp_allocatable: ra.RegMask = fp_allocatable,
 };
 
 pub const Stats = struct {
@@ -68,37 +78,21 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     const cc = x.CallConv.host;
     if (f.params > ir.max_args) return error.TooManyParams;
 
-    // ---- register allocation input ----
+    // ---- register allocation input (one run per register class) ----
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const A = arena.allocator();
-    const blocks = try A.alloc(ra.Block, f.blocks.items.len);
-    for (f.blocks.items, 0..) |blk, bi| {
-        const extra: usize = if (bi == 0) 1 else 0;
-        const insts = try A.alloc(ra.Inst, blk.ops.items.len + extra);
-        if (bi == 0) {
-            const params = try A.alloc(ra.VReg, f.params);
-            for (params, 0..) |*p, i| p.* = @intCast(i);
-            insts[0] = .{ .defs = params };
-        }
-        for (blk.ops.items, 0..) |o, i| {
-            var buf: [ir.max_args]ir.VReg = undefined;
-            const u = try A.dupe(ra.VReg, o.uses(&buf));
-            const d: []const ra.VReg = if (o.def()) |dv| try A.dupe(ra.VReg, &.{dv}) else &.{};
-            insts[i + extra] = .{ .uses = u, .defs = d, .is_call = o == .call, .is_copy = o == .copy };
-        }
-        const succs: []const u32 = switch (blk.ops.items[blk.ops.items.len - 1]) {
-            .br => |tg| try A.dupe(u32, &.{tg}),
-            .cbr => |c| try A.dupe(u32, &.{ c.then, c.@"else" }),
-            else => &.{},
-        };
-        blocks[bi] = .{ .insts = insts, .succs = succs };
-    }
-    const rf: ra.Func = .{ .blocks = blocks, .num_vregs = @max(f.num_vregs, 1) };
+    const types = try rc.check(A, f);
+    const rf = try rc.buildFunc(A, f, types, .gp, true);
     const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls, .algo = opts.algo, .split = opts.split };
     var res = try ra.allocate(gpa, rf, rcfg);
     defer res.deinit(gpa);
     std.debug.assert(ra.verify(rf, rcfg, res));
+    const ff = try rc.buildFunc(A, f, types, .fp, false);
+    const fcfg: ra.Config = .{ .allocatable = opts.fp_allocatable };
+    var fres = try ra.allocate(gpa, ff, fcfg);
+    defer fres.deinit(gpa);
+    std.debug.assert(ra.verify(ff, fcfg, fres));
 
     // ---- frame ----
     const used = res.usedRegs();
@@ -106,7 +100,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     defer saved.deinit(gpa);
     for ([_]Gp{ .rbx, .r12, .r13, .r14, .r15 }) |r| if (used & bit(r) != 0) try saved.append(gpa, r);
     const nsaved: u32 = @intCast(saved.items.len);
-    const slots_bytes = res.num_slots * 8;
+    const slots_bytes = (res.num_slots + fres.num_slots) * 8;
     const adj = std.mem.alignForward(u32, nsaved * 8 + slots_bytes, 16) - nsaved * 8;
 
     const L = struct {
@@ -115,6 +109,30 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
         pos: *const u32,
         nsaved: u32,
         b: *bld.Builder,
+        flocs: []const ra.Loc,
+        /// First FP spill slot (after the GP slots).
+        fbase: u32,
+        /// xmm register holding FP `v` (loads spilled values into `scratch`; undefined reads as +0.0).
+        fn fget(s: @This(), v: ir.VReg, scratch: bld.Xmm) !bld.Xmm {
+            return switch (s.flocs[v]) {
+                .reg => |r| @intCast(r),
+                .stack => |k| blk: {
+                    try s.b.emit(.sseRM, .{ .movsd, scratch, s.slot(s.fbase + k) });
+                    break :blk scratch;
+                },
+                .none => blk: {
+                    try s.b.emit(.sseRR, .{ .xorps, scratch, scratch });
+                    break :blk scratch;
+                },
+            };
+        }
+        fn fput(s: @This(), v: ir.VReg, src: bld.Xmm) !void {
+            switch (s.flocs[v]) {
+                .reg => |r| if (r != src) try s.b.emit(.sseRR, .{ .movaps, @intCast(r), src }),
+                .stack => |k| try s.b.emit(.sseMR, .{ .movsd, s.slot(s.fbase + k), src }),
+                .none => {},
+            }
+        }
         fn slot(s: @This(), k: u32) x.Mem {
             return x.ptr(.rbp, -@as(i32, @intCast(8 * (s.nsaved + 1 + k))));
         }
@@ -149,7 +167,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
         }
     };
     var pos: u32 = 0;
-    const ctx: L = .{ .locs = res.locs, .res = &res, .pos = &pos, .nsaved = nsaved, .b = b };
+    const ctx: L = .{ .locs = res.locs, .res = &res, .pos = &pos, .nsaved = nsaved, .b = b, .flocs = fres.locs, .fbase = res.num_slots };
 
     // ---- prolog ----
     try b.comment(f.name);
@@ -193,7 +211,10 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                         try ctx.put(c.dst, s0);
                     },
                 },
-                .copy => |c| try ctx.put(c.dst, try ctx.get(c.src, s0)),
+                .copy => |c| if (rc.classOf(types[c.dst]) == .fp)
+                    try ctx.fput(c.dst, try ctx.fget(c.src, fs0))
+                else
+                    try ctx.put(c.dst, try ctx.get(c.src, s0)),
                 .arith => |c| fold: {
                     const alu: ?x.Alu = switch (c.op) {
                         .add => .add,
@@ -256,13 +277,91 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                 },
                 .load => |c| {
                     const base = try ctx.get(c.base, s1);
-                    try b.emit(.movRM, .{ s0, x.ptr(base, c.disp) });
-                    try ctx.put(c.dst, s0);
+                    if (c.ty != .i64) {
+                        try b.emit(.sseRM, .{ sseMov(c.ty), fs0, x.ptr(base, c.disp) });
+                        try ctx.fput(c.dst, fs0);
+                    } else {
+                        try b.emit(.movRM, .{ s0, x.ptr(base, c.disp) });
+                        try ctx.put(c.dst, s0);
+                    }
                 },
                 .store => |c| {
                     const base = try ctx.get(c.base, s1);
-                    const v = try ctx.get(c.src, s0);
-                    try b.emit(.movMR, .{ x.ptr(base, c.disp), v });
+                    if (c.ty != .i64) {
+                        try b.emit(.sseMR, .{ sseMov(c.ty), x.ptr(base, c.disp), try ctx.fget(c.src, fs0) });
+                    } else {
+                        const v = try ctx.get(c.src, s0);
+                        try b.emit(.movMR, .{ x.ptr(base, c.disp), v });
+                    }
+                },
+                .fconst => |c| {
+                    try b.emit(.movRI, .{ s0, @bitCast(c.bits) });
+                    try b.emit(.movqXR, .{ fs0, s0 });
+                    try ctx.fput(c.dst, fs0);
+                },
+                .typed => |c| {
+                    const d64 = c.ty == .f64;
+                    const op: bld.SseOp = switch (c.op) {
+                        .add => if (d64) .addsd else .addss,
+                        .sub => if (d64) .subsd else .subss,
+                        .mul => if (d64) .mulsd else .mulss,
+                        .div => if (d64) .divsd else .divss,
+                        // x86 semantics = IR semantics: the second operand when unordered or equal.
+                        .min => if (d64) .minsd else .minss,
+                        .max => if (d64) .maxsd else .maxss,
+                        .@"and", .@"or", .xor => unreachable, // integer vectors only (rejected)
+                    };
+                    const xa = try ctx.fget(c.a, fs0);
+                    const xb = try ctx.fget(c.b, fs1);
+                    if (xa != fs0) try b.emit(.sseRR, .{ .movaps, fs0, xa });
+                    try b.emit(.sseRR, .{ op, fs0, xb });
+                    try ctx.fput(c.dst, fs0);
+                },
+                .fcmp => |c| {
+                    const ucomi: bld.SseOp = if (c.ty == .f64) .ucomisd else .ucomiss;
+                    const xa = try ctx.fget(c.a, fs0);
+                    const xb = try ctx.fget(c.b, fs1);
+                    // ucomis: unordered sets ZF=PF=CF=1. lt/le swap operands so that `a`/`ae`
+                    // (CF=0) are false on NaN; eq/ne combine with PF.
+                    switch (c.cond) {
+                        .lt, .le => try b.emit(.sseRR, .{ ucomi, xb, xa }),
+                        else => try b.emit(.sseRR, .{ ucomi, xa, xb }),
+                    }
+                    switch (c.cond) {
+                        .eq, .ne => {
+                            try b.emit(.setcc, .{ if (c.cond == .eq) .e else .ne, s0 });
+                            try b.emit(.setcc, .{ if (c.cond == .eq) .np else .p, s1 });
+                            try b.emit(.movzxB, .{ s0, s0 });
+                            try b.emit(.movzxB, .{ s1, s1 });
+                            try b.emit(.aluRR, .{ if (c.cond == .eq) .@"and" else .@"or", s0, s1 });
+                        },
+                        .lt, .gt => {
+                            try b.emit(.setcc, .{ .a, s0 });
+                            try b.emit(.movzxB, .{ s0, s0 });
+                        },
+                        .le, .ge => {
+                            try b.emit(.setcc, .{ .ae, s0 });
+                            try b.emit(.movzxB, .{ s0, s0 });
+                        },
+                    }
+                    try ctx.put(c.dst, s0);
+                },
+                .cvt => |c| switch (c.to) {
+                    .i64 => {
+                        try b.emit(.cvtToInt, .{ if (c.from == .f64) .cvttsd2si else .cvttss2si, s0, try ctx.fget(c.src, fs0) });
+                        try ctx.put(c.dst, s0);
+                    },
+                    else => {
+                        if (c.from == .i64) {
+                            const r = try ctx.get(c.src, s0);
+                            try b.emit(.sseRR, .{ .xorps, fs0, fs0 }); // break the false dependency
+                            try b.emit(.cvtFromInt, .{ if (c.to == .f64) .cvtsi2sd else .cvtsi2ss, fs0, r });
+                        } else {
+                            const xs = try ctx.fget(c.src, fs1);
+                            try b.emit(.sseRR, .{ if (c.to == .f64) .cvtss2sd else .cvtsd2ss, fs0, xs });
+                        }
+                        try ctx.fput(c.dst, fs0);
+                    },
                 },
                 .call => |c| {
                     // Split ranges: save caller-saved registers live across this call.
@@ -319,7 +418,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     try b.emit(.jcc, .{ cond, labels[c.then] });
                     try b.emit(.jmp, .{labels[c.@"else"]});
                 },
-                .fconst, .typed, .fcmp, .cvt, .splat, .extract => unreachable, // rejected by isIntOnly
+                .splat, .extract => unreachable, // rejected by reg_classes.check
                 .ret => |v| {
                     const r = try ctx.get(v, s0);
                     if (r != .rax) try b.emit(.movRR, .{ .rax, r });
@@ -340,9 +439,12 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     return .{ .spills = res.spills, .slots = res.num_slots, .nodes = b.count(), .folded_imm = folded_imm, .folded_mem = folded_mem, .segments = @intCast(res.segs.len), .coalesced = res.coalesced };
 }
 
+fn sseMov(tp: ir.Type) bld.SseMov {
+    return if (tp == .f32) .movss else .movsd;
+}
+
 /// IR -> bytes in `cb` (finalized). Runs dead-code, jump-to-next and branch-shortening passes.
 pub fn compile(gpa: std.mem.Allocator, f: *const ir.Func, cb: *CodeBuffer, opts: Options) !Stats {
-    if (!f.isIntOnly()) return error.UnsupportedType;
     var b = bld.Builder.init(gpa);
     defer b.deinit();
     var st = try lower(gpa, f, &b, opts);

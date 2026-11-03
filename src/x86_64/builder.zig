@@ -18,6 +18,18 @@ const Mem = x.Mem;
 const Alu = x.Alu;
 const Cond = x.Cond;
 const gp = @import("gp.zig");
+const vec = x.vec;
+
+/// Scalar SSE register-register ops used by the Compiler (`op xmm, xmm`).
+pub const SseOp = enum { addss, addsd, subss, subsd, mulss, mulsd, divss, divsd, minss, minsd, maxss, maxsd, movaps, xorps, ucomiss, ucomisd, cvtss2sd, cvtsd2ss };
+/// Scalar SSE load/store (`movss/movsd xmm, m` and `m, xmm`).
+pub const SseMov = enum { movss, movsd };
+/// `cvtsi2ss/sd xmm, r64`.
+pub const SseFromInt = enum { cvtsi2ss, cvtsi2sd };
+/// `cvttss2si/cvttsd2si r64, xmm` (truncating; NaN/out of range give minInt(i64)).
+pub const SseToInt = enum { cvttss2si, cvttsd2si };
+/// xmm register number (0..15).
+pub const Xmm = u4;
 
 pub const Error = x.Error || generic.Error;
 
@@ -80,9 +92,22 @@ pub const Instr = union(enum) {
     jmp32: struct { Label },
     jcc8: struct { Cond, Label },
     jcc32: struct { Cond, Label },
+    /// Scalar SSE (SSE/SSE2 legacy encoding, xmm0..15).
+    sseRR: struct { SseOp, Xmm, Xmm },
+    sseRM: struct { SseMov, Xmm, Mem },
+    sseMR: struct { SseMov, Mem, Xmm },
+    /// `movq xmm, r64` / `movq r64, xmm`.
+    movqXR: struct { Xmm, Gp },
+    movqRX: struct { Gp, Xmm },
+    cvtFromInt: struct { SseFromInt, Xmm, Gp },
+    cvtToInt: struct { SseToInt, Gp, Xmm },
+    /// `setcc r8` (low byte of the register).
+    setcc: struct { Cond, Gp },
+    /// `movzx r32, r8` (zero-extends into the full register).
+    movzxB: struct { Gp, Gp },
 
     pub const comment_prefix: []const u8 = ";";
-    pub const special: []const []const u8 = &.{ "aluRR", "aluRM", "aluMR", "aluRI", "shiftRCl", "idivR", "cqo", "jcc", "jmp8", "jmp32", "jcc8", "jcc32" };
+    pub const special: []const []const u8 = &.{ "aluRR", "aluRM", "aluMR", "aluRI", "shiftRCl", "idivR", "cqo", "jcc", "jmp8", "jmp32", "jcc8", "jcc32", "sseRR", "sseRM", "sseMR", "movqXR", "movqRX", "cvtFromInt", "cvtToInt", "setcc", "movzxB" };
     pub fn emitSpecial(a: anytype, i: Instr, labels: []const core.Label) !void {
         switch (i) {
             .aluRR => |o| switch (o[0]) {
@@ -105,6 +130,27 @@ pub const Instr = union(enum) {
             .jcc => |o| switch (o[0]) {
                 inline else => |c| try a.jcc(c, labels[o[1].id]),
             },
+            .sseRR => |o| switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.xmm(o[2]) }, .{}),
+            },
+            .sseRM => |o| switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.mem(o[2], if (op == .movss) 4 else 8) }, .{}),
+            },
+            .sseMR => |o| switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.mem(o[1], if (op == .movss) 4 else 8), vec.xmm(o[2]) }, .{}),
+            },
+            .movqXR => |o| try a.vinst(.movq, .{ vec.xmm(o[0]), gp.r64(o[1]) }, .{}),
+            .movqRX => |o| try a.vinst(.movq, .{ gp.r64(o[0]), vec.xmm(o[1]) }, .{}),
+            .cvtFromInt => |o| switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), gp.r64(o[2]) }, .{}),
+            },
+            .cvtToInt => |o| switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ gp.r64(o[1]), vec.xmm(o[2]) }, .{}),
+            },
+            .setcc => |o| switch (o[0]) {
+                inline else => |c| a.setcc(c, o[1]) catch |e| return mapGp(e),
+            },
+            .movzxB => |o| a.movzx(.byte, o[0], o[1]) catch |e| return mapGp(e),
             .jmp8 => |o| try rawBranch(a.buf, &.{0xEB}, true, labels[o[0].id]),
             .jmp32 => |o| try rawBranch(a.buf, &.{0xE9}, false, labels[o[0].id]),
             .jcc8 => |o| try rawBranch(a.buf, &.{0x70 + @as(u8, @backingInt(o[0]))}, true, labels[o[1].id]),
@@ -222,6 +268,22 @@ fn formatInstImpl(gpa: std.mem.Allocator, out: *std.ArrayList(u8), i: Instr) !vo
         .jcc, .jcc8, .jcc32 => |o| try out.print(gpa, "j{s}{s} L{d}", .{ @tagName(o[0]), bsuf(i), o[1].id }),
         .addRR, .subRR, .cmpRR, .xorRR => |o| try out.print(gpa, "{s} {s}, {s}", .{ aliasName(i), @tagName(o[0]), @tagName(o[1]) }),
         .addRI, .subRI, .cmpRI => |o| try out.print(gpa, "{s} {s}, {d}", .{ aliasName(i), @tagName(o[0]), o[1] }),
+        .sseRR => |o| try out.print(gpa, "{s} xmm{d}, xmm{d}", .{ @tagName(o[0]), o[1], o[2] }),
+        .sseRM => |o| {
+            try out.print(gpa, "{s} xmm{d}, ", .{ @tagName(o[0]), o[1] });
+            try fmtMem(gpa, out, o[2]);
+        },
+        .sseMR => |o| {
+            try out.print(gpa, "{s} ", .{@tagName(o[0])});
+            try fmtMem(gpa, out, o[1]);
+            try out.print(gpa, ", xmm{d}", .{o[2]});
+        },
+        .movqXR => |o| try out.print(gpa, "movq xmm{d}, {s}", .{ o[0], @tagName(o[1]) }),
+        .movqRX => |o| try out.print(gpa, "movq {s}, xmm{d}", .{ @tagName(o[0]), o[1] }),
+        .cvtFromInt => |o| try out.print(gpa, "{s} xmm{d}, {s}", .{ @tagName(o[0]), o[1], @tagName(o[2]) }),
+        .cvtToInt => |o| try out.print(gpa, "{s} {s}, xmm{d}", .{ @tagName(o[0]), @tagName(o[1]), o[2] }),
+        .setcc => |o| try out.print(gpa, "set{s} {s}", .{ @tagName(o[0]), @tagName(o[1]) }),
+        .movzxB => |o| try out.print(gpa, "movzx {s}, {s}.b", .{ @tagName(o[0]), @tagName(o[1]) }),
     }
 }
 
@@ -539,4 +601,40 @@ test "builder: shortenBranches is a re-runnable pass; sized branches format and 
     try b.serialize(x.AssemblerT(.{}).init(&cb));
     try cb.finalize();
     try t.expectEqualSlices(u8, &.{ 0x75, 0xFE, 0xEB, 0xFC, 0xAB, 0xCD }, cb.code());
+}
+
+test "builder: scalar SSE nodes encode like LLVM" {
+    var b = Builder.init(std.testing.allocator);
+    defer b.deinit();
+    try b.emit(.sseRR, .{ .addsd, 1, 2 }); // f2 0f 58 ca
+    try b.emit(.sseRR, .{ .ucomiss, 9, 0 }); // 44 0f 2e c8
+    try b.emit(.sseRM, .{ .movss, 0, x.ptr(.rbp, -8) }); // f3 0f 10 45 f8
+    try b.emit(.sseMR, .{ .movsd, x.ptr(.rax, 0), 15 }); // f2 44 0f 11 38
+    try b.emit(.movqXR, .{ 3, .r10 }); // 66 49 0f 6e da
+    try b.emit(.movqRX, .{ .rax, 3 }); // 66 48 0f 7e d8
+    try b.emit(.cvtFromInt, .{ .cvtsi2sd, 0, .rdi }); // f2 48 0f 2a c7
+    try b.emit(.cvtToInt, .{ .cvttss2si, .r10, 1 }); // f3 4c 0f 2c d1
+    try b.emit(.setcc, .{ .a, .r10 }); // 41 0f 97 c2
+    try b.emit(.movzxB, .{ .r10, .r10 }); // 45 0f b6 d2
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    try b.serialize(x.AssemblerT(.{ .validate = true }).init(&cb));
+    try std.testing.expectEqualSlices(u8, &.{
+        0xf2, 0x0f, 0x58, 0xca,
+        0x44, 0x0f, 0x2e, 0xc8,
+        0xf3, 0x0f, 0x10, 0x45,
+        0xf8, 0xf2, 0x44, 0x0f,
+        0x11, 0x38, 0x66, 0x49,
+        0x0f, 0x6e, 0xda, 0x66,
+        0x48, 0x0f, 0x7e, 0xd8,
+        0xf2, 0x48, 0x0f, 0x2a,
+        0xc7, 0xf3, 0x4c, 0x0f,
+        0x2c, 0xd1, 0x41, 0x0f,
+        0x97, 0xc2, 0x45, 0x0f,
+        0xb6, 0xd2,
+    }, cb.code());
+    var txt: std.ArrayList(u8) = .empty;
+    defer txt.deinit(std.testing.allocator);
+    try formatInstImpl(std.testing.allocator, &txt, .{ .sseRR = .{ .addsd, 1, 2 } });
+    try std.testing.expectEqualStrings("addsd xmm1, xmm2", txt.items);
 }

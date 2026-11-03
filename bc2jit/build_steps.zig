@@ -13,6 +13,10 @@ const Case = struct { name: []const u8, module: []const u8, args: []const []cons
 fn module(comptime argc: u8, comptime code: []const u8) []const u8 {
     return "KXBC" ++ [_]u8{ 0, argc, @truncate(code.len), @truncate(code.len >> 8) } ++ code;
 }
+/// KXBC v1 module (control flow, locals, IR lowering).
+fn moduleV1(comptime argc: u8, comptime code: []const u8) []const u8 {
+    return "KXBC" ++ [_]u8{ 1, argc, @truncate(code.len), @truncate(code.len >> 8) } ++ code;
+}
 fn imm(comptime v: i64) []const u8 {
     var b: [8]u8 = undefined;
     std.mem.writeInt(i64, &b, v, .little);
@@ -41,6 +45,12 @@ const cases = [_]Case{
     .{ .name = "dup-square", .module = module(1, arg(0) ++ DUP ++ MUL ++ RET), .args = &.{"-0x10"}, .stdout = "256\n" },
     .{ .name = "extra-args-ignored", .module = module(0, imm(5) ++ RET), .args = &.{ "1", "2", "3", "4" }, .stdout = "5\n" },
     .{ .name = "ret-top-of-deep-stack", .module = module(2, arg(0) ++ arg(1) ++ RET), .args = &.{ "1", "2" }, .stdout = "2\n" },
+    // v1: gcd(a, b) = while (b != 0) (a, b) = (b, a % b)
+    //   0 push_arg 0 | 2 push_arg 1 | 4 dup | 5 push 0 | 14 br_if eq 28 | 18 dup | 19 store_local 0
+    //   21 rem | 22 load_local 0 | 24 swap | 25 jmp 4 | 28 drop | 29 ret
+    .{ .name = "v1-gcd", .module = moduleV1(2, arg(0) ++ arg(1) ++ DUP ++ imm(0) ++ "\x41\x00\x1c\x00" ++ DUP ++ "\x31\x00" ++ "\x14" ++ "\x30\x00" ++ "\x22" ++ "\x40\x04\x00" ++ DROP ++ RET), .args = &.{ "1071", "462" }, .stdout = "21\n" },
+    .{ .name = "v1-div-by-zero-is-zero", .module = moduleV1(2, arg(0) ++ arg(1) ++ "\x13" ++ RET), .args = &.{ "7", "0" }, .stdout = "0\n" },
+    .{ .name = "v1-min-div-minus-one", .module = moduleV1(2, arg(0) ++ arg(1) ++ "\x13" ++ RET), .args = &.{ "-9223372036854775808", "-1" }, .stdout = "-9223372036854775808\n" },
     .{ .name = "four-args", .module = module(4, arg(0) ++ arg(1) ++ MUL ++ arg(2) ++ arg(3) ++ MUL ++ ADD ++ RET), .args = &.{ "3", "4", "5", "-6" }, .stdout = "-18\n" },
 };
 
