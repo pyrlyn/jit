@@ -23,7 +23,7 @@ const R = [15]Gp{ .rax, .rcx, .rdx, .rbx, .rbp, .rsi, .rdi, .r8, .r9, .r10, .r11
 const UNITS = 256;
 
 /// The four scenarios, instantiated per assembler configuration (timing loop and tests).
-fn Scenarios(comptime Asm: type) type {
+pub fn Scenarios(comptime Asm: type) type {
     return struct {
         pub fn straight(a: Asm) Error!u32 {
             @setEvalBranchQuota(100_000);

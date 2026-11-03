@@ -250,6 +250,42 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // Benchmark regression tests (bench/bench_test.zig, baselines in bench/baseline-<arch>-<os>.txt).
+    // Always ReleaseFast (library included) so numbers don't depend on -Doptimize.
+    {
+        const jit_fast = b.createModule(.{
+            .root_source_file = b.path("src/pyrlyn_jit.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+        });
+        jit_fast.addOptions("pyrlyn_jit_options", opts);
+        const bt = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_test.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+        }) });
+        const tr = target.result;
+        const base_path = (b.fmt("bench/baseline-{s}-{s}.txt", .{ @tagName(tr.cpu.arch), @tagName(tr.os.tag) }));
+        const check_run = b.addRunArtifact(bt);
+        check_run.setEnvironmentVariable("PJIT_BENCH_BASELINE", base_path);
+        check_run.has_side_effects = true;
+        if (b.option([]const u8, "bench-tol", "bench-test: override the regression tolerance for every case, in percent")) |t| check_run.setEnvironmentVariable("PJIT_BENCH_TOL", t);
+        check_run.setCwd(b.path("."));
+        b.step("bench-test", "Run benchmark regression tests against the checked-in baseline (-Dbench-tol=PERCENT overrides tolerance)").dependOn(&check_run.step);
+        const truncate = b.addSystemCommand(&.{ "sh", "-c", b.fmt("printf '# ns/iter median, zig build bench-update, %s\\n' \"$(date '+%Y-%m-%d') $(uname -m) load: $(uptime | sed 's/.*load averages*: //')\" > '{s}'", .{base_path}) });
+        const upd_run = b.addRunArtifact(bt);
+        upd_run.setEnvironmentVariable("PJIT_BENCH_BASELINE", base_path);
+        upd_run.setEnvironmentVariable("PJIT_BENCH_UPDATE", "1");
+        upd_run.has_side_effects = true;
+        upd_run.setCwd(b.path("."));
+        truncate.setCwd(b.path("."));
+        upd_run.step.dependOn(&truncate.step);
+        b.step("bench-update", "Re-measure and rewrite the benchmark baseline file").dependOn(&upd_run.step);
+    }
+
     // zig fmt: our sources only. AsmJit-derived and other generated files are excluded so they
     // stay byte-identical to their generators (see CONTRIBUTING.md).
     const fmt_paths: []const std.Build.LazyPath = &.{ b.path("build.zig"), b.path("src"), b.path("examples"), b.path("bench") };
