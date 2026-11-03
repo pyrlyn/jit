@@ -18,8 +18,9 @@ Done and merged:
 - Register allocator: linear scan with splitting at calls and of spilled values; optional graph
   coloring (Chaitin-Briggs with Briggs coalescing, `Config.algo = .graph`).
 - Stable C ABI (`include/pyrlyn_jit.h`) with C, C++, Rust and Zig examples in `examples/`; CMake adapter.
-- `bc2jit` (draft, #63): compiles a KXBC bytecode function for `--arch x86-64|aarch64|riscv` and runs it
-  on the host; see [bc2jit/README.md](../bc2jit/README.md).
+- `bc2jit` (#63, out of draft with KXBC v1): compiles a KXBC bytecode function for
+  `--arch x86-64|aarch64|riscv` and runs it on the host; v1 adds control flow, locals and the full
+  integer op set, lowered through the IR Compilers; see [bc2jit/README.md](../bc2jit/README.md).
 - Benchmark regression tests (#64): `zig build bench-test` against a checked-in per-arch baseline,
   `zig build bench-update` to refresh it; see [bench/BENCH_TESTS.md](../bench/BENCH_TESTS.md).
 - CI (Linux, macOS, Windows; RISC-V under qemu-user).
@@ -31,7 +32,8 @@ Done and merged:
 3. Register allocator: lifetime holes, edge move resolution, loop-depth spill weights,
    two-address hints.
 4. x86-64 operands: remaining sizes and forms, AVX10.
-5. bc2jit / KXBC: move out of draft; the KotlinX side that emits KXBC is a separate change.
+5. bc2jit / KXBC: calls, floats, more than four arguments; the KotlinX side that emits KXBC is a
+   separate change.
 6. Other architectures (MIPS, PowerPC64, LoongArch64, Wasm, AArch32) only if needed.
 
 | Topic | Detailed plan |
