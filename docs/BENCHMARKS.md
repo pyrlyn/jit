@@ -17,3 +17,5 @@ instructions each, buffer reset every iteration, x86-64 code generated on the ar
 AsmJit runs with `kOptimizeForSize`, so both produce identical bytes (checked by `cmp`).
 Results: [bench/RESULTS.md](../bench/RESULTS.md).
 
+
+Regression tests with thresholds: `zig build bench-test`, see [bench/BENCH_TESTS.md](../bench/BENCH_TESTS.md).

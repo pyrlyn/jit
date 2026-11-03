@@ -1,0 +1,10 @@
+# ns/iter median, zig build bench-update, 2026-11-03 arm64 load: 8.87 11.09 9.91
+x86_64_straight 7159.2
+x86_64_calls 5183.3
+x86_64_loops 8569.0
+x86_64_mem 1899.7
+x86_64_avx 5419.6
+x86_64_avx512 6539.7
+aarch64_emit 3530.6
+jit_runtime_add_release 4935.1
+e2e_aarch64_compile_run 5019.4
