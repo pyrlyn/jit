@@ -243,3 +243,141 @@ test "bench e2e_aarch64_compile_run" {
         }
     }.f);
 }
+
+// ---- bc2jit: KXBC decode, lowering per arch, stack model, end-to-end (bc2jit/, PR #63) ----
+
+const b2j = @import("bc2jit");
+const kbc = b2j.bytecode;
+const Target = b2j.lower.Target;
+const gpa = std.heap.c_allocator;
+
+/// One unit that uses every opcode and walks the operand stack from depth 1 to the limit (5) and
+/// back; repeated, it keeps the depth balanced at 1. Encoded size: 2*3+1+1+1+1+1+9+1+1+1+1 = 24 bytes.
+const all_ops_unit = [_]kbc.Inst{
+    .{ .push_arg = 1 }, .{ .push_arg = 2 }, .{ .push_arg = 3 }, .dup, .drop, .mul, .sub, .{ .push_i64 = 0x0123_4567_89AB_CDEF }, .dup, .mul, .add, .add,
+};
+const all_ops_unit_len = 24;
+
+/// Encoded KXBC module of `units` all-opcode units (4 args), plus its decoded form.
+const Prog = struct {
+    bytes: []u8,
+    f: kbc.Function,
+    fn init(units: usize) !Prog {
+        var list: std.ArrayList(kbc.Inst) = .empty;
+        defer list.deinit(gpa);
+        try list.append(gpa, .{ .push_arg = 0 });
+        for (0..units) |_| try list.appendSlice(gpa, &all_ops_unit);
+        try list.append(gpa, .ret);
+        const bytes = try kbc.encode(gpa, .{ .arg_count = 4, .insts = list.items });
+        var d: kbc.Diagnostic = .{};
+        return .{ .bytes = bytes, .f = try kbc.decode(gpa, bytes, &d) };
+    }
+    fn deinit(p: Prog) void {
+        p.f.deinit(gpa);
+        gpa.free(p.bytes);
+    }
+};
+/// Units that fit the u16 code length: 2 + 24*n + 1 <= 65535 -> n = 2730 (65 523 bytes, ~64 KiB).
+const UNITS_64K = (65535 - 3) / all_ops_unit_len;
+const UNITS_SMALL = 4; // ~100-byte module, the size of the e2e fixtures
+
+/// Reference result (wrapping i64), to check the e2e call.
+fn interpret(f: kbc.Function, args: [4]i64) i64 {
+    var st: [kbc.max_depth]i64 = undefined;
+    var sp: usize = 0;
+    for (f.insts) |i| switch (i) {
+        .push_i64 => |v| {
+            st[sp] = v;
+            sp += 1;
+        },
+        .push_arg => |n| {
+            st[sp] = args[n];
+            sp += 1;
+        },
+        .add, .sub, .mul => {
+            sp -= 1;
+            const b = st[sp];
+            const a = &st[sp - 1];
+            a.* = switch (i) {
+                .add => a.* +% b,
+                .sub => a.* -% b,
+                else => a.* *% b,
+            };
+        },
+        .dup => {
+            st[sp] = st[sp - 1];
+            sp += 1;
+        },
+        .drop => sp -= 1,
+        .ret => return st[sp - 1],
+    };
+    unreachable;
+}
+
+fn decodeCase(name: []const u8, units: usize) !void {
+    const p = try Prog.init(units);
+    defer p.deinit();
+    try bench(name, DEFAULT_TOL, p.bytes, struct {
+        fn f(bytes: []u8) anyerror!void {
+            var d: kbc.Diagnostic = .{};
+            const g = try kbc.decode(gpa, bytes, &d);
+            std.mem.doNotOptimizeAway(g.insts.ptr);
+            g.deinit(gpa);
+        }
+    }.f);
+}
+
+test "bench bc2jit_decode_small" {
+    try decodeCase("bc2jit_decode_small", UNITS_SMALL);
+}
+test "bench bc2jit_decode_64k" {
+    try decodeCase("bc2jit_decode_64k", UNITS_64K);
+}
+
+const LCtx = struct { cb: *pjit.CodeBuffer, f: kbc.Function, t: Target };
+fn lowerCase(name: []const u8, t: Target, units: usize) !void {
+    if (!t.isBuilt()) return error.SkipZigTest;
+    const p = try Prog.init(units);
+    defer p.deinit();
+    var cb = pjit.CodeBuffer.init(gpa);
+    defer cb.deinit();
+    try bench(name, DEFAULT_TOL, LCtx{ .cb = &cb, .f = p.f, .t = t }, struct {
+        fn f(c: LCtx) anyerror!void {
+            c.cb.reset();
+            try b2j.lower.lower(c.t, c.f, c.cb);
+        }
+    }.f);
+}
+
+// Opcode -> assembler translation of the ~64 KiB all-opcode module, per backend.
+test "bench bc2jit_lower_x86_64" {
+    try lowerCase("bc2jit_lower_x86_64", .x86_64, UNITS_64K);
+}
+test "bench bc2jit_lower_aarch64" {
+    try lowerCase("bc2jit_lower_aarch64", .aarch64, UNITS_64K);
+}
+test "bench bc2jit_lower_riscv64" {
+    try lowerCase("bc2jit_lower_riscv64", .riscv64, UNITS_64K);
+}
+// Stack model on a small all-opcode program (depth 1..5 every unit), host backend.
+test "bench bc2jit_stack_all_opcodes" {
+    const h = Target.host() orelse return error.SkipZigTest;
+    try lowerCase("bc2jit_stack_all_opcodes", h, 64);
+}
+
+test "bench bc2jit_e2e_aarch64" {
+    if (!Target.aarch64.isBuilt() or !Target.aarch64.canExecute()) return error.SkipZigTest;
+    const p = try Prog.init(UNITS_SMALL);
+    defer p.deinit();
+    try bench("bc2jit_e2e_aarch64", SYSCALL_TOL, p.bytes, struct {
+        const args = [4]i64{ 3, -5, 7, 11 };
+        fn f(bytes: []u8) anyerror!void {
+            var d: kbc.Diagnostic = .{};
+            const g = try kbc.decode(gpa, bytes, &d);
+            defer g.deinit(gpa);
+            var c = try b2j.driver.compile(gpa, .aarch64, g);
+            defer c.deinit();
+            if (c.call(args) != interpret(g, args)) return error.WrongResult;
+        }
+    }.f);
+}

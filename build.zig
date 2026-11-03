@@ -266,7 +266,16 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .link_libc = true,
-            .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+            .imports = &.{
+                .{ .name = "pyrlyn_jit", .module = jit_fast },
+                .{ .name = "bc2jit", .module = b.createModule(.{
+                    .root_source_file = b.path("bc2jit/lib.zig"),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+                }) },
+            },
         }) });
         const tr = target.result;
         const base_path = (b.fmt("bench/baseline-{s}-{s}.txt", .{ @tagName(tr.cpu.arch), @tagName(tr.os.tag) }));
