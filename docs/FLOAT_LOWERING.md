@@ -9,7 +9,7 @@ register-allocating Compilers.
 |---|---|---|---|---|
 | `f32`: `fconst`, `add/sub/mul/div/min/max`, `fcmp`, `load/store.f32`, `copy` | yes | yes | rejected | rejected |
 | `f64`: same ops (`addsd`.., `ldr/str d`) | yes | yes | rejected | rejected |
-| `cvt` (i64 <-> f32/f64, f32 <-> f64) | not yet | not yet | rejected | rejected |
+| `cvt`: `fpext` f32->f64, `fptrunc` f64->f32, i64 <-> f32/f64 | yes | yes | rejected | rejected |
 | vectors (`v4i32`, `v2i64`, `v4f32`, `v2f64`), `splat`, `extract` | rejected | rejected | rejected | rejected |
 
 Rejected IR returns `error.UnsupportedType` (`PJIT_ERR_UNSUPPORTED` through the C API); it
@@ -35,6 +35,12 @@ is never miscompiled. The supported set is `reg_classes.support`.
 - **Semantics** (same as the interpreter): `min`/`max` return the second operand when
   unordered or equal (x86 `minss`; AArch64 lowers to `fcmp` + `fcsel`, not `fmin`); `fcmp` is
   ordered (false on NaN) except `ne`.
+- **Conversions** (`cvt.<to>.<from>`): f32 -> f64 (`cvtss2sd` / `fcvt d, s`, exact), f64 -> f32
+  (`cvtsd2ss` / `fcvt s, d`, round to nearest even, overflow to inf), i64 -> f32/f64 (`cvtsi2ss/sd`
+  after `xorps` to break the false dependency / `scvtf`, round to nearest), f32/f64 -> i64
+  truncating toward zero with x86 semantics: NaN and out of range give minInt(i64). AArch64
+  `fcvtzs` saturates (NaN -> 0, +overflow -> maxInt), so the result is fixed up with
+  `cmp`/`csel` (maxInt, which no in-range float converts to) and `fcmp v, v`/`csel vs` (NaN).
 
 ## Tests (`src/fp_tests.zig`)
 

@@ -265,6 +265,53 @@ test "fp: f64 keeps double precision and f32/f64 values coexist" {
     try checkProgram(src, &mem, .f64, .one_fp_reg);
 }
 
+test "fp: conversions (fpext, fptrunc, i64 <-> float) on special values" {
+    if (!can_run) return error.SkipZigTest;
+    // mem[0] = f32 input, mem[1] = f64 input, mem[2] = i64 input; outputs from mem[3].
+    const src =
+        \\func cvt 1
+        \\e:
+        \\  v1 = load.f32 v0 0
+        \\  v2 = load.f64 v0 8
+        \\  v3 = load v0 16
+        \\  v4 = cvt.f64.f32 v1
+        \\  store.f64 v0 24 v4
+        \\  v5 = cvt.f32.f64 v2
+        \\  store.f32 v0 32 v5
+        \\  v6 = cvt.f32.i64 v3
+        \\  store.f32 v0 40 v6
+        \\  v7 = cvt.f64.i64 v3
+        \\  store.f64 v0 48 v7
+        \\  v8 = cvt.i64.f32 v1
+        \\  store v0 56 v8
+        \\  v9 = cvt.i64.f64 v2
+        \\  store v0 64 v9
+        \\  v10 = cvt.f32.f64 v4
+        \\  v11 = fcmp.f32 eq v10 v1
+        \\  v12 = xor v8 v9
+        \\  v13 = add v12 v11
+        \\  ret v13
+    ;
+    const f32s = specials(f32);
+    const f64s = [_]f64{ 0, -0.0, 1.5, -2.5, 3.4e38, 3.5e38, -1e39, 1e-46, 9.2233720368547748e18, 9.2233720368547758e18, -9.2233720368547758e18, -9.2233720368547779e18, 1e300, std.math.nan(f64), std.math.inf(f64), 2.5, -0.5, 0x1.000001p0, 0x1.0000018p0 };
+    const ints = [_]i64{ 0, 1, -1, 16777217, -16777217, 9007199254740993, std.math.maxInt(i64), std.math.minInt(i64), 123456789012345678 };
+    const extra_f32 = [_]f32{ 9.2233715e18, 9.223372e18, -9.223372e18, -9.2233731e18, 2.5, -3.5 };
+    for ([_]Mode{ .normal, .one_fp_reg }) |mode| {
+        for (0..@max(f32s.len + extra_f32.len, f64s.len, ints.len)) |i| {
+            var mem: [9]u64 = @splat(0);
+            const a: f32 = if (i < f32s.len) f32s[i] else extra_f32[(i - f32s.len) % extra_f32.len];
+            mem[0] = @as(u32, @bitCast(a));
+            mem[1] = @bitCast(f64s[i % f64s.len]);
+            mem[2] = @bitCast(ints[i % ints.len]);
+            try checkProgram(src, &mem, .f64, mode);
+            // Independent oracle for the f -> i64 rule (x86 cvtt: NaN / out of range -> minInt).
+            const want_i: i64 = if (std.math.isNan(a) or a >= 9.223372036854775807e18 or a < -9.223372036854775808e18) std.math.minInt(i64) else @intFromFloat(a);
+            try t.expectEqual(want_i, @as(i64, @bitCast(mem[7])));
+            try t.expectEqual(@as(u64, @bitCast(@as(f64, a))), mem[3]);
+        }
+    }
+}
+
 test "fp: unsupported float IR is rejected, not miscompiled" {
     if (!can_run) return error.SkipZigTest;
     var f = try ir.parse(t.allocator,

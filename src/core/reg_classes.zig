@@ -22,7 +22,7 @@ pub const Support = struct {
     f32: bool = true,
     f64: bool = true,
     /// `cvt` (i64 <-> f32/f64, f32 <-> f64).
-    cvt: bool = false,
+    cvt: bool = true,
 };
 pub const support: Support = .{};
 
