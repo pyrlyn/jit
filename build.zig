@@ -101,6 +101,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    @import("bc2jit/build_steps.zig").add(b, target, optimize, pyrlyn_jit, test_step);
 
     // 32-bit x86 Compiler execution tests (x86-linux; runs natively on x86_64 Linux kernels).
     const x86_32_mod = b.createModule(.{
@@ -288,7 +289,7 @@ pub fn build(b: *std.Build) void {
 
     // zig fmt: our sources only. AsmJit-derived and other generated files are excluded so they
     // stay byte-identical to their generators (see CONTRIBUTING.md).
-    const fmt_paths: []const std.Build.LazyPath = &.{ b.path("build.zig"), b.path("src"), b.path("examples"), b.path("bench") };
+    const fmt_paths: []const std.Build.LazyPath = &.{ b.path("build.zig"), b.path("src"), b.path("examples"), b.path("bench"), b.path("bc2jit") };
     const fmt_exclude: []const std.Build.LazyPath = &.{
         b.path("third_party"),
         b.path("bench/pre-safety"),
