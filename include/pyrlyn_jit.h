@@ -1,7 +1,15 @@
 /* pyrlyn-jit C API. Stable ABI: functions only take/return scalars, opaque handles and the
  * plain structs below. Every call validates its arguments and returns pjit_status
  * (never aborts on bad input). Link with libpyrlyn-jit (static or shared) and libc.
- * Version: pjit_version() == PJIT_VERSION (MAJOR << 16 | MINOR << 8 | PATCH). */
+ *
+ * Versioning: PJIT_VERSION is the header version (MAJOR << 16 | MINOR << 8 | PATCH);
+ * pjit_version() is the library version. Within one MAJOR the ABI only grows: functions and
+ * enum values are appended, existing ones never change meaning or layout. Check at startup
+ * with PJIT_ABI_COMPATIBLE(pjit_version()).
+ *
+ * Errors: every int-returning function returns a pjit_status; pjit_status_str() describes it
+ * and pjit_last_error() gives the detail (internal error name) of the last failure on the
+ * calling thread. */
 #ifndef PYRLYN_JIT_H
 #define PYRLYN_JIT_H
 
@@ -12,7 +20,13 @@
 extern "C" {
 #endif
 
-#define PJIT_VERSION 0x000100u
+#define PJIT_VERSION_MAJOR 0
+#define PJIT_VERSION_MINOR 2
+#define PJIT_VERSION_PATCH 0
+#define PJIT_MAKE_VERSION(major, minor, patch) ((uint32_t)(((major) << 16) | ((minor) << 8) | (patch)))
+#define PJIT_VERSION PJIT_MAKE_VERSION(PJIT_VERSION_MAJOR, PJIT_VERSION_MINOR, PJIT_VERSION_PATCH)
+/* Library version `v` provides everything this header declares (same MAJOR, MINOR.PATCH >= header). */
+#define PJIT_ABI_COMPATIBLE(v) (((v) >> 16) == PJIT_VERSION_MAJOR && ((v) & 0xFFFFu) >= (PJIT_VERSION & 0xFFFFu))
 
 typedef enum pjit_status {
     PJIT_OK = 0,
@@ -28,7 +42,13 @@ typedef enum pjit_status {
     PJIT_ERR_CODE_TOO_LARGE,
     PJIT_ERR_MAP_FAILED,
     PJIT_ERR_PROTECT_FAILED,
-    PJIT_ERR_OTHER
+    PJIT_ERR_OTHER,
+    /* 0.2.0 */
+    PJIT_ERR_UNSUPPORTED,      /* target/feature not supported (e.g. non-int IR on a backend) */
+    PJIT_ERR_IR_PARSE,         /* IR text syntax error */
+    PJIT_ERR_IR_VERIFY,        /* IR verifier rejected the function */
+    PJIT_ERR_IR_TYPE,          /* IR type error */
+    PJIT_ERR_STEP_LIMIT        /* pjit_ir_eval ran out of steps */
 } pjit_status;
 
 typedef struct pjit_buffer pjit_buffer; /* code + labels + fixups */
@@ -36,6 +56,9 @@ typedef struct pjit_func pjit_func;     /* executable (W^X) copy of finalized co
 
 uint32_t pjit_version(void);
 const char *pjit_status_str(int status);
+/* Detail of the last failure on this thread (never NULL; "" if none or after pjit_clear_error). */
+const char *pjit_last_error(void);
+void pjit_clear_error(void);
 
 /* ---- code buffer and labels ---- */
 int pjit_buffer_new(pjit_buffer **out);
@@ -108,6 +131,14 @@ int pjit_x64_jump(pjit_buffer *b, int cc, uint32_t label);
 static inline pjit_x64_op pjit_x64_reg(uint8_t r, uint8_t size) { pjit_x64_op o = {0}; o.kind = PJIT_X64_REG; o.reg = r; o.size = size; o.base = o.index = PJIT_X64_NONE; return o; }
 static inline pjit_x64_op pjit_x64_imm(int64_t v) { pjit_x64_op o = pjit_x64_reg(0, 0); o.kind = PJIT_X64_IMM; o.imm = v; return o; }
 static inline pjit_x64_op pjit_x64_mem(uint8_t base, int32_t disp, uint8_t size) { pjit_x64_op o = pjit_x64_reg(0, size); o.kind = PJIT_X64_MEM; o.base = base; o.disp = disp; return o; }
+
+/* ---- IR compiler (text IR, see src/core/ir.zig): IR -> register allocation -> machine code ---- */
+enum { PJIT_ARCH_HOST = 0, PJIT_ARCH_X86_64, PJIT_ARCH_AARCH64, PJIT_ARCH_X86, PJIT_ARCH_RISCV64 };
+/* Compiles one IR function for `arch` into `b` (empty or reset) and finalizes it. The result is
+ * `int64_t f(int64_t...)` in the target's C ABI; run it with pjit_jit_add when arch is the host. */
+int pjit_ir_compile(pjit_buffer *b, const char *src, size_t len, int arch);
+/* Reference interpreter: *out = f(args[0..nargs)); max_steps 0 = default limit. */
+int pjit_ir_eval(const char *src, size_t len, const int64_t *args, size_t nargs, uint64_t max_steps, int64_t *out);
 
 /* ---- executable memory (W^X: never writable and executable at once) ---- */
 /* `b` must be finalized. */

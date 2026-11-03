@@ -7,8 +7,17 @@ const rt = @import("core/jit_runtime.zig");
 const gp = @import("x86_64/gp.zig");
 const x86 = @import("x86_64/assembler.zig");
 const a64 = @import("aarch64/a64.zig");
+const ir = @import("core/ir.zig");
+const x64c = @import("x86_64/compiler.zig");
+const x86c = @import("x86/compiler.zig");
+const a64c = @import("aarch64/compiler.zig");
+const rvc = @import("riscv/compiler.zig");
 
-pub const version: u32 = 0x00_01_00; // 0.1.0, MAJOR<<16 | MINOR<<8 | PATCH
+pub const version_major: u32 = 0;
+pub const version_minor: u32 = 2;
+pub const version_patch: u32 = 0;
+/// MAJOR<<16 | MINOR<<8 | PATCH; must match PJIT_VERSION in include/pyrlyn_jit.h (checked by a test).
+pub const version: u32 = version_major << 16 | version_minor << 8 | version_patch;
 
 const Status = enum(c_int) {
     ok = 0,
@@ -25,6 +34,12 @@ const Status = enum(c_int) {
     map_failed,
     protect_failed,
     other,
+    // 0.2.0 (appended; existing values never change)
+    unsupported,
+    ir_parse,
+    ir_verify,
+    ir_type,
+    step_limit,
 };
 
 fn status(e: anyerror) c_int {
@@ -40,14 +55,37 @@ fn status(e: anyerror) c_int {
         error.CodeTooLarge => .code_too_large,
         error.MapFailed => .map_failed,
         error.ProtectFailed => .protect_failed,
+        error.Unsupported, error.UnsupportedType, error.UnsupportedArch, error.TooManyParams, error.TooManySpills => .unsupported,
+        error.Syntax, error.UnknownLabel, error.DuplicateLabel, error.InvalidCharacter, error.Overflow => .ir_parse,
+        error.EmptyFunction, error.MissingTerminator, error.TerminatorNotLast, error.BadBlock, error.BadVReg, error.TooManyArgs, error.ArgCountMismatch, error.MultipleDefs => .ir_verify,
+        error.TypeMismatch => .ir_type,
+        error.StepLimit => .step_limit,
         else => .other,
     };
+    setLastError(@errorName(e));
     return @backingInt(s);
 }
 const OK: c_int = 0;
 const EINVAL: c_int = @backingInt(Status.invalid_argument);
 
 const gpa = std.heap.c_allocator;
+
+/// Detail of the last failing call on this thread (the Zig error name), "" after a success
+/// of `pjit_clear_error`.
+threadlocal var last_error: [64:0]u8 = @splat(0);
+fn setLastError(name: []const u8) void {
+    const n = @min(name.len, last_error.len);
+    @memcpy(last_error[0..n], name[0..n]);
+    last_error[n] = 0;
+}
+
+export fn pjit_last_error() [*:0]const u8 {
+    return &last_error;
+}
+
+export fn pjit_clear_error() void {
+    last_error[0] = 0;
+}
 
 const Buffer = struct { cb: cbm.CodeBuffer };
 
@@ -72,6 +110,11 @@ export fn pjit_status_str(s: c_int) [*:0]const u8 {
         .map_failed => "mapping executable memory failed",
         .protect_failed => "changing memory protection failed",
         .other => "internal error",
+        .unsupported => "not supported by this target or build",
+        .ir_parse => "IR text does not parse",
+        .ir_verify => "IR function is malformed (verifier)",
+        .ir_type => "IR type error",
+        .step_limit => "IR interpreter step limit reached",
     };
 }
 
@@ -287,6 +330,56 @@ export fn pjit_x64_jump(b: ?*Buffer, cc: c_int, label: u32) c_int {
     return OK;
 }
 
+// ---- IR compiler ----------------------------------------------------------------------------
+
+const Arch = enum(c_int) { host = 0, x86_64 = 1, aarch64 = 2, x86 = 3, riscv64 = 4 };
+
+fn hostArch() ?Arch {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => .x86_64,
+        .aarch64 => .aarch64,
+        .x86 => .x86,
+        .riscv64 => .riscv64,
+        else => null,
+    };
+}
+
+fn parseIr(src: ?[*]const u8, len: usize) !ir.Func {
+    const p = src orelse return error.InvalidOperand;
+    return ir.parse(gpa, p[0..len]);
+}
+
+/// Parses IR text (`docs/ROADMAP.md` §2, `src/core/ir.zig`) and compiles it for `arch`
+/// (`PJIT_ARCH_*`) into `b`, which must be empty or reset; the buffer is finalized.
+export fn pjit_ir_compile(b: ?*Buffer, src: ?[*]const u8, len: usize, arch: c_int) c_int {
+    const p = b orelse return EINVAL;
+    const a0 = std.enums.fromInt(Arch, arch) orelse return EINVAL;
+    const a = if (a0 == .host) hostArch() orelse return status(error.UnsupportedArch) else a0;
+    var f = parseIr(src, len) catch |e| return status(e);
+    defer f.deinit();
+    switch (a) {
+        .host => unreachable,
+        .x86_64 => _ = x64c.compile(gpa, &f, &p.cb, .{}) catch |e| return status(e),
+        .aarch64 => _ = a64c.compile(gpa, &f, &p.cb, .{}) catch |e| return status(e),
+        .x86 => _ = x86c.compile(gpa, &f, &p.cb, .{}) catch |e| return status(e),
+        .riscv64 => _ = rvc.compile(gpa, &f, &p.cb, .{}) catch |e| return status(e),
+    }
+    return OK;
+}
+
+/// Runs IR text in the reference interpreter (no code generation): `out = f(args...)`.
+export fn pjit_ir_eval(src: ?[*]const u8, len: usize, args: ?[*]const i64, nargs: usize, max_steps: u64, out: ?*i64) c_int {
+    const o = out orelse return EINVAL;
+    if (nargs > ir.max_args or (nargs > 0 and args == null)) return EINVAL;
+    var f = parseIr(src, len) catch |e| return status(e);
+    defer f.deinit();
+    f.verify() catch |e| return status(e);
+    if (nargs != f.params) return EINVAL;
+    const a: []const i64 = if (nargs == 0) &.{} else args.?[0..nargs];
+    o.* = ir.interpret(&f, a, if (max_steps == 0) 1 << 24 else @intCast(max_steps)) catch |e| return status(e);
+    return OK;
+}
+
 // ---- executable memory ----------------------------------------------------------------------
 
 const Func = struct { f: rt.Function };
@@ -343,4 +436,30 @@ test "c api: a64 add + ret, labels, errors" {
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x01, 0x8B, 0x01, 0x00, 0x00, 0x14 }, c[0..n]);
     try std.testing.expectEqual(EINVAL, pjit_a64_branch(b, 99, l));
     try std.testing.expectEqual(@backingInt(Status.invalid_label), pjit_label_bind(b, 12345));
+}
+
+test "c api: version, errors, IR compile + eval" {
+    try std.testing.expectEqual(@as(u32, 0x000200), pjit_version());
+    const src = "func f 2\ne:\n  v2 = add v0 v1\n  ret v2\n";
+    var r: i64 = 0;
+    try std.testing.expectEqual(OK, pjit_ir_eval(src, src.len, &[_]i64{ 40, 2 }, 2, 0, &r));
+    try std.testing.expectEqual(@as(i64, 42), r);
+    try std.testing.expectEqual(EINVAL, pjit_ir_eval(src, src.len, &[_]i64{40}, 1, 0, &r));
+    const bad = "func f 1\ne:\n  v1 = frob v0\n";
+    try std.testing.expectEqual(@backingInt(Status.ir_parse), pjit_ir_eval(bad, bad.len, &[_]i64{1}, 1, 0, &r));
+    try std.testing.expectEqualStrings("Syntax", std.mem.span(pjit_last_error()));
+    pjit_clear_error();
+    try std.testing.expectEqualStrings("", std.mem.span(pjit_last_error()));
+    try std.testing.expect(std.mem.span(pjit_status_str(@backingInt(Status.step_limit))).len > 0);
+    inline for (.{ Arch.x86_64, Arch.aarch64, Arch.x86, Arch.riscv64 }) |a| {
+        var b: ?*Buffer = null;
+        try std.testing.expectEqual(OK, pjit_buffer_new(&b));
+        defer pjit_buffer_free(b);
+        try std.testing.expectEqual(OK, pjit_ir_compile(b, src, src.len, @backingInt(a)));
+        var n: usize = 0;
+        _ = pjit_buffer_code(b, &n);
+        try std.testing.expect(n > 0);
+    }
+    try std.testing.expectEqual(EINVAL, pjit_ir_compile(null, src, src.len, 0));
+    try std.testing.expectEqual(EINVAL, pjit_ir_compile(null, src, src.len, 99));
 }

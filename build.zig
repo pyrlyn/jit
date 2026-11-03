@@ -177,6 +177,17 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(lib_static);
     }
 
+    // C-side ABI tests (tests/c/capi_test.c): every exported function called from C.
+    {
+        const m = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+        m.addCSourceFile(.{ .file = b.path("tests/c/capi_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Werror" } });
+        m.addIncludePath(b.path("include"));
+        m.linkLibrary(lib_static);
+        const run_capi = b.addRunArtifact(b.addExecutable(.{ .name = "capi_test", .root_module = m }));
+        run_capi.expectExitCode(0);
+        test_step.dependOn(&run_capi.step);
+        b.step("test-capi", "Build and run the C ABI tests (tests/c)").dependOn(&run_capi.step);
+    }
     const examples_step = b.step("examples", "Build and run examples/{c,cpp,zig} (+ rust with -Drust=true)");
     {
         const m = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
