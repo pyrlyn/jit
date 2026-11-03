@@ -4,24 +4,35 @@ This is the single roadmap index. Detailed plans live in the linked sections.
 
 ## Current state (main)
 
-Done and merged: x86-64 and AArch64 assemblers (AsmJit test parity, SIMD SSE..AVX2 and NEON
-basics), safety layer and dual RW/RX mapping, stable C ABI (`include/pyrlyn_jit.h`) with C, C++,
-Rust and Zig examples, CMake adapter, x86-64 Builder, linear-scan register allocator
-(milestones 1–2), x86-64 Compiler (steps 1–3, simplified), x86-32 and RV64IM base backends,
-GP/vector/AArch64 encoder tables generated from LLVM `.td` files, CI.
+Done and merged:
+
+- Assemblers: x86-64 and AArch64 (AsmJit test parity, SIMD SSE..AVX2, AVX-512 vector table, NEON
+  basics, per-form CPU feature checks), x86-32, RISC-V (RV64/RV32 with A, F/D and C extensions);
+  GP/vector/AArch64 encoder tables generated from LLVM `.td` files; 30-bit immediate helpers.
+- Safety layer (validation, pre/post hooks) and dual RW/RX mapping.
+- Builder: generic `core/builder.zig` (`BuilderT`) used by x86-64 (branch shortening as a pass),
+  AArch64, x86 and RISC-V.
+- Compiler (IR -> register allocator -> Builder): x86-64, AArch64 (AAPCS64), x86-32 and RV64 (LP64,
+  executed under qemu in CI); shifts, signed division, stack-passed arguments, SSA block parameters,
+  immediate/memory folding; IR has i64, f32/f64 and vector types (compilers still reject non-int IR).
+- Register allocator: linear scan with splitting at calls and of spilled values; optional graph
+  coloring (Chaitin-Briggs with Briggs coalescing, `Config.algo = .graph`).
+- Stable C ABI (`include/pyrlyn_jit.h`) with C, C++, Rust and Zig examples in `examples/`; CMake adapter.
+- `bc2jit` (draft, #63): compiles a KXBC bytecode function for `--arch x86-64|aarch64|riscv` and runs it
+  on the host; see [bc2jit/README.md](../bc2jit/README.md).
+- Benchmark regression tests (#64): `zig build bench-test` against a checked-in per-arch baseline,
+  `zig build bench-update` to refresh it; see [bench/BENCH_TESTS.md](../bench/BENCH_TESTS.md).
+- CI (Linux, macOS, Windows; RISC-V under qemu-user).
 
 ## Remaining, by priority
 
-Order: Builder -> Compiler -> register allocator -> x86-64 operands -> other architectures.
-
-1. Builder: SIMD forms, generated `inst(mnemonic, ...)` path; port the x86-64 builder onto `core/builder.zig` (branch shortening as a pass).
-2. Compiler: shifts and division, stack-passed arguments, immediate/memory folding, AArch64
-   lowering, SSA with block parameters.
-3. Register allocator: live-range splitting, lifetime holes, edge move resolution, spill
-   weights, two-address hints (graph coloring: done, `Config.algo = .graph`).
-4. x86-64 operands: 8/16/32-bit sizes, RIP-relative with labels, imm64 fallbacks, more forms
-   (movzx/movsx, cmovcc, setcc, div/idiv, ...), AVX-512/AVX10.
-5. x86-32 and RISC-V beyond the base step; MIPS and others only if needed.
+1. Builder: SIMD forms and the generated `inst(mnemonic, ...)` path.
+2. Compiler: lower float/vector IR (currently rejected), more operand forms.
+3. Register allocator: lifetime holes, edge move resolution, loop-depth spill weights,
+   two-address hints.
+4. x86-64 operands: remaining sizes and forms, AVX10.
+5. bc2jit / KXBC: move out of draft; the KotlinX side that emits KXBC is a separate change.
+6. Other architectures (MIPS, PowerPC64, LoongArch64, Wasm, AArch32) only if needed.
 
 | Topic | Detailed plan |
 |---|---|
