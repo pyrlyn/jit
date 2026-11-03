@@ -8,7 +8,7 @@ register-allocating Compilers.
 | IR | x86-64 | AArch64 | x86 (32-bit) | RV64 |
 |---|---|---|---|---|
 | `f32`: `fconst`, `add/sub/mul/div/min/max`, `fcmp`, `load/store.f32`, `copy` | yes | yes | rejected | rejected |
-| `f64` | not yet | not yet | rejected | rejected |
+| `f64`: same ops (`addsd`.., `ldr/str d`) | yes | yes | rejected | rejected |
 | `cvt` (i64 <-> f32/f64, f32 <-> f64) | not yet | not yet | rejected | rejected |
 | vectors (`v4i32`, `v2i64`, `v4f32`, `v2f64`), `splat`, `extract` | rejected | rejected | rejected | rejected |
 

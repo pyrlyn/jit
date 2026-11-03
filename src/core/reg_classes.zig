@@ -20,7 +20,7 @@ pub fn classOf(tp: ir.Type) Class {
 /// Vector types, `splat` and `extract` are still rejected (`error.UnsupportedType`).
 pub const Support = struct {
     f32: bool = true,
-    f64: bool = false,
+    f64: bool = true,
     /// `cvt` (i64 <-> f32/f64, f32 <-> f64).
     cvt: bool = false,
 };
