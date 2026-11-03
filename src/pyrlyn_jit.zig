@@ -12,6 +12,8 @@ pub const safety = @import("core/safety.zig");
 pub const build_options = opts;
 /// Arch-agnostic linear-scan register allocator (vregs -> physical registers / spill slots).
 pub const regalloc = @import("core/regalloc.zig");
+/// GP/FP register classes for the compilers (separate allocation runs per class).
+pub const reg_classes = @import("core/reg_classes.zig");
 /// Compiler IR: text parser, verifier, printer, reference interpreter.
 pub const ir = @import("core/ir.zig");
 pub const JitRuntime = @import("core/jit_runtime.zig");
@@ -46,6 +48,8 @@ pub const aarch64_builder = if (opts.aarch64) @import("aarch64/builder.zig") els
 test {
     _ = @import("core/code_buffer.zig");
     _ = @import("core/regalloc.zig");
+    _ = @import("core/reg_classes.zig");
+    _ = @import("fp_tests.zig");
     _ = @import("core/ir.zig");
     _ = @import("tests.zig");
     _ = @import("enc_tests.zig");
