@@ -55,7 +55,7 @@ Full build options, install, pkg-config, CMake and CPM: [docs/BUILDING.md](docs/
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): benchmark vs AsmJit.
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md): current limitations and implemented features.
 - [docs/llvm-tables.md](docs/llvm-tables.md): x86-64 GP table generated from LLVM.
-- [bc2jit/README.md](bc2jit/README.md): KXBC bytecode to machine code (draft).
+- [bc2jit/README.md](bc2jit/README.md): KXBC bytecode (v0, v1) to machine code.
 - [bench/BENCH_TESTS.md](bench/BENCH_TESTS.md): benchmark regression tests (`zig build bench-test`).
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md) (current state and planned work).
 

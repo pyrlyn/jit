@@ -6,7 +6,7 @@ const lower = @import("lower.zig");
 pub const usage =
     \\usage: bc2jit -a ARCH [-o FILE] INPUT [ARG...]
     \\
-    \\Compile a KXBC v0 bytecode function to machine code with pyrlyn-jit.
+    \\Compile a KXBC (v0 or v1) bytecode function to machine code with pyrlyn-jit.
     \\
     \\When ARCH is the host architecture, the function is executed with up to four
     \\integer ARGs (missing ones are 0) and its i64 result is printed on stdout.
