@@ -125,8 +125,10 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, diag: *Diagnostic) Erro
     if (arg_count > max_args) return error.TooManyArgs;
     diag.offset = 6;
     const code_len = std.mem.readInt(u16, bytes[6..8], .little);
-    if (bytes.len < header_len + code_len) return error.Truncated;
-    if (bytes.len > header_len + code_len) return error.TrailingBytes;
+    // Widen before adding: `header_len + code_len` in u16 overflows for code_len > 65527.
+    const total = @as(usize, header_len) + code_len;
+    if (bytes.len < total) return error.Truncated;
+    if (bytes.len > total) return error.TrailingBytes;
     const code = bytes[header_len..];
 
     var list: std.ArrayList(Inst) = .empty;

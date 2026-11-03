@@ -34,6 +34,13 @@ const cases = [_]Case{
     .{ .name = "poly", .module = module(1, arg(0) ++ DUP ++ MUL ++ imm(3) ++ arg(0) ++ MUL ++ SUB ++ imm(7) ++ ADD ++ RET), .args = &.{"10"}, .stdout = "77\n" },
     .{ .name = "imm64", .module = module(0, imm(0x123456789abcdef0) ++ RET), .args = &.{}, .stdout = "1311768467463790320\n" },
     .{ .name = "depth5-drop", .module = module(0, imm(1) ++ imm(2) ++ imm(3) ++ imm(4) ++ imm(100) ++ DROP ++ ADD ++ ADD ++ ADD ++ RET), .args = &.{}, .stdout = "10\n" },
+    .{ .name = "wrap-add", .module = module(1, arg(0) ++ imm(1) ++ ADD ++ RET), .args = &.{"9223372036854775807"}, .stdout = "-9223372036854775808\n" },
+    .{ .name = "wrap-mul", .module = module(0, imm(std.math.minInt(i64)) ++ imm(-1) ++ MUL ++ RET), .args = &.{}, .stdout = "-9223372036854775808\n" },
+    .{ .name = "imm-min", .module = module(0, imm(std.math.minInt(i64)) ++ RET), .args = &.{}, .stdout = "-9223372036854775808\n" },
+    .{ .name = "imm-2048", .module = module(0, imm(2048) ++ imm(-2049) ++ SUB ++ RET), .args = &.{}, .stdout = "4097\n" },
+    .{ .name = "dup-square", .module = module(1, arg(0) ++ DUP ++ MUL ++ RET), .args = &.{"-0x10"}, .stdout = "256\n" },
+    .{ .name = "extra-args-ignored", .module = module(0, imm(5) ++ RET), .args = &.{ "1", "2", "3", "4" }, .stdout = "5\n" },
+    .{ .name = "ret-top-of-deep-stack", .module = module(2, arg(0) ++ arg(1) ++ RET), .args = &.{ "1", "2" }, .stdout = "2\n" },
     .{ .name = "four-args", .module = module(4, arg(0) ++ arg(1) ++ MUL ++ arg(2) ++ arg(3) ++ MUL ++ ADD ++ RET), .args = &.{ "3", "4", "5", "-6" }, .stdout = "-18\n" },
 };
 
@@ -92,6 +99,73 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         run.addArgs(u.args);
         run.expectExitCode(2);
         run.expectStdErrEqual(u.stderr);
+        run.skip_foreign_checks = true;
+        e2e.dependOn(&run.step);
+    }
+    // Cross-target output: `-o FILE` writes the raw machine code for every --arch (golden bytes,
+    // see tests.zig `op_cases`), independent of the host.
+    const out_module = module(2, arg(0) ++ arg(1) ++ ADD ++ RET);
+    const out_cases = [_]struct { flag: []const u8, bytes: []const u8 }{
+        .{ .flag = "x86-64", .bytes = "\x48\x89\xf8\x49\x89\xf2\x4c\x01\xd0\xc3" },
+        .{ .flag = "aarch64", .bytes = "\xe9\x03\x00\xaa\xea\x03\x01\xaa\x29\x01\x0a\x8b\xe0\x03\x09\xaa\xc0\x03\x5f\xd6" },
+        .{ .flag = "riscv", .bytes = "\x93\x02\x05\x00\x13\x83\x05\x00\xb3\x82\x62\x00\x13\x85\x02\x00\x67\x80\x00\x00" },
+    };
+    const in_file = files.add("out-add.kxbc", out_module);
+    for (out_cases) |oc| {
+        const run = b.addRunArtifact(exe);
+        run.setName(b.fmt("bc2jit e2e -o add --arch {s}", .{oc.flag}));
+        run.addArgs(&.{ "--arch", oc.flag, "-o" });
+        const out = run.addOutputFileArg2(b.fmt("add-{s}.bin", .{oc.flag}), .{});
+        run.addFileArg(in_file);
+        run.addArgs(&.{ "1", "2" });
+        run.expectExitCode(0);
+        run.skip_foreign_checks = true;
+        const check = b.addCheckFile(out, .{ .expected_exact = oc.bytes });
+        e2e.dependOn(&check.step);
+    }
+    // Input errors: exit status 1 with the decoder's message and byte offset.
+    const bad_cases = [_]struct { name: []const u8, module: []const u8, stderr: []const u8 }{
+        .{ .name = "empty", .module = "", .stderr = "module truncated" },
+        .{ .name = "bad-magic", .module = "KXBX\x00\x00\x01\x00\xF0", .stderr = "offset 0: not a KXBC module (bad magic)" },
+        .{ .name = "unknown-op", .module = module(0, "\x99"), .stderr = "offset 8: unknown opcode" },
+        .{ .name = "truncated-imm", .module = module(0, "\x01\x00\x00"), .stderr = "offset 8: module truncated" },
+        .{ .name = "underflow", .module = module(0, ADD ++ RET), .stderr = "offset 8: operand stack underflow" },
+        .{ .name = "too-deep", .module = module(1, arg(0) ++ DUP ++ DUP ++ DUP ++ DUP ++ DUP ++ RET), .stderr = "offset 14: operand stack deeper than 5" },
+        .{ .name = "no-ret", .module = module(1, arg(0)), .stderr = "offset 10: function does not end with ret" },
+        .{ .name = "len-overflow", .module = "KXBC\x00\x00\xff\xff", .stderr = "offset 6: module truncated" },
+    };
+    for (bad_cases) |bcase| for ([_][]const u8{ "x86-64", "aarch64", "riscv" }) |flag| {
+        const run = b.addRunArtifact(exe);
+        run.setName(b.fmt("bc2jit e2e bad input {s} --arch {s}", .{ bcase.name, flag }));
+        run.addArgs(&.{ "--arch", flag });
+        run.addFileArg(files.add(b.fmt("bad-{s}.kxbc", .{bcase.name}), bcase.module));
+        run.expectExitCode(1);
+        run.addCheck(.{ .expect_stderr_match = bcase.stderr });
+        run.skip_foreign_checks = true;
+        e2e.dependOn(&run.step);
+    };
+    {
+        const run = b.addRunArtifact(exe);
+        run.setName("bc2jit e2e missing input file");
+        run.addArgs(&.{ "--arch", "riscv", "does-not-exist.kxbc" });
+        run.expectExitCode(1);
+        run.addCheck(.{ .expect_stderr_match = "cannot read 'does-not-exist.kxbc'" });
+        e2e.dependOn(&run.step);
+    }
+    // Foreign --arch without -o prints the code as hex on stdout.
+    const hex_cases = [_]struct { flag: []const u8, hex: []const u8 }{
+        .{ .flag = "x86-64", .hex = "4889f84989f24c01d0c3\n" },
+        .{ .flag = "aarch64", .hex = "e90300aaea0301aa29010a8be00309aac0035fd6\n" },
+        .{ .flag = "riscv", .hex = "9302050013830500b38262001385020067800000\n" },
+    };
+    for (hex_cases) |hc| {
+        if (arch_flag != null and std.mem.eql(u8, arch_flag.?, hc.flag)) continue; // host executes instead
+        const run = b.addRunArtifact(exe);
+        run.setName(b.fmt("bc2jit e2e hex stdout --arch {s}", .{hc.flag}));
+        run.addArgs(&.{ "--arch", hc.flag });
+        run.addFileArg(in_file);
+        run.expectExitCode(0);
+        run.expectStdOutEqual(hc.hex);
         run.skip_foreign_checks = true;
         e2e.dependOn(&run.step);
     }

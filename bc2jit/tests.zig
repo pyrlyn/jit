@@ -238,3 +238,7 @@ test "driver: canExecute is exactly target == host" {
         if (target.canExecute()) try t.expectEqual(Target.host(), target);
     }
 }
+
+test {
+    _ = @import("tests_extra.zig");
+}
