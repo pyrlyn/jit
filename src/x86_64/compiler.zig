@@ -20,6 +20,7 @@ const x = @import("assembler.zig");
 const bld = @import("builder.zig");
 const ir = @import("../core/ir.zig");
 const ra = @import("../core/regalloc.zig");
+const lp = @import("../core/lower_plan.zig");
 const CodeBuffer = @import("../core/code_buffer.zig").CodeBuffer;
 const Gp = x.Gp;
 
@@ -42,6 +43,10 @@ pub const Options = struct {
     algo: ra.Algo = .linear,
     /// Per-block register segments for spilled values (`regalloc.Config.split`).
     split: bool = true,
+    /// Codegen-quality passes (`core/lower_plan.zig`): loop rotation and fallthrough layout
+    /// (inverted `jcc` when `then` is next), results written straight to their register
+    /// (`mov d, a; op d, b` instead of a round trip through r10) and no frame in leaf functions.
+    optimize: bool = true,
 };
 
 pub const Stats = struct {
@@ -56,6 +61,8 @@ pub const Stats = struct {
     segments: u32 = 0,
     /// Copies removed by coalescing (`.graph`).
     coalesced: u32 = 0,
+    rotated: u32 = 0,
+    frameless: bool = false,
 };
 
 /// Compiles `f` into `b` (a Builder). Run passes and serialize separately, or use `compile`.
@@ -72,6 +79,8 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const A = arena.allocator();
+    const opt = opts.optimize;
+    const plan = try lp.build(A, f, .x64, opt);
     const blocks = try A.alloc(ra.Block, f.blocks.items.len);
     for (f.blocks.items, 0..) |blk, bi| {
         const extra: usize = if (bi == 0) 1 else 0;
@@ -108,6 +117,8 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     const nsaved: u32 = @intCast(saved.items.len);
     const slots_bytes = res.num_slots * 8;
     const adj = std.mem.alignForward(u32, nsaved * 8 + slots_bytes, 16) - nsaved * 8;
+    // No frame: no calls, no callee-saved registers, no spill slots, no stack-passed parameters.
+    const frameless = opt and !plan.has_calls and nsaved == 0 and res.num_slots == 0 and f.params <= cc.args.len;
 
     const L = struct {
         locs: []const ra.Loc,
@@ -153,10 +164,12 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
 
     // ---- prolog ----
     try b.comment(f.name);
-    try b.emit(.push, .{.rbp});
-    try b.emit(.movRR, .{ .rbp, .rsp });
-    for (saved.items) |r| try b.emit(.push, .{r});
-    if (adj != 0) try b.emit(.subRI, .{ .rsp, @intCast(adj) });
+    if (!frameless) {
+        try b.emit(.push, .{.rbp});
+        try b.emit(.movRR, .{ .rbp, .rsp });
+        for (saved.items) |r| try b.emit(.push, .{r});
+        if (adj != 0) try b.emit(.subRI, .{ .rsp, @intCast(adj) });
+    }
     for (0..f.params) |i| {
         if (i < cc.args.len) {
             try ctx.put(@intCast(i), cc.args[i]);
@@ -178,8 +191,15 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     pos = 1; // regalloc position: entry block starts with the parameter-def inst
     for (f.blocks.items, 0..) |blk, bi| {
         try b.bind(labels[bi]);
+        if (!plan.emitted[bi]) {
+            pos += @intCast(blk.ops.items.len);
+            continue;
+        }
+        const next = plan.next[bi];
         @memset(known, null);
-        for (blk.ops.items) |o| {
+        for (blk.ops.items) |o0| {
+            // Loop rotation: `br H` where H is only a `cbr` emits H's `cbr` here.
+            const o: ir.Op = if (o0 == .br and plan.dup[bi] != null) f.blocks.items[plan.dup[bi].?].ops.items[0] else o0;
             defer pos += 1;
             try res.loadsAt(pos, ctx, L.load);
             defer if (o.def()) |d| {
@@ -206,6 +226,15 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     if (alu != null or c.op == .mul) {
                         if (known[c.b]) |k| if (std.math.cast(i32, k)) |imm| {
                             const ra0 = try ctx.get(c.a, s0);
+                            if (opt and res.locs[c.dst] == .reg) {
+                                const d: Gp = @fromBackingInt(@intCast(res.locs[c.dst].reg));
+                                if (alu) |op| {
+                                    if (ra0 != d) try b.emit(.movRR, .{ d, ra0 });
+                                    try b.emit(.aluRI, .{ op, d, imm });
+                                } else try b.emit(.imulRRI, .{ d, ra0, imm });
+                                folded_imm += 1;
+                                break :fold;
+                            }
                             if (alu) |op| {
                                 if (ra0 != s0) try b.emit(.movRR, .{ s0, ra0 });
                                 try b.emit(.aluRI, .{ op, s0, imm });
@@ -226,6 +255,18 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     }
                     const ra_ = try ctx.get(c.a, s0);
                     const rb = try ctx.get(c.b, s1);
+                    direct: {
+                        if (!(opt and (alu != null or c.op == .mul) and res.locs[c.dst] == .reg)) break :direct;
+                        // Two-address form straight into the destination register.
+                        const d: Gp = @fromBackingInt(@intCast(res.locs[c.dst].reg));
+                        var src = rb;
+                        if (d == rb and d != ra_) {
+                            if (c.op == .sub) break :direct;
+                            src = ra_;
+                        } else if (ra_ != d) try b.emit(.movRR, .{ d, ra_ });
+                        if (alu) |op| try b.emit(.aluRR, .{ op, d, src }) else try b.emit(.imulRR, .{ d, src });
+                        break :fold;
+                    }
                     if (ra_ != s0) try b.emit(.movRR, .{ s0, ra_ });
                     switch (c.op) {
                         .shl, .shr, .sar => {
@@ -256,8 +297,9 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                 },
                 .load => |c| {
                     const base = try ctx.get(c.base, s1);
-                    try b.emit(.movRM, .{ s0, x.ptr(base, c.disp) });
-                    try ctx.put(c.dst, s0);
+                    const d: Gp = if (opt and res.locs[c.dst] == .reg) @fromBackingInt(@intCast(res.locs[c.dst].reg)) else s0;
+                    try b.emit(.movRM, .{ d, x.ptr(base, c.disp) });
+                    try ctx.put(c.dst, d);
                 },
                 .store => |c| {
                     const base = try ctx.get(c.base, s1);
@@ -316,28 +358,34 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                         .ugt => .a,
                         .uge => .ae,
                     };
-                    try b.emit(.jcc, .{ cond, labels[c.then] });
-                    try b.emit(.jmp, .{labels[c.@"else"]});
+                    if (opt and next != null and next.? == c.then and c.then != c.@"else") {
+                        try b.emit(.jcc, .{ @as(x.Cond, @fromBackingInt(@backingInt(cond) ^ 1)), labels[c.@"else"] });
+                    } else {
+                        try b.emit(.jcc, .{ cond, labels[c.then] });
+                        try b.emit(.jmp, .{labels[c.@"else"]});
+                    }
                 },
                 .fconst, .typed, .fcmp, .cvt, .splat, .extract => unreachable, // rejected by isIntOnly
                 .ret => |v| {
                     const r = try ctx.get(v, s0);
                     if (r != .rax) try b.emit(.movRR, .{ .rax, r });
-                    try b.emit(.jmp, .{epilog});
+                    if (frameless) try b.add(.ret) else try b.emit(.jmp, .{epilog});
                 },
             }
         }
     }
     try b.bind(epilog);
-    if (adj != 0) try b.emit(.addRI, .{ .rsp, @intCast(adj) });
-    var i = saved.items.len;
-    while (i > 0) {
-        i -= 1;
-        try b.emit(.pop, .{saved.items[i]});
+    if (!frameless) {
+        if (adj != 0) try b.emit(.addRI, .{ .rsp, @intCast(adj) });
+        var i = saved.items.len;
+        while (i > 0) {
+            i -= 1;
+            try b.emit(.pop, .{saved.items[i]});
+        }
+        try b.emit(.pop, .{.rbp});
+        try b.add(.ret);
     }
-    try b.emit(.pop, .{.rbp});
-    try b.add(.ret);
-    return .{ .spills = res.spills, .slots = res.num_slots, .nodes = b.count(), .folded_imm = folded_imm, .folded_mem = folded_mem, .segments = @intCast(res.segs.len), .coalesced = res.coalesced };
+    return .{ .rotated = plan.n_rotated, .frameless = frameless, .spills = res.spills, .slots = res.num_slots, .nodes = b.count(), .folded_imm = folded_imm, .folded_mem = folded_mem, .segments = @intCast(res.segs.len), .coalesced = res.coalesced };
 }
 
 /// IR -> bytes in `cb` (finalized). Runs dead-code, jump-to-next and branch-shortening passes.
@@ -517,7 +565,12 @@ test "compiler: immediate and memory operand folding (byte-level, any host)" {
     const st = try compile(t.allocator, &f, &cb, .{});
     // add 5, imul 7, cmp 7 fold; 3e9 does not fit imm32; `sub v1` in block a is not block-local.
     try t.expectEqual(@as(u32, 3), st.folded_imm);
+    const opt_len = cb.code().len;
+    cb.reset();
+    const su = try compile(t.allocator, &f, &cb, .{ .optimize = false });
+    try t.expectEqual(@as(u32, 3), su.folded_imm);
     try t.expect(std.mem.indexOf(u8, cb.code(), &.{ 0x49, 0x83, 0xC2, 0x05 }) != null); // add r10, 5
+    try t.expect(opt_len < cb.code().len); // optimized: `add <dst>, 5` without the r10 round trip
 
     // One allocatable register: spilled right-hand operands become memory operands.
     var cb2 = CodeBuffer.init(t.allocator);
@@ -580,6 +633,7 @@ test "compiler: differential vs interpreter on random programs" {
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx) | bit(.r12), .split = false }, &args));
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx) | bit(.r12), .algo = .graph }, &args));
         try t.expectEqual(want, try run(&f, .{ .algo = .graph }, &args));
+        try t.expectEqual(want, try run(&f, .{ .optimize = false }, &args));
     }
 }
 
@@ -632,5 +686,46 @@ test "compiler: splitting and coalescing are exercised and execute correctly" {
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx) }, &args));
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx), .algo = .graph }, &args));
         try t.expectEqual(want, try run(&f, .{ .algo = .graph }, &args));
+    }
+}
+
+test "compiler: sum loop - rotation, direct destination, no frame; optimized == unoptimized" {
+    const src =
+        \\func sum 2
+        \\e:
+        \\  v4 = const 3
+        \\  v2 = shl v1 v4
+        \\  v2 = add v0 v2
+        \\  v3 = const 0
+        \\  v5 = const 8
+        \\  br loop
+        \\loop:
+        \\  cbr ult v0 v2 body done
+        \\body:
+        \\  v6 = load v0 0
+        \\  v3 = add v3 v6
+        \\  v0 = add v0 v5
+        \\  br loop
+        \\done:
+        \\  ret v3
+    ;
+    var f = try ir.parse(t.allocator, src);
+    defer f.deinit();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    const st = try compile(t.allocator, &f, &cb, .{});
+    try t.expectEqual(@as(u32, 2), st.rotated); // entry and back edge
+    const opt_len = cb.code().len;
+    cb.reset();
+    _ = try compile(t.allocator, &f, &cb, .{ .optimize = false });
+    try t.expect(opt_len < cb.code().len);
+    if (!can_run) return;
+    var data: [29]i64 = undefined;
+    for (&data, 0..) |*d, i| d.* = @as(i64, @intCast(i)) * 104729 - 77;
+    const p: i64 = @bitCast(@intFromPtr(&data));
+    for ([_]i64{ 0, 1, 29 }) |n| {
+        const want = try ir.interpret(&f, &.{ p, n }, 1 << 20);
+        try t.expectEqual(want, try run(&f, .{}, &.{ p, n }));
+        try t.expectEqual(want, try run(&f, .{ .optimize = false }, &.{ p, n }));
     }
 }
