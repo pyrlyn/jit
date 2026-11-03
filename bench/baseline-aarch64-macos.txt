@@ -1,4 +1,4 @@
-# ns/iter median, zig build bench-update, 2026-11-03 arm64 load: 8.87 11.09 9.91
+# ns/iter median, zig build bench-update, 2026-11-03 arm64 load: 31.85 28.00 26.94 (bc2jit_* cases; other cases kept from previous baseline)
 x86_64_straight 7159.2
 x86_64_calls 5183.3
 x86_64_loops 8569.0
@@ -8,3 +8,10 @@ x86_64_avx512 6539.7
 aarch64_emit 3530.6
 jit_runtime_add_release 4935.1
 e2e_aarch64_compile_run 5019.4
+bc2jit_decode_small 544.6
+bc2jit_decode_64k 151739.2
+bc2jit_lower_x86_64 351344.4
+bc2jit_lower_aarch64 254619.9
+bc2jit_lower_riscv64 121645.1
+bc2jit_stack_all_opcodes 4833.3
+bc2jit_e2e_aarch64 9012.5

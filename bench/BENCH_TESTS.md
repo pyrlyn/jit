@@ -28,13 +28,21 @@ compared against AsmJit), plus the AArch64 / JitRuntime paths shown in `examples
 | `aarch64_emit` | 256 copies of the sum loop (movz, labels, cbz, ldr, add/sub imm, b, movImm) + finalize |
 | `jit_runtime_add_release` | `JitRuntime.add` (mmap + copy + protect) and `release` of a finalized 16-loop buffer |
 | `e2e_aarch64_compile_run` | emit sum loop, finalize, `JitRuntime.add`, call it on 64 i64s, check result, release (native arm64 only) |
+| `bc2jit_decode_small` | KXBC decode + validate of a ~100-byte module (4 all-opcode units), free |
+| `bc2jit_decode_64k` | KXBC decode + validate of a 65 523-byte module (2730 all-opcode units, max u16 code length) |
+| `bc2jit_lower_x86_64` | opcode -> x86-64 assembler translation of the 64 KiB module + finalize |
+| `bc2jit_lower_aarch64` | same, AArch64 backend |
+| `bc2jit_lower_riscv64` | same, RISC-V (RV64) backend |
+| `bc2jit_stack_all_opcodes` | stack model: lower a 64-unit program that uses every opcode and walks depth 1..5 each unit, host backend |
+| `bc2jit_e2e_aarch64` | decode + lower + `JitRuntime.add` + call + check vs reference interpreter + release (native arm64 only, 15%) |
 
 The x86-64 scenarios are imported from `bench_x86_64.zig` (`Scenarios` is now `pub`), so the code
 being timed is the same code the AsmJit golden-file tests check byte for byte.
 
-Not covered, because it isn't on `main` yet: bytecode-to-JIT (`bc2jit`, draft PR #63). Its
-decode / IR / passes cases should be added to this file when that PR lands. IR / builder /
-register-allocator passes on `main` have no existing benchmark; add cases here when one is wanted.
+bc2jit cases (`bc2jit_*`) import `bc2jit/lib.zig` as module `bc2jit`. The "all-opcode unit" is
+`push_arg×3, dup, drop, mul, sub, push_i64, dup, mul, add, add` (24 bytes, every opcode, stack depth
+1 -> 5 -> 1). IR / builder / register-allocator passes on `main` have no existing benchmark; add
+cases here when one is wanted.
 
 ## Measurement and thresholds
 
