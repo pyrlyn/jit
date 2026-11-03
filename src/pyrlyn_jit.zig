@@ -15,6 +15,8 @@ pub const regalloc = @import("core/regalloc.zig");
 /// Compiler IR: text parser, verifier, printer, reference interpreter.
 pub const ir = @import("core/ir.zig");
 pub const JitRuntime = @import("core/jit_runtime.zig");
+/// Shared executable memory: one mapping, functions appended (AsmJit JitAllocator-like).
+pub const JitPool = @import("core/jit_pool.zig");
 
 /// `pyrlyn_jit.x86_64.Assembler`, `.Gp`, `.ptr`, ... (void if disabled at build time)
 pub const x86_64 = if (opts.x86_64) @import("x86_64/assembler.zig") else void;
@@ -46,6 +48,8 @@ pub const aarch64_builder = if (opts.aarch64) @import("aarch64/builder.zig") els
 test {
     _ = @import("core/code_buffer.zig");
     _ = @import("core/regalloc.zig");
+    _ = @import("core/jit_pool.zig");
+    _ = @import("core/lower_plan.zig");
     _ = @import("core/ir.zig");
     _ = @import("tests.zig");
     _ = @import("enc_tests.zig");
