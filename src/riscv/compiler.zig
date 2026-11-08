@@ -50,7 +50,10 @@ pub const Stats = struct { spills: u32 = 0, slots: u32 = 0 };
 
 /// Compiles `f` into `cb` through `a` (an `rv.AssemblerT(...)` RV64 instance on `cb`), not finalized.
 /// Functions with block parameters are first rewritten by `ir.Func.lowerBlockParams`.
-pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Options) !Stats {
+pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Options) !Stats {
+    var scratch_bytes: [2048]u8 = undefined;
+    var temp_alloc = @import("../core/scratch.zig").Scratch.init(&scratch_bytes, backing);
+    const gpa = temp_alloc.allocator();
     try f0.verify();
     var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
     defer if (lowered) |*g| g.deinit();
@@ -86,12 +89,12 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
     const L = struct {
         locs: []const ra.Loc,
         out: u32,
-        fn reg(r: u8) X {
+        inline fn reg(r: u8) X {
             return @fromBackingInt(@intCast(r));
         }
         /// `ld`/`sd` of `rt` at frame slot `k`, sp-relative. Past the signed 12-bit offset
         /// range the address `sp + offset` is built in t0 (never allocated).
-        fn slotAccess(s: @This(), as: anytype, load: bool, rt: X, k: u32) !void {
+        inline fn slotAccess(s: @This(), as: anytype, load: bool, rt: X, k: u32) !void {
             const off: i64 = @as(i64, s.out) + 8 * @as(i64, k);
             var base: X = sp;
             var o = off;
@@ -104,7 +107,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
             return if (load) as.ld(rt, o, base) else as.sd(rt, o, base);
         }
         /// Register holding `v` (loads spilled values into `scratch`).
-        fn get(s: @This(), as: anytype, v: ir.VReg, scratch: X) !X {
+        inline fn get(s: @This(), as: anytype, v: ir.VReg, scratch: X) !X {
             return switch (s.locs[v]) {
                 .reg => |r| reg(r),
                 .stack => |k| blk: {
@@ -117,7 +120,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
                 },
             };
         }
-        fn put(s: @This(), as: anytype, v: ir.VReg, src: X) !void {
+        inline fn put(s: @This(), as: anytype, v: ir.VReg, src: X) !void {
             switch (s.locs[v]) {
                 .reg => |r| if (reg(r) != src) try as.mv(reg(r), src),
                 .stack => |k| try s.slotAccess(as, false, src, k),
@@ -125,7 +128,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
             }
         }
         /// Address `base + disp` as (register, signed 12-bit offset).
-        fn addr(as: anytype, base: X, disp: i32) !struct { X, i64 } {
+        inline fn addr(as: anytype, base: X, disp: i32) !struct { X, i64 } {
             if (disp >= -2048 and disp <= 2047) return .{ base, disp };
             // The offset goes in t0 (never allocated): `base` may be s1 (a spilled base).
             try as.li(.t0, disp);

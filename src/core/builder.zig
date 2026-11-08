@@ -71,9 +71,10 @@ pub fn BuilderT(comptime InstrT: type) type {
             return .{ .id = @intCast(b.label_node.items.len - 1) };
         }
         /// Inserts `d` after the cursor and moves the cursor to it. Returns the node index.
-        pub fn addNode(b: *Self, d: Node.Data) Error!u32 {
+        pub inline fn addNode(b: *Self, d: Node.Data) Error!u32 {
             const id: u32 = @intCast(b.nodes.items.len);
-            try b.nodes.append(b.gpa, .{ .data = d });
+            if (b.nodes.items.len == b.nodes.capacity) try b.growNodes();
+            b.nodes.appendAssumeCapacity(.{ .data = d });
             const n = &b.nodes.items[id];
             if (b.cursor == Node.none) {
                 n.next = b.first;
@@ -88,6 +89,10 @@ pub fn BuilderT(comptime InstrT: type) type {
             }
             b.cursor = id;
             return id;
+        }
+        noinline fn growNodes(b: *Self) Error!void {
+            @branchHint(.cold);
+            try b.nodes.ensureTotalCapacityPrecise(b.gpa, b.nodes.capacity + @max(b.nodes.capacity / 4, 16));
         }
         /// Unlinks node `id`. A cursor on it moves to its predecessor.
         pub fn removeNode(b: *Self, id: u32) void {
@@ -150,8 +155,11 @@ pub fn BuilderT(comptime InstrT: type) type {
         }
         /// Typed emitter by name with the Assembler's argument order:
         /// `b.emit(.add, .{ .x0, .x1, .x2 })`.
-        pub fn emit(b: *Self, comptime tag: std.meta.Tag(Instr), args: @FieldType(Instr, @tagName(tag))) Error!void {
-            return b.add(@unionInit(Instr, @tagName(tag), args));
+        pub inline fn emit(b: *Self, comptime tag: std.meta.Tag(Instr), args: @FieldType(Instr, @tagName(tag))) Error!void {
+            if (@TypeOf(args) != void) inline for (args) |v| if (@TypeOf(v) == Label) {
+                if (v.id >= b.label_node.items.len) return error.InvalidLabel;
+            };
+            _ = try b.addNode(.{ .inst = @unionInit(Instr, @tagName(tag), args) });
         }
 
         pub fn runPasses(b: *Self, comptime passes: anytype) !void {

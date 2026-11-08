@@ -103,7 +103,7 @@ pub const CodeBuffer = struct {
         if (self.len + n > self.limit()) return error.CodeTooLarge;
         // 1.5x: less unused capacity than doubling (the buffer is usually the largest
         // allocation alive at the end of a compile); `remap` keeps growth steps cheap.
-        var cap = @max(self.data.len + self.data.len / 2, 4096);
+        var cap = @max(self.data.len + self.data.len / 2, 1024);
         while (cap - self.len < n) cap += cap / 2;
         cap = @min(cap, self.limit() + 16); // +16: room for the 16-byte instruction store
         // remap: in place or moved by the allocator (e.g. realloc), without the old and the

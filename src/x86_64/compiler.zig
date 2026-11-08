@@ -71,6 +71,13 @@ pub const Stats = struct {
 /// Compiles `f` into `b` (a Builder). Run passes and serialize separately, or use `compile`.
 /// Functions with block parameters are first rewritten by `ir.Func.lowerBlockParams`.
 pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: Options) !Stats {
+    return lowerInto(gpa, f0, b, opts);
+}
+
+fn lowerInto(backing: std.mem.Allocator, f0: *const ir.Func, b: anytype, opts: Options) !Stats {
+    var scratch_bytes: [2048]u8 = undefined;
+    var temp_alloc = @import("../core/scratch.zig").Scratch.init(&scratch_bytes, backing);
+    const gpa = temp_alloc.allocator();
     try f0.verify();
     var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
     defer if (lowered) |*g| g.deinit();
@@ -106,7 +113,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
         res: *const ra.Result,
         pos: *const u32,
         nsaved: u32,
-        b: *bld.Builder,
+        b: @TypeOf(b),
         flocs: []const ra.Loc,
         /// First FP spill slot (after the GP slots).
         fbase: u32,
@@ -448,16 +455,22 @@ fn sseMov(tp: ir.Type) bld.SseMov {
 
 /// IR -> bytes in `cb` (finalized). Runs dead-code, jump-to-next and branch-shortening passes.
 pub fn compile(gpa: std.mem.Allocator, f: *const ir.Func, cb: *CodeBuffer, opts: Options) !Stats {
+    if (opts.shorten_branches) {
+        var stream = @import("compiler_buffer.zig").Buffer.init(gpa, cb);
+        defer stream.deinit();
+        var st = try lowerInto(gpa, f, &stream, opts);
+        try stream.finish();
+        try cb.finalize();
+        st.nodes = stream.count();
+        return st;
+    }
     var b = bld.Builder.init(gpa);
     defer b.deinit();
     var st = try lower(gpa, f, &b, opts);
     try b.runPasses(.{ bld.removeDeadCode, bld.removeJumpsToNext });
     // The node list is complete: drop its growth slack before the output buffer grows.
     b.nodes.shrinkAndFree(gpa, b.nodes.items.len);
-    if (opts.shorten_branches)
-        try bld.serializeShortened(&b, cb)
-    else
-        try b.serialize(x.AssemblerT(.{ .validate = true }).init(cb));
+    try b.serialize(x.AssemblerT(.{ .validate = true }).init(cb));
     try cb.finalize();
     st.nodes = b.count();
     return st;

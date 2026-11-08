@@ -94,7 +94,7 @@ fn gen(gpa: std.mem.Allocator, seed: u64, nb: u32, ops: u32, ni: u32, nf: u32) !
                 10 => try f.emit(b, .{ .store = .{ .base = 0, .disp = 8 * @as(i32, @intCast(r.uintLessThan(u32, 16))), .src = iv.int(r, ni) } }),
                 11 => {
                     const args = try f.alloc().dupe(ir.VReg, &.{ iv.int(r, ni), iv.int(r, ni) });
-                    try f.emit(b, .{ .call = .{ .dst = d, .addr = @intFromPtr(&helper), .args = args } });
+                    try f.emit(b, .{ .call = .{ .dst = d, .addr = if (std.c.getenv("PJIT_BENCH_CHECKSUM") != null) 0x100123450 else @intFromPtr(&helper), .args = args } });
                 },
                 12, 13 => if (nf > 0) {
                     try f.emit(b, .{ .typed = .{ .op = toT(r.enumValue(enum { add, sub, mul, div, min, max })), .ty = .f64, .dst = iv.flt(r, nf, ni), .a = iv.flt(r, nf, ni), .b = iv.flt(r, nf, ni) } });
@@ -129,7 +129,7 @@ const cases = [_]Case{
 
 const Backend = enum { aarch64, x86_64, riscv64 };
 
-fn compileOnce(gpa: std.mem.Allocator, be: Backend, f: *const ir.Func) !usize {
+fn compileOnce(gpa: std.mem.Allocator, be: Backend, f: *const ir.Func, checksum: ?*u64) !usize {
     var cb = pjit.CodeBuffer.init(gpa);
     defer cb.deinit();
     switch (be) {
@@ -137,6 +137,7 @@ fn compileOnce(gpa: std.mem.Allocator, be: Backend, f: *const ir.Func) !usize {
         .x86_64 => _ = try pjit.x86_64_compiler.compile(gpa, f, &cb, .{}),
         .riscv64 => _ = try pjit.riscv_compiler.compile(gpa, f, &cb, .{}),
     }
+    if (checksum) |hash| hash.* = std.hash.Wyhash.hash(0, cb.code());
     return cb.code().len;
 }
 
@@ -158,25 +159,29 @@ pub fn main() !void {
                 if (!std.mem.eql(u8, std.mem.span(only), want)) continue;
             }
             // RV64 Compiler is integer-only.
-            var f = try gen(gpa, 0x5eed + cs.nb, cs.nb, cs.ops, cs.ni, if (be == .riscv64) 0 else cs.nf);
+            var f = try gen(gpa, envInt("PJIT_BENCH_SEED", 0x5eed) + cs.nb, cs.nb, cs.ops, cs.ni, if (be == .riscv64) 0 else cs.nf);
             defer f.deinit();
             var cnt: Counting = .{ .child = gpa };
-            const code_len = compileOnce(cnt.allocator(), be, &f) catch |e| {
+            var checksum: u64 = 0;
+            const check = std.c.getenv("PJIT_BENCH_CHECKSUM") != null;
+            const code_len = compileOnce(cnt.allocator(), be, &f, if (check) &checksum else null) catch |e| {
                 std.debug.print("{s:<8} {s:<8} skipped: {t}\n", .{ @tagName(be), cs.name, e });
                 continue;
             };
+            if (cnt.live != 0) return error.LeakedCompileMemory;
+            if (check) std.debug.print("checksum {s}/{s} {x}\n", .{ @tagName(be), cs.name, checksum });
             // Time: median of samples, each sample one compile; run until the budget is spent.
             var samples: [100001]u64 = undefined;
             var ns: usize = 0;
             const t_end = now() + budget_ns;
             while (ns < samples.len and (ns < 5 or now() < t_end)) : (ns += 1) {
                 const t0 = now();
-                _ = try compileOnce(gpa, be, &f);
+                _ = try compileOnce(gpa, be, &f, null);
                 samples[ns] = now() - t0;
             }
             std.mem.sort(u64, samples[0..ns], {}, std.sort.asc(u64));
             const med = samples[ns / 2];
-            std.debug.print("{s:<8} {s:<8} {d:>12.1} {d:>12.1} {d:>12.1} {d:>8} {d:>8}\n", .{
+            std.debug.print("{s:<8} {s:<8} {d:>12.3} {d:>12.1} {d:>12.1} {d:>8} {d:>8}\n", .{
                 @tagName(be),                                cs.name,
                 @as(f64, @floatFromInt(med)) / 1000.0,       @as(f64, @floatFromInt(cnt.peak)) / 1024.0,
                 @as(f64, @floatFromInt(cnt.total)) / 1024.0, cnt.count,
