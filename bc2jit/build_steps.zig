@@ -55,7 +55,7 @@ const cases = [_]Case{
 };
 
 /// Registers the bc2jit steps; unit tests are also attached to `test_step`.
-pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, pyrlyn_jit: *std.Build.Module, test_step: *std.Build.Step) void {
+pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, pyrlyn_jit: *std.Build.Module, test_step: *std.Build.Step, llvm_enabled: bool) void {
     const mod = b.createModule(.{
         .root_source_file = b.path("bc2jit/main.zig"),
         .target = target,
@@ -97,6 +97,32 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         run.skip_foreign_checks = true;
         e2e.dependOn(&run.step);
     };
+    const llvm_arch: ?[]const u8 = if (target.result.cpu.arch == .x86_64) "x86-64" else arch_flag;
+    if (llvm_arch) |flag| {
+        if (llvm_enabled) {
+            for (cases) |c| for ([_][]const u8{ "llvm-jit", "llvm-interpreter" }) |backend| for ([_]bool{ false, true }) |optimized| {
+                const run = b.addRunArtifact(exe);
+                run.setName(b.fmt("bc2jit {s} {s} optimize={}", .{ backend, c.name, optimized }));
+                run.addArgs(&.{ "--arch", flag, "--backend", backend });
+                if (!optimized) run.addArg("--no-opt");
+                run.addFileArg(files.add(b.fmt("llvm-{s}.kxbc", .{c.name}), c.module));
+                run.addArgs(c.args);
+                run.expectExitCode(0);
+                run.expectStdOutEqual(c.stdout);
+                run.skip_foreign_checks = true;
+                e2e.dependOn(&run.step);
+            };
+        } else {
+            const run = b.addRunArtifact(exe);
+            run.setName("bc2jit LLVM backend disabled");
+            run.addArgs(&.{ "--arch", flag, "--backend", "llvm-jit" });
+            run.addFileArg(files.add("llvm-disabled.kxbc", cases[0].module));
+            run.expectExitCode(1);
+            run.addCheck(.{ .expect_stderr_match = "-Dllvm-prefix=PREFIX" });
+            run.skip_foreign_checks = true;
+            e2e.dependOn(&run.step);
+        }
+    }
     // CLI contract: usage errors go to stderr with exit status 2.
     const usage_cases = [_]struct { args: []const []const u8, stderr: []const u8 }{
         .{ .args = &.{"x.kxbc"}, .stderr = "bc2jit: missing required option --arch (allowed: x86-64, aarch64, riscv)\n" },

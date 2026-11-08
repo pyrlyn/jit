@@ -1,6 +1,6 @@
 # pyrlyn-jit
 
-A small AsmJit-style machine code generator in Zig 0.17 (stdlib only).
+A small AsmJit-style machine code generator in Zig 0.17 (stdlib only by default).
 
 - Backends are separate modules, picked at build time: **x86-64** and **AArch64**
   plus 32-bit x86 and RISC-V (MIPS and others: see [TODO-ARCHES.md](TODO-ARCHES.md)).
@@ -10,6 +10,9 @@ A small AsmJit-style machine code generator in Zig 0.17 (stdlib only).
   the buffer.
 - Optional **safety layer**: operand validation and emission hooks. Both are chosen at
   comptime and cost nothing when off.
+- Optional **LLVM backend** for KXBC: optimize through the LLVM C API, then execute with
+  LLVM JIT or LLVM Interpreter. Enable with `-Dllvm-prefix=PREFIX`; see
+  [bc2jit/README.md](bc2jit/README.md#llvm-backend).
 
 Design and comparison with AsmJit: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

@@ -39,6 +39,64 @@ printed as hex on stdout, or written with `-o`.
 
 Exit status: 0 success, 1 decode/compile/I/O error, 2 usage error.
 
+## LLVM backend
+
+The optional backend uses the LLVM **C API**, in process: no `opt`, `clang` or `lli`
+subprocesses. Both KXBC versions use the existing validated lowering to integer IR, then LLVM
+IR construction and `LLVMRunPasses`. The optimized module runs in either LLVM MCJIT or LLVM
+Interpreter. The original `pyrlyn` backend remains the default.
+
+Build against an LLVM installation with headers and a shared `libLLVM` that includes MCJIT,
+Interpreter and PassBuilder (tested with LLVM 23.1.5):
+
+```sh
+zig build bc2jit -Dllvm-prefix=/opt/homebrew/opt/llvm  # Homebrew example
+zig-out/bin/bc2jit -a aarch64 --backend llvm-jit add.kxbc 40 2
+zig-out/bin/bc2jit -a aarch64 --backend llvm-interpreter add.kxbc 40 2
+zig-out/bin/bc2jit -a aarch64 --backend llvm-interpreter --no-opt add.kxbc 40 2
+zig build test-bc2jit e2e-bc2jit -Dllvm-prefix=/opt/homebrew/opt/llvm
+```
+
+Use the host's `--arch` value (`x86-64`, `aarch64`, or `riscv`). These LLVM modes execute on
+the host; foreign `--arch` and raw machine-code output (`-o`) are rejected as usage errors.
+Without the build option, selecting LLVM reports how to enable it and exits with status 1.
+
+Optimization is enabled by default: `function(mem2reg,sccp,adce,simplifycfg)` promotes stack
+slots/locals to SSA, folds constants, removes dead computations and simplifies control flow.
+This deliberately scalar pipeline is shared by both execution modes; it is not LLVM's full
+`default<O2>` pipeline. MCJIT also uses code-generation optimization level 2 (0 with `--no-opt`).
+The backend preserves wrapping arithmetic, shifts modulo 64, zero-initialized locals and
+KXBC's total division/remainder rules. Modules are verified before and after optimization.
+See the [LLVM pass API](https://llvm.org/doxygen/group__LLVMCCoreNewPM.html).
+
+The Zig API optimizes once and reuses the resulting program for subsequent calls:
+
+```zig
+// f is a Function returned by bc2jit.bytecode.decode.
+var diag: pjit.llvm.Diagnostic = .{};
+var program = try bc2jit.driver.compileLlvm(gpa, f, .{
+    .mode = .interpreter, // or .jit
+    .optimize = true,
+}, &diag);
+defer program.deinit();
+const result = program.call(.{ 40, 2, 0, 0 });
+// On failure, diag.message() contains a bounded copy of LLVM's diagnostic, if any.
+// program.irText(gpa) returns an owned LLVM IR snapshot; free it with gpa.free.
+```
+
+`pjit.llvm.prepare` also accepts the integer mutable-register IR subset emitted by KXBC
+lowering (`const`, `copy`, integer arithmetic, `br`, `cbr`, `ret`, at most four parameters).
+Other IR operations are rejected. Programs own their LLVM context, module and engine;
+input IR/bytecode can be released after preparation. Serialize calls on the same interpreter
+program. LLVM Interpreter has no instruction-budget API: unlike `bytecode.eval(max_steps)`,
+it can run indefinitely on a nonterminating input, just like JIT execution. The existing
+bounded reference interpreter remains available.
+
+LLVM-enabled tests compare both modes, with optimization on and off, against `bytecode.eval`
+for arithmetic edge cases, all comparisons, loops, a 64-deep stack and 400 random programs.
+They also verify actual constant folding in the emitted LLVM IR, allocation-failure cleanup,
+repeated calls, invalid IR rejection and CLI execution for both KXBC versions.
+
 ## Status
 
 Not a draft any more: the format is versioned (v0 frozen, v1 current), the decoder validates
