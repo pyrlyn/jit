@@ -7,6 +7,12 @@ project(pyrlyn-jit VERSION 0.1.0 LANGUAGES C)
 find_program(PYRLYN_JIT_ZIG_EXECUTABLE zig REQUIRED DOC "Zig compiler (0.17) used to build pyrlyn-jit")
 set(PYRLYN_JIT_OPTIMIZE "" CACHE STRING "zig -Doptimize (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall); empty = from CMAKE_BUILD_TYPE")
 set(PYRLYN_JIT_TARGETS "x86_64,aarch64" CACHE STRING "Backends to compile in (-Dtargets)")
+option(PYRLYN_JIT_BC2JIT "Include the KXBC bytecode API" ON)
+if(PYRLYN_JIT_BC2JIT)
+  set(_zj_bc2jit true)
+else()
+  set(_zj_bc2jit false)
+endif()
 option(PYRLYN_JIT_INSTALL "Install pyrlyn-jit with the CMake install step" ${PROJECT_IS_TOP_LEVEL})
 
 if(PYRLYN_JIT_OPTIMIZE)
@@ -25,12 +31,12 @@ set(_zj_prefix "${CMAKE_CURRENT_BINARY_DIR}/zig-out")
 set(_zj_static "${_zj_prefix}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}pyrlyn-jit${CMAKE_STATIC_LIBRARY_SUFFIX}")
 set(_zj_shared "${_zj_prefix}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}pyrlyn-jit${CMAKE_SHARED_LIBRARY_SUFFIX}")
 file(MAKE_DIRECTORY "${_zj_prefix}/include")
-file(GLOB_RECURSE _zj_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.zig" "${CMAKE_CURRENT_SOURCE_DIR}/include/*")
+file(GLOB_RECURSE _zj_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.zig" "${CMAKE_CURRENT_SOURCE_DIR}/bc2jit/*.zig" "${CMAKE_CURRENT_SOURCE_DIR}/include/*")
 
 add_custom_command(
   OUTPUT "${_zj_static}" "${_zj_shared}"
   COMMAND "${PYRLYN_JIT_ZIG_EXECUTABLE}" build install -Doptimize=${_zj_opt} -Dtargets=${PYRLYN_JIT_TARGETS}
-          -Dversion=${PROJECT_VERSION} --prefix "${_zj_prefix}"
+          -Dbc2jit=${_zj_bc2jit} -Dversion=${PROJECT_VERSION} --prefix "${_zj_prefix}"
           --cache-dir "${CMAKE_CURRENT_BINARY_DIR}/zig-cache"
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/build.zig" ${_zj_sources}

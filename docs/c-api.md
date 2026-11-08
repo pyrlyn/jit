@@ -64,3 +64,9 @@ library is fuzzed (`src/fuzz.zig`) and the C API has unit tests (`src/c_api.zig`
 A `pjit_buffer` must not be used from several threads at once. Different buffers and functions
 are independent. On Apple Silicon, `pjit_jit_add` toggles the calling thread's JIT write
 protection for the duration of the copy.
+
+## KXBC bytecode
+
+`<bc2jit.h>` provides validated KXBC v0/v1 compilation and optional JIT execution in the
+same library. See [the Zig/C API and ownership contract](../bc2jit/README.md#zig-and-c-apis).
+Enabled by default; `-Dbc2jit=false` retains C stubs returning `PJIT_BC2JIT_DISABLED`.

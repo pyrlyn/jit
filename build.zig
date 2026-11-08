@@ -8,6 +8,8 @@ pub fn build(b: *std.Build) void {
     const opts = b.addOptions();
     const llvm_prefix = b.option([]const u8, "llvm-prefix", "Enable the optional LLVM backend using PREFIX/include and PREFIX/lib (shared libLLVM)");
     opts.addOption(bool, "llvm", llvm_prefix != null);
+    const want_bc2jit = b.option(bool, "bc2jit", "Include the KXBC Zig/C API and CLI (default: true)") orelse true;
+    opts.addOption(bool, "bc2jit", want_bc2jit);
     const want_x86_64 = std.mem.indexOf(u8, targets, "x86_64") != null;
     const want_aarch64 = std.mem.indexOf(u8, targets, "aarch64") != null;
     opts.addOption(bool, "x86_64", want_x86_64);
@@ -44,6 +46,14 @@ pub fn build(b: *std.Build) void {
         pyrlyn_jit.addRPath(lib);
         pyrlyn_jit.linkSystemLibrary("LLVM", .{ .use_pkg_config = .no });
     }
+
+    const bc2jit = b.addModule("bc2jit", .{
+        .root_source_file = b.path("bc2jit/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "pyrlyn_jit", .module = pyrlyn_jit }},
+    });
 
     const tests = b.addTest(.{ .root_module = pyrlyn_jit });
     // Standalone fuzz driver (seeded, replayable); `zig build test --fuzz` also works (see SECURITY.md).
@@ -116,7 +126,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
-    @import("bc2jit/build_steps.zig").add(b, target, optimize, pyrlyn_jit, test_step, llvm_prefix != null);
+    if (want_bc2jit) @import("bc2jit/build_steps.zig").add(b, target, optimize, pyrlyn_jit, bc2jit, test_step, llvm_prefix != null);
 
     // 32-bit x86 Compiler execution tests (x86-linux; runs natively on x86_64 Linux kernels).
     const x86_32_mod = b.createModule(.{
@@ -139,12 +149,13 @@ pub fn build(b: *std.Build) void {
 
     // ---- C ABI library (include/pyrlyn_jit.h) + examples in C, C++, Rust, Zig ----------------
     const capi_mod = b.createModule(.{
-        .root_source_file = b.path("src/c_api.zig"),
+        .root_source_file = b.path("src/library.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    capi_mod.addOptions("pyrlyn_jit_options", opts);
+    capi_mod.addImport("pyrlyn_jit", pyrlyn_jit);
+    capi_mod.addImport("bc2jit", bc2jit);
     const lib_static = b.addLibrary(.{ .name = "pyrlyn-jit", .linkage = .static, .root_module = capi_mod });
     const lib_shared = b.addLibrary(.{ .name = "pyrlyn-jit", .linkage = .dynamic, .root_module = capi_mod });
     b.installArtifact(lib_shared);
@@ -171,13 +182,30 @@ pub fn build(b: *std.Build) void {
     // Separate module without stack probes: x86_64 Debug code otherwise references Zig's
     // __zig_probe_stack (compiler_rt), which foreign linkers (c++, rustc) cannot resolve.
     const obj_mod = b.createModule(.{
-        .root_source_file = b.path("src/c_api.zig"),
+        .root_source_file = b.path("src/library.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .stack_check = false,
     });
-    obj_mod.addOptions("pyrlyn_jit_options", opts);
+    const obj_jit = b.createModule(.{
+        .root_source_file = b.path("src/pyrlyn_jit.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .stack_check = false,
+    });
+    obj_jit.addOptions("pyrlyn_jit_options", opts);
+    const obj_bc2jit = b.createModule(.{
+        .root_source_file = b.path("bc2jit/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .stack_check = false,
+        .imports = &.{.{ .name = "pyrlyn_jit", .module = obj_jit }},
+    });
+    obj_mod.addImport("pyrlyn_jit", obj_jit);
+    obj_mod.addImport("bc2jit", obj_bc2jit);
     const lib_obj = b.addObject(.{ .name = "pyrlyn_jit", .root_module = obj_mod });
 
     // Installed libpyrlyn-jit.a: on macOS the archive is re-packed with the system `ar` from the plain
@@ -191,6 +219,33 @@ pub fn build(b: *std.Build) void {
     } else {
         b.installArtifact(lib_static);
     }
+
+    const bc_api_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("bc2jit/api_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "bc2jit", .module = bc2jit }},
+    }) }));
+    bc_api_tests.skip_foreign_checks = true;
+    test_step.dependOn(&bc_api_tests.step);
+    b.step("test-bc2jit-api", "Test the public Zig bytecode API (also when disabled)").dependOn(&bc_api_tests.step);
+
+    const bc_c_test = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    bc_c_test.addCSourceFile(.{ .file = b.path("bc2jit/test_api.c"), .flags = &.{"-std=c11"} });
+    bc_c_test.addIncludePath(b.path("include"));
+    bc_c_test.linkLibrary(lib_static);
+    const run_bc_c = b.addRunArtifact(b.addExecutable(.{ .name = "test_bc2jit_c", .root_module = bc_c_test }));
+    run_bc_c.skip_foreign_checks = true;
+    test_step.dependOn(&run_bc_c.step);
+    b.step("test-bc2jit-c", "Test the C bytecode API (also when disabled)").dependOn(&run_bc_c.step);
+
+    const bc_bench = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    bc_bench.addCSourceFile(.{ .file = b.path("bench/bc2jit_api.c"), .flags = &.{"-std=c11"} });
+    bc_bench.addIncludePath(b.path("include"));
+    bc_bench.linkLibrary(lib_static);
+    const bc_bench_exe = b.addExecutable(.{ .name = "bench_bc2jit_api", .root_module = bc_bench });
+    b.step("bench-bc2jit-api", "Build the C API JIT benchmark (use -Doptimize=ReleaseFast)").dependOn(&b.addInstallArtifact(bc_bench_exe, .{}).step);
 
     const examples_step = b.step("examples", "Build and run examples/{c,cpp,zig} (+ rust with -Drust=true)");
     {

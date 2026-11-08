@@ -1,8 +1,7 @@
 //! `bc2jit`: compile a KXBC bytecode function for `--arch`; run it when that is the host.
 const std = @import("std");
-const bc = @import("bytecode.zig");
-const cli = @import("cli.zig");
-const driver = @import("driver.zig");
+const api = @import("bc2jit");
+const cli = api.cli;
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
@@ -19,12 +18,13 @@ pub fn main(init: std.process.Init) !void {
     };
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, o.input, arena, .unlimited) catch |e|
         fail("cannot read '{s}': {s}", .{ o.input, @errorName(e) });
-    var diag: bc.Diagnostic = .{};
-    const f = bc.decode(arena, bytes, &diag) catch |e|
-        fail("{s}: offset {d}: {s}", .{ o.input, diag.offset, bc.errorMessage(e) });
+    var diag: api.Diagnostic = .{};
     if (o.backend != .pyrlyn) {
+        const f = api.bytecode.decode(arena, bytes, &diag) catch |e|
+            fail("{s}: offset {d}: {s}", .{ o.input, diag.offset, api.bytecode.errorMessage(e) });
+        defer f.deinit(arena);
         var llvm_diag: @import("pyrlyn_jit").llvm.Diagnostic = .{};
-        var program = driver.compileLlvm(arena, f, .{
+        var program = api.driver.compileLlvm(arena, f, .{
             .mode = if (o.backend == .llvm_jit) .jit else .interpreter,
             .optimize = o.optimize,
         }, &llvm_diag) catch |e| fail("LLVM: {s}: {s}", .{ @errorName(e), llvm_diag.message() });
@@ -32,8 +32,8 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.allocPrint(arena, "{d}\n", .{program.call(o.args)}));
         return;
     }
-    var c = driver.compile(arena, o.target, f) catch |e|
-        fail("--arch {s}: {s}", .{ o.target.flagName(), driver.errorMessage(e) });
+    var c = api.compile(arena, o.target, bytes, .{ .executable = o.executable }, &diag) catch |e|
+        fail("{s}: offset {d}: {s}", .{ o.input, diag.offset, api.errorMessage(e) });
     defer c.deinit();
     if (o.output) |path| std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = c.code() }) catch |e|
         fail("cannot write '{s}': {s}", .{ path, @errorName(e) });

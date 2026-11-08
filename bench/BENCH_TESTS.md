@@ -81,3 +81,13 @@ and run `python3 scripts/compare_compile_bench.py BEFORE AFTER --repeats 5 --ms 
 The script alternates execution order, checks code equivalence and reports per-case
 and geometric-mean changes. See [COMPILE_PERFORMANCE.md](COMPILE_PERFORMANCE.md)
 for the measured results, metric boundaries and full build commands.
+
+## Bytecode API comparison
+
+`python3 scripts/bench_bc2jit_api.py` builds ReleaseFast libraries and a static C consumer
+with bytecode support on and off, alternates seven runs, and compares compile/JIT/call time
+and artifact sizes. It also compares assembler emission with KXBC v0/v1 for the same `add`
+function. Raw samples are saved under `zig-out/bc2jit-compare/`; no regression baseline is
+rewritten. See [recorded results](BC2JIT_API_RESULTS.md).
+
+`zig build bench-test -Dbc2jit=false` skips bytecode cases and runs core JIT cases normally.
