@@ -30,7 +30,7 @@ pyrlyn-jit: ~1.3k lines Zig 0.17, stdlib only.
 | x86 (32-bit) | — | planned as its own module `x86/` (shares encoder pieces with x86_64 via comptime) |
 | Builder / Compiler / RA | — | todo (largest piece) |
 | Instruction DB + tablegen | hand-written encoders | todo: generate Zig encoders at build time from AsmJit's `db/*.json` (a `build.zig` step) |
-| `JitRuntime`/`VirtMem` | `core/jit_runtime.zig` (MAP_JIT + `pthread_jit_write_protect_np` on Apple arm64; RW→RX `mprotect` elsewhere) | basic + opt-in dual mapping (`addDual`: mach_vm_remap / memfd); no pooled allocator |
+| `JitRuntime`/`VirtMem` | `core/jit_runtime.zig` (MAP_JIT + `pthread_jit_write_protect_np` on Apple arm64; RW→RX `mprotect` elsewhere) | bounded cache of eight released single-page mappings + opt-in dual mapping (`addDual`: mach_vm_remap / memfd); no page suballocation |
 | `BaseEmitter` validation (`DiagnosticOptions::kValidateAssembler`) | `Options.validate` (comptime) | done for the current subset |
 | `Logger` / emitter hooks | `Options.Hooks` (comptime type, `pre`/`post`) + `LogHooks`, x86-64 `Logger` (Intel-syntax listing), `CountingHooks`, `CallbackHooks`; also on the `inst` path | done |
 | `CpuInfo`, `Formatter`, `ConstPool`, `FuncFrame`, `ErrorHandler`, PAuth, `ujit` | — | todo |

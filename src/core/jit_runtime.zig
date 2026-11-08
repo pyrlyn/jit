@@ -1,4 +1,4 @@
-//! Executable memory (AsmJit: JitRuntime + VirtMem, without the pooled JitAllocator).
+//! Executable memory with a bounded cache of released single-page mappings.
 //! macOS/arm64: MAP_JIT + pthread_jit_write_protect_np + sys_icache_invalidate.
 //! Other POSIX hosts: mmap RW, copy, mprotect RX (W^X, never RWX).
 //! Windows: VirtualAlloc RW, copy, VirtualProtect RX (W^X, never RWX).
@@ -48,61 +48,121 @@ pub const Error = error{ MapFailed, ProtectFailed, OutOfBounds };
 
 pub const Function = struct {
     mem: []align(4096) u8,
+    /// Initialized code prefix; the rest is trap-filled. Unknown for manually constructed
+    /// handles, so their whole mapping is treated as dirty when recycled.
+    code_len: usize = std.math.maxInt(usize),
     pub fn ptr(self: Function, comptime F: type) F {
         return @ptrCast(@alignCast(self.mem.ptr));
     }
+    /// Releases ownership. Do not access the function afterward; the mapping may be reused.
     pub fn release(self: Function) void {
-        unmap(self.mem.ptr, self.mem.len);
+        if (!cacheReleased(self)) unmap(self.mem.ptr, self.mem.len);
     }
 };
 
 /// Allocation granule: 16 KiB covers both 4K (x86) and 16K (Apple arm64) pages.
 const page = 16384;
 
-/// Copies finalized code into fresh executable memory.
+// Only released mappings enter the cache. Each live Function retains an exclusive mapping;
+// no executable page is ever shared between independently owned functions. Contention falls
+// back to the OS rather than blocking. At most 8 * 16 KiB are retained per linked runtime.
+const cache_capacity = 8;
+var cache_mutex: std.atomic.Mutex = .unlocked;
+var cache_count: usize = 0;
+const Cached = struct { mem: []align(4096) u8, used: usize };
+var cache: [cache_capacity]Cached = undefined;
+
+fn takeCached(size: usize) ?Cached {
+    if (size != page or !cache_mutex.tryLock()) return null;
+    defer cache_mutex.unlock();
+    if (cache_count == 0) return null;
+    cache_count -= 1;
+    return cache[cache_count];
+}
+
+fn cacheReleased(f: Function) bool {
+    const mem = f.mem;
+    if (mem.len != page or !cache_mutex.tryLock()) return false;
+    defer cache_mutex.unlock();
+    if (cache_count == cache_capacity) return false;
+    cache[cache_count] = .{ .mem = mem, .used = @min(f.code_len, mem.len) };
+    cache_count += 1;
+    return true;
+}
+
+/// Unmaps idle cached pages; live functions are unaffected. Returns bytes released.
+/// Best effort: returns zero under contention. At most 128 KiB are cached per runtime.
+pub fn trimCache() usize {
+    if (!cache_mutex.tryLock()) return 0;
+    const n = cache_count;
+    var idle: [cache_capacity]Cached = undefined;
+    @memcpy(idle[0..n], cache[0..n]);
+    cache_count = 0;
+    cache_mutex.unlock();
+    for (idle[0..n]) |entry| unmap(entry.mem.ptr, entry.mem.len);
+    return n * page;
+}
+
+/// Copies finalized code into an exclusively owned executable mapping. Released single-page
+/// mappings may be recycled; `Function.release` transfers ownership back to the runtime.
 pub fn add(cb: *const CodeBuffer) Error!Function {
     const code = cb.code();
     const size = std.mem.alignForward(usize, @max(code.len, 1), page);
-    if (is_windows) return addWindows(code, size);
-    const flags: c_int = MAP_PRIVATE | MAP_ANON | (if (use_map_jit) MAP_JIT else 0);
-    const prot: c_int = if (use_map_jit) PROT_READ | PROT_WRITE | PROT_EXEC else PROT_READ | PROT_WRITE;
-    const p = mmap(null, size, prot, flags, -1, 0) orelse return error.MapFailed;
-    if (@intFromPtr(p) == MAP_FAILED) return error.MapFailed;
-    const mem: []align(4096) u8 = @as([*]align(4096) u8, @ptrCast(@alignCast(p)))[0..size];
+    const recycled = takeCached(size);
+    const mem = if (recycled) |entry| entry.mem else try mapWritable(size);
+    // The untouched tail of a recycled mapping is already trap-filled and icache-clean.
+    // Rewrite/flush both the new function and any old code extending beyond it.
+    const dirty_len = if (recycled) |entry| @max(code.len, entry.used) else mem.len;
+    errdefer unmap(mem.ptr, mem.len);
+    if (recycled != null and !use_map_jit) try makeWritable(mem);
     if (use_map_jit) {
-        // MAP_JIT pages are RWX in the page tables, but Apple Silicon enforces W^X per thread:
-        // they are writable only inside this window and only for this thread.
-        pthread_jit_write_protect_np(0); // this thread: writable, not executable
-        defer pthread_jit_write_protect_np(1); // this thread: executable, not writable
+        // Each cache entry is exclusively owned before opening the thread-local write window.
+        pthread_jit_write_protect_np(0);
+        defer pthread_jit_write_protect_np(1);
         @memcpy(mem[0..code.len], code);
-        fillTrap(mem[code.len..]);
-    }
-    if (use_map_jit) {
-        sys_icache_invalidate(mem.ptr, code.len);
+        fillTrap(mem[code.len..dirty_len]);
     } else {
         @memcpy(mem[0..code.len], code);
-        fillTrap(mem[code.len..]);
-        if (mprotect(mem.ptr, size, PROT_READ | PROT_EXEC) != 0) {
-            _ = munmap(mem.ptr, size);
-            return error.ProtectFailed;
-        }
-        if (needs_icache_flush) __clear_cache(mem.ptr, mem.ptr + code.len);
+        fillTrap(mem[code.len..dirty_len]);
+        try makeExecutable(mem);
     }
-    return .{ .mem = mem };
+    // Include overwritten old code in the flush, even when the new function is shorter.
+    // Darwin x86 also needs this for Rosetta's translation cache.
+    if (is_windows) {
+        _ = FlushInstructionCache(GetCurrentProcess(), mem.ptr, dirty_len);
+    } else if (is_darwin) {
+        sys_icache_invalidate(mem.ptr, dirty_len);
+    } else if (needs_icache_flush) {
+        __clear_cache(mem.ptr, mem.ptr + dirty_len);
+    }
+    return .{ .mem = mem, .code_len = code.len };
 }
 
-fn addWindows(code: []const u8, size: usize) Error!Function {
-    const p = VirtualAlloc(null, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) orelse return error.MapFailed;
-    const mem: []align(4096) u8 = @as([*]align(4096) u8, @ptrCast(@alignCast(p)))[0..size];
-    @memcpy(mem[0..code.len], code);
-    fillTrap(mem[code.len..]);
-    var old: u32 = 0;
-    if (VirtualProtect(p, size, PAGE_EXECUTE_READ, &old) == 0) {
-        _ = VirtualFree(p, 0, MEM_RELEASE);
-        return error.ProtectFailed;
-    }
-    _ = FlushInstructionCache(GetCurrentProcess(), p, code.len);
-    return .{ .mem = mem };
+fn mapWritable(size: usize) Error![]align(4096) u8 {
+    const p = if (is_windows)
+        VirtualAlloc(null, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) orelse return error.MapFailed
+    else blk: {
+        const flags: c_int = MAP_PRIVATE | MAP_ANON | (if (use_map_jit) MAP_JIT else 0);
+        const prot: c_int = if (use_map_jit) PROT_READ | PROT_WRITE | PROT_EXEC else PROT_READ | PROT_WRITE;
+        const ptr = mmap(null, size, prot, flags, -1, 0) orelse return error.MapFailed;
+        if (@intFromPtr(ptr) == MAP_FAILED) return error.MapFailed;
+        break :blk ptr;
+    };
+    return asSlice(p, size);
+}
+
+fn makeWritable(mem: []align(4096) u8) Error!void {
+    if (is_windows) {
+        var old: u32 = 0;
+        if (VirtualProtect(mem.ptr, mem.len, PAGE_READWRITE, &old) == 0) return error.ProtectFailed;
+    } else if (mprotect(mem.ptr, mem.len, PROT_READ | PROT_WRITE) != 0) return error.ProtectFailed;
+}
+
+fn makeExecutable(mem: []align(4096) u8) Error!void {
+    if (is_windows) {
+        var old: u32 = 0;
+        if (VirtualProtect(mem.ptr, mem.len, PAGE_EXECUTE_READ, &old) == 0) return error.ProtectFailed;
+    } else if (mprotect(mem.ptr, mem.len, PROT_READ | PROT_EXEC) != 0) return error.ProtectFailed;
 }
 
 /// Fills unused executable memory with traps: `int3` (0xCC) on x86-64, `udf #0` (zero words) on AArch64.
@@ -216,4 +276,122 @@ pub fn addDual(cb: *const CodeBuffer) Error!DualFunction {
     const f = try allocDual(code.len);
     f.write(0, code) catch unreachable; // allocDual sized the mapping for `code`
     return f;
+}
+
+test "runtime cache: bound, exclusive ownership, trap tail and trim" {
+    const t = std.testing;
+    _ = trimCache();
+    defer _ = trimCache();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    try cb.emitBytes(&@as([512]u8, @splat(0x42)));
+    var functions: [cache_capacity + 2]Function = undefined;
+    var live: usize = 0;
+    defer for (functions[0..live]) |f| f.release();
+    for (&functions) |*f| {
+        f.* = try add(&cb);
+        for (functions[0..live]) |other| try t.expect(f.mem.ptr != other.mem.ptr);
+        live += 1;
+    }
+    const last_cached = functions[cache_capacity - 1].mem.ptr;
+    for (functions[0..live]) |f| f.release();
+    live = 0;
+    cb.reset();
+    try cb.emitBytes(&.{0x37});
+    const short = try add(&cb);
+    defer short.release();
+    try t.expectEqual(last_cached, short.mem.ptr);
+    try t.expectEqual(@as(u8, 0x37), short.mem[0]);
+    const trap: u8 = if (builtin.cpu.arch == .x86_64) 0xCC else 0;
+    for (short.mem[1..]) |byte| try t.expectEqual(trap, byte);
+    try t.expectEqual((cache_capacity - 1) * page, trimCache());
+    // Trimming the idle cache must not release the live mapping.
+    try t.expectEqual(@as(u8, 0x37), short.mem[0]);
+    try t.expectEqual(@as(usize, 0), trimCache());
+}
+
+test "runtime cache: large mappings and contention bypass retention" {
+    const t = std.testing;
+    _ = trimCache();
+    defer _ = trimCache();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    try cb.emitBytes(&@as([page + 1]u8, @splat(0)));
+    const large = try add(&cb);
+    try t.expectEqual(2 * page, large.mem.len);
+    large.release();
+    try t.expectEqual(@as(usize, 0), trimCache());
+    cb.reset();
+    try cb.emitBytes(&.{0});
+    const small = try add(&cb);
+    try t.expect(cache_mutex.tryLock());
+    // A release/trim during contention must not spin or leak the released mapping.
+    small.release();
+    const released = trimCache();
+    cache_mutex.unlock();
+    try t.expectEqual(@as(usize, 0), released);
+    try t.expectEqual(@as(usize, 0), trimCache());
+}
+
+// Host function returning a constant, used to detect stale instruction-cache contents when
+// another thread returns a previously executable mapping to the shared cache.
+fn cacheTestEmit(cb: *CodeBuffer, value: u16) !void {
+    cb.reset();
+    try cb.ensure(8);
+    switch (builtin.cpu.arch) {
+        .aarch64 => {
+            cb.put32(0xd2800000 | (@as(u32, value) << 5)); // movz x0, value
+            cb.put32(0xd65f03c0); // ret
+        },
+        .x86, .x86_64 => {
+            cb.put8(0xb8); // mov eax, value
+            cb.put32(value);
+            cb.put8(0xc3);
+        },
+        .riscv64 => {
+            cb.put32(0x00000513 | (@as(u32, value) << 20)); // addi a0, zero, value
+            cb.put32(0x00008067); // ret
+        },
+        else => return error.UnsupportedHost,
+    }
+}
+
+fn cacheStress(seed: u16, failed: *std.atomic.Value(bool)) void {
+    cacheStressChecked(seed) catch failed.store(true, .release);
+}
+
+fn cacheStressChecked(seed: u16) !void {
+    var cb = CodeBuffer.init(std.heap.page_allocator);
+    defer cb.deinit();
+    try cacheTestEmit(&cb, seed);
+    const held = try add(&cb);
+    defer held.release();
+    const F = *const fn () callconv(.c) u32;
+    for (0..200) |i| {
+        const n: u16 = seed + @as(u16, @intCast(i));
+        try cacheTestEmit(&cb, n);
+        const f = try add(&cb);
+        defer f.release();
+        if (f.ptr(F)() != n or held.ptr(F)() != seed) return error.WrongResult;
+        if (i % 7 == 0) _ = trimCache();
+    }
+}
+
+test "runtime cache: concurrent reuse, live calls and trim preserve code" {
+    if (builtin.cpu.arch != .aarch64 and builtin.cpu.arch != .x86_64 and builtin.cpu.arch != .x86 and builtin.cpu.arch != .riscv64)
+        return error.SkipZigTest;
+    _ = trimCache();
+    defer _ = trimCache();
+    var failed = std.atomic.Value(bool).init(false);
+    var threads: [4]std.Thread = undefined;
+    var started: usize = 0;
+    errdefer for (threads[0..started]) |thread| thread.join();
+    for (&threads, 0..) |*thread, i| {
+        thread.* = try std.Thread.spawn(.{}, cacheStress, .{ @as(u16, @intCast(i * 256)), &failed });
+        started += 1;
+    }
+    for (threads) |thread| thread.join();
+    started = 0;
+    try std.testing.expect(!failed.load(.acquire));
+    try std.testing.expect(trimCache() <= cache_capacity * page);
 }

@@ -42,7 +42,7 @@ test "public API: optional support, validation, ownership and execution" {
 
 fn allocationCase(gpa: std.mem.Allocator) !void {
     var diag: api.Diagnostic = .{};
-    for ([_][]const u8{ add_v0, add_v1 }) |bytes| {
+    for ([_][]const u8{ add_v0, add_v1, "KXBC\x01\x02\x06\x00\x02\x00\x02\x01\x13\xf0" }) |bytes| {
         var c = try api.compile(gpa, .riscv64, bytes, .{ .executable = false }, &diag);
         defer c.deinit();
     }
@@ -51,4 +51,28 @@ fn allocationCase(gpa: std.mem.Allocator) !void {
 test "public API: releases allocations on every failure" {
     if (!api.enabled) return error.SkipZigTest;
     try t.checkAllAllocationFailures(t.allocator, allocationCase, .{});
+}
+
+test "public API: v1 direct subset matches v0, deeper stacks keep IR semantics" {
+    if (!api.enabled) return error.SkipZigTest;
+    var diag: api.Diagnostic = .{};
+    for (std.meta.tags(api.Target)) |target| {
+        if (!target.isBuilt()) continue;
+        var v0 = try api.compile(t.allocator, target, add_v0, .{ .executable = false }, &diag);
+        defer v0.deinit();
+        var v1 = try api.compile(t.allocator, target, add_v1, .{ .executable = false }, &diag);
+        defer v1.deinit();
+        if (!(target == .x86_64 and @import("builtin").os.tag == .windows))
+            try t.expectEqualSlices(u8, v0.code(), v1.code());
+        const f: api.bytecode.Function = .{
+            .version = 1,
+            .arg_count = 1,
+            .insts = &.{ .{ .push_arg = 0 }, .dup, .dup, .dup, .dup, .dup, .add, .add, .add, .add, .add, .ret },
+        };
+        const bytes = try api.bytecode.encode(t.allocator, f);
+        defer t.allocator.free(bytes);
+        var deep = try api.compile(t.allocator, target, bytes, .{}, &diag);
+        defer deep.deinit();
+        if (deep.entry()) |entry| try t.expectEqual(@as(i64, 42), entry(7, 0, 0, 0));
+    }
 }

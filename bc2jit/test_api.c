@@ -1,4 +1,5 @@
 #include "bc2jit.h"
+#include "pyrlyn_jit.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,7 @@ int main(void) {
     CHECK(pjit_bc2jit_code(NULL, &n) == NULL && n == 0);
     CHECK(pjit_bc2jit_entry(NULL) == NULL);
     pjit_bc2jit_free(NULL);
+    CHECK(pjit_jit_trim_cache() <= 128u * 1024u);
     CHECK(pjit_bc2jit_compile(bytes, sizeof bytes, 0, 0, NULL, &d) == PJIT_BC2JIT_INVALID_ARGUMENT);
     CHECK(d.offset == 0 && d.message == NULL);
     if (!pjit_bc2jit_enabled()) {
@@ -48,6 +50,8 @@ int main(void) {
         if (version == 0) CHECK(f == NULL); else
 #endif
         { CHECK(f != NULL); CHECK(f(40, 2, 0, 0) == 42); CHECK(f(-9, 5, 0, 0) == -4); }
+        CHECK(pjit_jit_trim_cache() <= 128u * 1024u);
+        if (f) CHECK(f(20, 22, 0, 0) == 42);
         pjit_bc2jit_free(h);
         h = NULL;
     }

@@ -16,6 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zig", default="zig")
     parser.add_argument("--runs", type=int, default=7)
+    parser.add_argument("--min-speedup", type=float, default=2.0, help="Required minimum paired-run pooled full-cycle speedup for v0 and v1 against the disabled build")
     parser.add_argument("--report", type=Path, help="Write the Markdown report here")
     args = parser.parse_args()
     if args.runs < 3:
@@ -54,13 +55,14 @@ def main():
     for key in ("direct_compile_ns", "direct_jit_ns", "direct_call_ns"):
         off, on = median("off", key), median("on", key)
         lines.append(f"| {key} | {off:.3f} | {on:.3f} | {(on/off-1)*100:+.2f}% |")
-    lines += ["", "## Assembler versus bytecode API", "", "Both paths compile `add(a,b)` and check result 42. KXBC v0 emits byte-identical code to the assembler path (checked by the benchmark); v1 uses the IR compiler.",
+    lines += ["", "## Assembler versus bytecode API", "", "Both paths compile `add(a,b)` and check result 42. KXBC v0 emits byte-identical code to the assembler path (checked by the benchmark); v1 uses direct lowering for compatible straight-line code and the IR compiler otherwise.",
               "The assembler C API performs mnemonic/form lookup for each instruction; KXBC v0 uses specialized Zig emitters. These numbers do not compare KXBC with direct Zig assembler calls.",
-              "`compile`: allocate, emit/decode+lower, finalize, free; no executable mapping. `jit`: same plus map, one call, release. `call`: cached function only (includes loop, indirect call and volatile result store).",
+              "`compile`: allocate, emit/decode+lower, finalize, free; no executable mapping. `jit`: same plus acquire an executable mapping, one call, release ownership to the bounded runtime cache. `call`: cached function only (includes loop, indirect call and volatile result store).",
               "", "| Metric (ns/op) | Assembler | KXBC v0 | KXBC v1 |", "|---|---:|---:|---:|"]
-    for metric in ("compile", "jit", "call"):
+    for metric in ("compile", "jit", "cold_jit", "call"):
         lines.append(f"| {metric} | {median('on', f'direct_{metric}_ns'):.3f} | {median('on', f'bc_v0_{metric}_ns'):.3f} | {median('on', f'bc_v1_{metric}_ns'):.3f} |")
-    lines += ["", f"Generated code: v0 {median('on', 'bc_v0_code_bytes'):.0f} bytes, v1 {median('on', 'bc_v1_code_bytes'):.0f} bytes.",
+    lines += ["", "The runtime cache is shared by both paths and retains at most 128 KiB. Compilation still decodes and emits fresh code on every iteration; no function/result cache is used. `cold_jit` also trims all idle OS mappings every iteration. The 2× requirement applies to the warmed repeated JIT lifecycle, not forced unmapping or cached execution.",
+              "", f"Generated code: v0 {median('on', 'bc_v0_code_bytes'):.0f} bytes, v1 {median('on', 'bc_v1_code_bytes'):.0f} bytes.",
               "", "## Artifact size", "", "Sizes on disk in bytes; executable statically links the same C API benchmark in both builds. Disabled builds retain only bytecode API stubs; both binaries reference those symbols.",
               "", "| Artifact | Disabled | Enabled | Delta bytes | Delta |", "|---|---:|---:|---:|---:|"]
     for name in sorted(sizes["off"].keys() & sizes["on"].keys()):
@@ -75,13 +77,23 @@ def main():
             values = [s[key] for s in samples[mode] if key in s]
             return f"{min(values):.3f}–{max(values):.3f}" if values else "—"
         lines.append(f"| {key} | {span('off')} | {span('on')} |")
-    lines += ["", "This is a small-function microbenchmark, not an application throughput estimate. The v1 result includes fixed IR construction/register-allocation costs.",
+    lines += ["", "This is a small-function microbenchmark, not an application throughput estimate. This arithmetic fixture uses direct lowering in both bytecode versions; v1 control flow, locals, deep stacks and extended operations still use the IR compiler.",
               "", "Reproduce: `python3 scripts/bench_bc2jit_api.py --zig /path/to/zig --report bench/BC2JIT_API_RESULTS.md`.",
               "Raw samples: `zig-out/bc2jit-compare/results.json`. Existing regression baselines are unchanged.", ""]
+    speedups = {f"v{v}": median("off", "direct_jit_ns") / median("on", f"bc_v{v}_jit_ns") for v in (0, 1)}
+    minimum_speedups = {f"v{v}": min(off["direct_jit_ns"] / on[f"bc_v{v}_jit_ns"]
+                                     for off, on in zip(samples["off"], samples["on"])) for v in (0, 1)}
+    passed = all(speedup >= args.min_speedup for speedup in minimum_speedups.values())
+    lines += ["## Full-cycle acceptance", "",
+              f"Threshold: {args.min_speedup:.2f}×, against the assembler C API in the disabled build, with the same runtime cache in both builds.",
+              *[f"- KXBC {version}: median {speedup:.2f}×; minimum paired run {minimum_speedups[version]:.2f}×" for version, speedup in speedups.items()],
+              f"Result: {'PASS' if passed else 'FAIL'}.", ""]
     report = "\n".join(lines)
     if args.report:
         args.report.write_text(report)
     print(report)
+    if not passed:
+        raise SystemExit("Full-cycle speedup requirement failed")
 
 
 if __name__ == "__main__":

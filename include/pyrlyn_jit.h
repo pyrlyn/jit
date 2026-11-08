@@ -113,7 +113,11 @@ static inline pjit_x64_op pjit_x64_mem(uint8_t base, int32_t disp, uint8_t size)
 /* `b` must be finalized. */
 int pjit_jit_add(const pjit_buffer *b, pjit_func **out);
 const void *pjit_func_ptr(const pjit_func *f);
+/* Releases ownership; up to 128 KiB of idle executable pages may be cached by the runtime. */
 void pjit_func_free(pjit_func *f);
+/* Best-effort cache trim; returns bytes unmapped, or zero under contention. Live functions
+ * are unaffected. Shared by the assembler and bc2jit APIs. */
+size_t pjit_jit_trim_cache(void);
 
 #ifdef __cplusplus
 }

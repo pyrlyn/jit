@@ -78,6 +78,9 @@ static void bc_run(unsigned flags) {
 }
 static void bc_compile(void) { bc_run(PJIT_BC2JIT_NO_JIT); }
 static void bc_jit(void) { bc_run(0); }
+/* Cold lifecycle includes trimming OS mappings; kept separate from normal pooled release. */
+static void direct_cold_jit(void) { direct_jit(); (void)pjit_jit_trim_cache(); }
+static void bc_cold_jit(void) { bc_jit(); (void)pjit_jit_trim_cache(); }
 static pjit_bc2jit_fn cached;
 static void call_cached(void) { sink = cached(40, 2, 0, 0); }
 static int compare(const void *a, const void *b) {
@@ -99,6 +102,8 @@ int main(void) {
     printf("bc2jit_enabled %d\n", pjit_bc2jit_enabled());
     measure("direct_compile_ns", direct_compile, 500);
     measure("direct_jit_ns", direct_jit, 500);
+    (void)pjit_jit_trim_cache();
+    measure("direct_cold_jit_ns", direct_cold_jit, 500);
     pjit_buffer *b = emit();
     pjit_func *h = NULL;
     CHECK(pjit_jit_add(b, &h) == PJIT_OK);
@@ -110,6 +115,8 @@ int main(void) {
             bytecode[4] = (uint8_t)v;
             measure(v ? "bc_v1_compile_ns" : "bc_v0_compile_ns", bc_compile, 500);
             measure(v ? "bc_v1_jit_ns" : "bc_v0_jit_ns", bc_jit, 500);
+            (void)pjit_jit_trim_cache();
+            measure(v ? "bc_v1_cold_jit_ns" : "bc_v0_cold_jit_ns", bc_cold_jit, 500);
             pjit_bc2jit *bc = NULL;
             CHECK(pjit_bc2jit_compile(bytecode, sizeof bytecode, 0, 0, &bc, NULL) == PJIT_BC2JIT_OK);
             size_t nb = 0, nd = 0;
@@ -126,5 +133,6 @@ int main(void) {
     }
     pjit_func_free(h);
     pjit_buffer_free(b);
+    (void)pjit_jit_trim_cache();
     return 0;
 }

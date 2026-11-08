@@ -128,6 +128,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(tests).step);
     if (want_bc2jit) @import("bc2jit/build_steps.zig").add(b, target, optimize, pyrlyn_jit, bc2jit, test_step, llvm_prefix != null);
 
+    const runtime_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/core/jit_runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) }));
+    runtime_tests.skip_foreign_checks = true;
+    b.step("test-jit-runtime", "Test executable mapping reuse, ownership and concurrent calls").dependOn(&runtime_tests.step);
+
     // 32-bit x86 Compiler execution tests (x86-linux; runs natively on x86_64 Linux kernels).
     const x86_32_mod = b.createModule(.{
         .root_source_file = b.path("src/x86_32_tests.zig"),

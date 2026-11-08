@@ -31,7 +31,8 @@ if (compiled.entry()) |f| {
 ```
 
 `compile` validates the complete KXBC v0/v1 module and owns all resulting allocations.
-Input bytes may be freed after it returns. `code()` borrows the finalized machine code;
+Input bytes may be freed after it returns. Simple v1 straight-line arithmetic uses the
+direct lowering when its stack fits five registers and the ABI matches; other v1 functions use IR. `code()` borrows the finalized machine code;
 `entry()` returns a C-ABI function pointer only for a compatible host target. Pass
 `.{ .executable = false }` to emit code without mapping executable memory. Release the result
 with `deinit()` after all calls have finished. `diag.offset` identifies decoder errors;
@@ -55,6 +56,12 @@ The `PJIT_BC2JIT_NO_JIT` flag emits code only; `pjit_bc2jit_code` exposes its by
 The handle owns both code and the optional executable mapping. The entry and code pointers
 remain valid until `pjit_bc2jit_free`; input bytes are borrowed only during compilation.
 `pjit_bc2jit_enabled()` reports whether the library includes bytecode support.
+
+Releasing a function destroys its handle and code buffer. The shared runtime may retain its
+idle executable page for reuse (up to eight 16 KiB pages, 128 KiB total). This cache is identical
+for the assembler and bytecode APIs; live functions never share a page. `JitRuntime.trimCache()`
+or `pjit_jit_trim_cache()` from `<pyrlyn_jit.h>` releases idle pages without affecting live code.
+Calls after release are invalid even if the runtime has retained the underlying page.
 
 Measure API paths and enabled/disabled library/binary sizes with
 `python3 scripts/bench_bc2jit_api.py`; see [the recorded results](../bench/BC2JIT_API_RESULTS.md).
@@ -208,7 +215,8 @@ may appear anywhere.
 
 ## Lowering
 
-v1 modules are lowered through the pyrlyn-jit IR (`lower_ir.zig`): every stack slot, local and
+v1 modules outside the direct emitter's compatible straight-line subset are lowered through
+the pyrlyn-jit IR (`lower_ir.zig`): every stack slot, local and
 argument becomes a mutable IR vreg, basic blocks start at jump targets and after branches, and
 the x86-64, AArch64 or RV64 Compiler does register allocation (linear scan with spilling, so
 all 64 stack slots work), the host C ABI and branch lowering. `div`/`rem` get guard blocks for

@@ -14,6 +14,13 @@ pyrlyn-jit generates and runs machine code, so memory-safety and W^X are treated
 - AArch64: the instruction cache is invalidated after every write (`sys_icache_invalidate` on
   macOS, `__clear_cache` elsewhere).
 
+- The runtime caches at most eight released single-page mappings (128 KiB). Each live function
+  owns an exclusive mapping; cached pages cannot overlap live functions. Cache metadata uses
+  an atomic try-lock; contention bypasses the cache. Reuse returns RX pages to RW before writing
+  (or opens the Apple Silicon per-thread write window), then restores execution protection and
+  flushes every modified byte, including old code replaced by a trap tail. `trimCache()` unmaps idle
+  pages only. Entry points are invalid after release even when the page remains cached.
+
 ## Buffers, labels and relocations
 - Code size is capped (`max_size`, at most 2 GiB); labels are capped (`max_labels`).
 - `addFixup` rejects unknown labels; `finalize` checks that every patched field lies inside the

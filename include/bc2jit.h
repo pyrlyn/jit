@@ -48,7 +48,8 @@ const uint8_t *pjit_bc2jit_code(const pjit_bc2jit *handle, size_t *len);
  * Otherwise callable with four i64 arguments; unused arguments are ignored.
  * Do not call after free; synchronize calls against destruction. */
 pjit_bc2jit_fn pjit_bc2jit_entry(const pjit_bc2jit *handle);
-/* Releases code and executable mapping. NULL is a no-op. */
+/* Releases code and executable ownership. The shared runtime may cache idle mappings
+ * (up to 128 KiB); pjit_jit_trim_cache() in pyrlyn_jit.h releases them. NULL is a no-op. */
 void pjit_bc2jit_free(pjit_bc2jit *handle);
 #ifdef __cplusplus
 }
