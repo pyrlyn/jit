@@ -61,6 +61,7 @@ def main():
         print(f"| {key} | {before[0]:.3f} | {after[0]:.3f} | {(1-time_ratio)*100:.1f}% | {before[1]:.1f} | {after[1]:.1f} | {(1-memory_ratio)*100:.1f}% |")
     reduction = [(1 - math.exp(statistics.mean(map(math.log, values)))) * 100 for values in ratios]
     print(f"\nEqual-weight geometric mean across all 12 cases: time −{reduction[0]:.1f}%, peak allocated heap −{reduction[1]:.1f}%.")
+    print(f"Compilation throughput: +{(1 / (1 - reduction[0] / 100) - 1) * 100:.1f}% (inverse of the time ratio).")
     print("These are suite averages, not a minimum improvement for each individual case. Peak heap excludes input IR, stack and allocator overhead/RSS.")
 
 

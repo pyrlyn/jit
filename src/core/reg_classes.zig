@@ -57,10 +57,10 @@ pub fn check(gpa: std.mem.Allocator, f: *const ir.Func) ![]ir.Type {
 /// successors share one allocation, sized before filling the arrays. The compiler uses
 /// compact operand offsets; this entry point preserves the public slice-based input.
 pub fn buildFunc(A: std.mem.Allocator, f: *const ir.Func, types: ?[]const ir.Type, class: Class, mark_copies: bool) !ra.Func {
-    return buildInput(false, A, f, types, class, mark_copies);
+    return buildInput(false, A, f, types, class, mark_copies, null);
 }
 
-fn buildInput(comptime compact: bool, A: std.mem.Allocator, f: *const ir.Func, types: ?[]const ir.Type, class: Class, mark_copies: bool) !if (compact) ra.CompactFunc else ra.Func {
+fn buildInput(comptime compact: bool, A: std.mem.Allocator, f: *const ir.Func, types: ?[]const ir.Type, class: Class, mark_copies: bool, owned: ?*[]usize) !if (compact) ra.CompactFunc else ra.Func {
     // Parameters are i64 (GP); the FP run gets an empty placeholder at the same position.
     const nparams: usize = if (class == .gp) f.params else 0;
     var ninst: usize = 1;
@@ -91,10 +91,11 @@ fn buildInput(comptime compact: bool, A: std.mem.Allocator, f: *const ir.Func, t
     }
     const B = if (compact) ra.CompactBlock else ra.Block;
     const I = if (compact) ra.CompactInst else ra.Inst;
-    // One arena allocation, with no abandoned buffers from ArrayList/arena growth.
+    // One sized allocation, with no abandoned buffers from ArrayList/arena growth.
     const bytes = (f.blocks.items.len + pre) * @sizeOf(B) + ninst * @sizeOf(I) +
         (nsucc + pre + nvars) * @sizeOf(u32);
     const storage = try A.alloc(usize, std.mem.alignForward(usize, bytes, @sizeOf(usize)) / @sizeOf(usize));
+    errdefer A.free(storage);
     var fixed = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(storage));
     const tmp = fixed.allocator();
     const blocks = try tmp.alloc(B, f.blocks.items.len + pre);
@@ -186,6 +187,7 @@ fn buildInput(comptime compact: bool, A: std.mem.Allocator, f: *const ir.Func, t
         }
         blocks[bi + pre] = .{ .insts = insts, .succs = succ_buf[s0..si] };
     }
+    if (owned) |out| out.* = storage;
     if (compact) return .{ .blocks = blocks, .operands = vs.items, .num_vregs = @max(f.num_vregs, 1) };
     var off: usize = 0;
     for (all_insts) |*in| {
@@ -211,17 +213,166 @@ const Push = struct {
     }
 };
 
-/// One register-allocation run for `class`: the input is built in a temporary arena that is
-/// freed before returning (so the inputs of the two classes are never alive at once, nor
-/// during code emission), and the result is checked with `ra.verify` when runtime safety is
-/// on. Without any FP vreg the FP run is skipped: every location is `.none`, no slots.
+// Linear allocation visits IR operands directly while collecting liveness and
+// local interval endpoints. Only the CFG is materialized; graph/splitting passes
+// retain compact inputs for their repeated instruction walks.
+fn Source(comptime class: Class, comptime typed: bool) type {
+    return struct {
+        const Block = struct {
+            insts: struct { ops: []const ir.Op, params: bool, len: usize },
+            succs: []const u32,
+        };
+        blocks: []Block,
+        edges: []u32,
+        num_vregs: u32,
+        fixed: []const ?u8 = &.{},
+        types: if (typed) []const ir.Type else void,
+        params: u32,
+
+        fn init(gpa: std.mem.Allocator, f: *const ir.Func, types: ?[]const ir.Type) !@This() {
+            var entry_target = false;
+            for (f.blocks.items) |b| switch (b.ops.items[b.ops.items.len - 1]) {
+                .br => |target| entry_target = entry_target or target == 0,
+                .cbr => |c| entry_target = entry_target or c.then == 0 or c.@"else" == 0,
+                else => {},
+            };
+            const pre: usize = @intFromBool(entry_target);
+            const blocks = try gpa.alloc(Block, f.blocks.items.len + pre);
+            errdefer gpa.free(blocks);
+            const edges = try gpa.alloc(u32, 2 * blocks.len);
+            errdefer gpa.free(edges);
+            var si: usize = 0;
+            if (pre != 0) {
+                edges[0] = 1;
+                blocks[0] = .{ .insts = .{ .ops = &.{}, .params = true, .len = 1 }, .succs = edges[0..1] };
+                si = 1;
+            }
+            for (f.blocks.items, 0..) |b, bi| {
+                const start = si;
+                switch (b.ops.items[b.ops.items.len - 1]) {
+                    .br => |target| {
+                        edges[si] = @intCast(target + pre);
+                        si += 1;
+                    },
+                    .cbr => |c| {
+                        edges[si] = @intCast(c.then + pre);
+                        edges[si + 1] = @intCast(c.@"else" + pre);
+                        si += 2;
+                    },
+                    else => {},
+                }
+                const params = pre == 0 and bi == 0;
+                blocks[bi + pre] = .{ .insts = .{ .ops = b.ops.items, .params = params, .len = b.ops.items.len + @intFromBool(params) }, .succs = edges[start..si] };
+            }
+            return .{ .blocks = blocks, .edges = edges, .num_vregs = @max(f.num_vregs, 1), .types = if (typed) types.? else {}, .params = f.params };
+        }
+        fn deinit(s: @This(), gpa: std.mem.Allocator) void {
+            gpa.free(s.blocks);
+            gpa.free(s.edges);
+        }
+        inline fn member(s: @This(), v: ir.VReg) bool {
+            return if (typed) classOf(s.types[v]) == class else class == .gp;
+        }
+        pub inline fn isCall(_: @This(), b: Block, i: usize) bool {
+            if (b.insts.params and i == 0) return false;
+            return b.insts.ops[i - @intFromBool(b.insts.params)] == .call;
+        }
+        pub inline fn collectBlock(s: @This(), b: Block, collector: anytype) ra.Error!void {
+            const Self = @This();
+            const C = struct {
+                s: Self,
+                out: @TypeOf(collector),
+                inline fn use(c: @This(), v: ir.VReg) ra.Error!void {
+                    if (c.s.member(v)) try c.out.use(v);
+                }
+            };
+            const c: C = .{ .s = s, .out = collector };
+            if (b.insts.params) {
+                if (class == .gp) for (0..s.params) |v| {
+                    try collector.def(@intCast(v));
+                };
+                collector.next();
+            }
+            for (b.insts.ops) |*o| {
+                var def: ?ir.VReg = null;
+                switch (o.*) {
+                    .br => {},
+                    .ret => |v| try c.use(v),
+                    inline .@"const", .fconst => |x| def = x.dst,
+                    .copy => |x| {
+                        try c.use(x.src);
+                        def = x.dst;
+                    },
+                    inline .cvt, .splat, .extract => |x| {
+                        try c.use(x.src);
+                        def = x.dst;
+                    },
+                    .load => |x| {
+                        try c.use(x.base);
+                        def = x.dst;
+                    },
+                    .store => |x| {
+                        try c.use(x.base);
+                        try c.use(x.src);
+                    },
+                    .cbr => |x| {
+                        try c.use(x.a);
+                        try c.use(x.b);
+                    },
+                    inline .arith, .typed, .fcmp => |x| {
+                        try c.use(x.a);
+                        try c.use(x.b);
+                        def = x.dst;
+                    },
+                    .call => |x| {
+                        for (x.args) |v| try c.use(v);
+                        def = x.dst;
+                    },
+                    .bra => |x| for (x.args) |v| try c.use(v),
+                    .cbra => |x| {
+                        try c.use(x.a);
+                        try c.use(x.b);
+                        for (x.then_args) |v| try c.use(v);
+                        for (x.else_args) |v| try c.use(v);
+                    },
+                }
+                if (def) |d| if (s.member(d)) {
+                    try collector.def(d);
+                };
+                collector.next();
+            }
+        }
+    };
+}
+
+/// One register-allocation run for `class`. Temporary CFG/operand storage is freed
+/// before returning; runtime-safety builds verify the allocation result. Without
+/// any FP vreg the FP run is skipped: every location is `.none`, no slots.
 pub fn allocateClass(gpa: std.mem.Allocator, f: *const ir.Func, types: ?[]const ir.Type, class: Class, mark_copies: bool, cfg: ra.Config) !ra.Result {
+    return switch (class) {
+        .gp => allocateClassImpl(gpa, f, types, .gp, mark_copies, cfg),
+        .fp => allocateClassImpl(gpa, f, types, .fp, mark_copies, cfg),
+    };
+}
+
+fn allocateClassImpl(gpa: std.mem.Allocator, f: *const ir.Func, types: ?[]const ir.Type, comptime class: Class, mark_copies: bool, cfg: ra.Config) !ra.Result {
     if (class == .fp and (types == null or !hasFp(types.?))) return emptyResult(gpa, @max(f.num_vregs, 1));
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const rf = try buildInput(true, arena.allocator(), f, types, class, mark_copies);
+    if (cfg.algo == .linear and !cfg.split) {
+        return if (types != null) allocateDirect(Source(class, true), gpa, f, types, cfg) else allocateDirect(Source(class, false), gpa, f, types, cfg);
+    }
+    var storage: []usize = &.{};
+    defer gpa.free(storage);
+    const rf = try buildInput(true, gpa, f, types, class, mark_copies, &storage);
     const res = try ra.allocateCompact(gpa, rf, cfg);
     if (std.debug.runtime_safety) std.debug.assert(ra.verifyCompact(rf, cfg, res));
+    return res;
+}
+
+fn allocateDirect(comptime S: type, gpa: std.mem.Allocator, f: *const ir.Func, types: ?[]const ir.Type, cfg: ra.Config) !ra.Result {
+    const source = try S.init(gpa, f, types);
+    defer source.deinit(gpa);
+    const res = try ra.allocateLinearSource(gpa, source, cfg);
+    if (std.debug.runtime_safety) std.debug.assert(ra.verifySource(source, cfg, res));
     return res;
 }
 
@@ -316,7 +467,7 @@ test "reg classes: compact inputs preserve allocation, calls and split positions
         defer arena.deinit();
         for ([_]Class{ .gp, .fp }) |class| {
             const plain = try buildFunc(arena.allocator(), &f, ty, class, true);
-            const compact = try buildInput(true, arena.allocator(), &f, ty, class, true);
+            const compact = try buildInput(true, arena.allocator(), &f, ty, class, true, null);
             try t.expectEqual(plain.blocks.len, compact.blocks.len);
             for (plain.blocks, compact.blocks) |a, b| {
                 try t.expectEqualSlices(u32, a.succs, b.succs);
@@ -336,6 +487,9 @@ test "reg classes: compact inputs preserve allocation, calls and split positions
                 defer b.deinit(t.allocator);
                 try t.expectEqualDeep(a, b);
                 try t.expect(ra.verify(plain, cfg, b));
+                var direct = try allocateClass(t.allocator, &f, ty, class, true, cfg);
+                defer direct.deinit(t.allocator);
+                try t.expectEqualDeep(a, direct);
             };
         }
     }

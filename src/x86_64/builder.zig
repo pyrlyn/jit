@@ -112,51 +112,57 @@ pub const Instr = union(enum) {
     pub const special: []const []const u8 = &.{ "aluRR", "aluRM", "aluMR", "aluRI", "shiftRCl", "idivR", "cqo", "jcc", "jmp8", "jmp32", "jcc8", "jcc32", "sseRR", "sseRM", "sseMR", "movqXR", "movqRX", "cvtFromInt", "cvtToInt", "setcc", "movzxB" };
     pub fn emitSpecial(a: anytype, i: Instr, labels: []const core.Label) !void {
         switch (i) {
-            .aluRR => |o| switch (o[0]) {
+            inline else => |o, tag| try emitSpecialTyped(a, tag, o, labels),
+        }
+    }
+    /// Typed variant for append-only compiler emission: select the emitter at comptime.
+    pub inline fn emitSpecialTyped(a: anytype, comptime tag: std.meta.Tag(Instr), o: @FieldType(Instr, @tagName(tag)), labels: []const core.Label) !void {
+        switch (tag) {
+            .aluRR => switch (o[0]) {
                 inline else => |op| try a.aluRR(op, o[1], o[2]),
             },
-            .aluRM => |o| switch (o[0]) {
+            .aluRM => switch (o[0]) {
                 inline else => |op| try a.aluRM(op, o[1], o[2]),
             },
-            .aluMR => |o| switch (o[0]) {
+            .aluMR => switch (o[0]) {
                 inline else => |op| try a.aluMR(op, o[1], o[2]),
             },
-            .aluRI => |o| switch (o[0]) {
+            .aluRI => switch (o[0]) {
                 inline else => |op| try a.aluRI(op, o[1], o[2]),
             },
-            .shiftRCl => |o| switch (o[0]) {
+            .shiftRCl => switch (o[0]) {
                 inline else => |op| a.inst(@field(gp.Mnemonic, @tagName(op)), .{ gp.r64(o[1]), gp.r8(.rcx) }) catch |e| return mapGp(e),
             },
-            .idivR => |o| a.inst(.idiv, .{gp.r64(o[0])}) catch |e| return mapGp(e),
+            .idivR => a.inst(.idiv, .{gp.r64(o[0])}) catch |e| return mapGp(e),
             .cqo => a.inst(.cqo, .{}) catch |e| return mapGp(e),
-            .jcc => |o| switch (o[0]) {
+            .jcc => switch (o[0]) {
                 inline else => |c| try a.jcc(c, labels[o[1].id]),
             },
-            .sseRR => |o| switch (o[0]) {
+            .sseRR => switch (o[0]) {
                 inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.xmm(o[2]) }, .{}),
             },
-            .sseRM => |o| switch (o[0]) {
+            .sseRM => switch (o[0]) {
                 inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.mem(o[2], if (op == .movss) 4 else 8) }, .{}),
             },
-            .sseMR => |o| switch (o[0]) {
+            .sseMR => switch (o[0]) {
                 inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.mem(o[1], if (op == .movss) 4 else 8), vec.xmm(o[2]) }, .{}),
             },
-            .movqXR => |o| try a.vinst(.movq, .{ vec.xmm(o[0]), gp.r64(o[1]) }, .{}),
-            .movqRX => |o| try a.vinst(.movq, .{ gp.r64(o[0]), vec.xmm(o[1]) }, .{}),
-            .cvtFromInt => |o| switch (o[0]) {
+            .movqXR => try a.vinst(.movq, .{ vec.xmm(o[0]), gp.r64(o[1]) }, .{}),
+            .movqRX => try a.vinst(.movq, .{ gp.r64(o[0]), vec.xmm(o[1]) }, .{}),
+            .cvtFromInt => switch (o[0]) {
                 inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), gp.r64(o[2]) }, .{}),
             },
-            .cvtToInt => |o| switch (o[0]) {
+            .cvtToInt => switch (o[0]) {
                 inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ gp.r64(o[1]), vec.xmm(o[2]) }, .{}),
             },
-            .setcc => |o| switch (o[0]) {
+            .setcc => switch (o[0]) {
                 inline else => |c| a.setcc(c, o[1]) catch |e| return mapGp(e),
             },
-            .movzxB => |o| a.movzx(.byte, o[0], o[1]) catch |e| return mapGp(e),
-            .jmp8 => |o| try rawBranch(a.buf, &.{0xEB}, true, labels[o[0].id]),
-            .jmp32 => |o| try rawBranch(a.buf, &.{0xE9}, false, labels[o[0].id]),
-            .jcc8 => |o| try rawBranch(a.buf, &.{0x70 + @as(u8, @backingInt(o[0]))}, true, labels[o[1].id]),
-            .jcc32 => |o| try rawBranch(a.buf, &.{ 0x0F, 0x80 + @as(u8, @backingInt(o[0])) }, false, labels[o[1].id]),
+            .movzxB => a.movzx(.byte, o[0], o[1]) catch |e| return mapGp(e),
+            .jmp8 => try rawBranch(a.buf, &.{0xEB}, true, labels[o[0].id]),
+            .jmp32 => try rawBranch(a.buf, &.{0xE9}, false, labels[o[0].id]),
+            .jcc8 => try rawBranch(a.buf, &.{0x70 + @as(u8, @backingInt(o[0]))}, true, labels[o[1].id]),
+            .jcc32 => try rawBranch(a.buf, &.{ 0x0F, 0x80 + @as(u8, @backingInt(o[0])) }, false, labels[o[1].id]),
             else => unreachable,
         }
     }

@@ -100,6 +100,21 @@ inline fn defs(f: anytype, in: anytype) []const VReg {
     return f.operands[@as(usize, in.offset) + in.nuses ..][0..in.ndefs];
 }
 
+inline fn isCall(f: anytype, b: anytype, i: usize) bool {
+    if (@hasDecl(@TypeOf(f), "isCall")) return f.isCall(b, i);
+    return b.insts[i].is_call;
+}
+
+/// Compiler-only linear input: collectBlock visits operands at their original
+/// positions, and isCall reads the tag without materializing operand lists.
+pub fn allocateLinearSource(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Result {
+    std.debug.assert(cfg.algo == .linear and !cfg.split);
+    return allocateLinearInput(gpa, f, cfg);
+}
+pub fn verifySource(f: anytype, cfg: Config, r: Result) bool {
+    return verifyInput(f, cfg, r);
+}
+
 pub const Config = struct {
     /// Registers available for allocation (bit i = physical register i).
     allocatable: RegMask,
@@ -249,34 +264,48 @@ fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals:
     const out = try gpa.alloc(W, (nb + 1) * nw);
     errdefer gpa.free(out);
     @memset(out, 0);
+    const Collector = struct {
+        g: []W,
+        k: []W,
+        iv: []Interval,
+        n: u32,
+        first: u32,
+        pos: u32,
+        pub inline fn use(c: *@This(), u: VReg) Error!void {
+            if (u >= c.n) return error.InvalidFunc;
+            const bit = @as(W, 1) << @intCast(u % bits);
+            const exposed = c.k[u / bits] & bit == 0;
+            c.g[u / bits] |= bit & ~c.k[u / bits];
+            if (with_intervals) {
+                c.iv[u].start = @min(c.iv[u].start, 2 * (if (exposed) c.first else c.pos));
+                c.iv[u].end = 2 * c.pos;
+            }
+        }
+        pub inline fn def(c: *@This(), d: VReg) Error!void {
+            if (d >= c.n) return error.InvalidFunc;
+            c.k[d / bits] |= @as(W, 1) << @intCast(d % bits);
+            if (with_intervals) {
+                c.iv[d].start = @min(c.iv[d].start, 2 * c.pos + 1);
+                c.iv[d].end = 2 * c.pos + 1;
+            }
+        }
+        pub inline fn next(c: *@This()) void {
+            c.pos += 1;
+        }
+    };
     var pos: u32 = 0;
     for (f.blocks, 0..) |b, bi| {
-        const first = pos;
-        const g = gen[bi * nw ..][0..nw];
-        const k = kill[bi * nw ..][0..nw];
-        for (b.insts) |in| {
-            for (uses(f, in)) |u| {
-                if (u >= f.num_vregs) return error.InvalidFunc;
-                const bit = @as(W, 1) << @intCast(u % bits);
-                const exposed = k[u / bits] & bit == 0;
-                g[u / bits] |= bit & ~k[u / bits];
-                if (with_intervals) {
-                    // Positions increase during this walk, so the latest occurrence
-                    // is always the local end; an exposed use starts at block entry.
-                    iv[u].start = @min(iv[u].start, 2 * (if (exposed) first else pos));
-                    iv[u].end = 2 * pos;
-                }
+        var c: Collector = .{ .g = gen[bi * nw ..][0..nw], .k = kill[bi * nw ..][0..nw], .iv = iv, .n = f.num_vregs, .first = pos, .pos = pos };
+        if (@hasDecl(@TypeOf(f), "collectBlock")) {
+            try f.collectBlock(b, &c);
+        } else {
+            for (b.insts) |in| {
+                for (uses(f, in)) |u| try c.use(u);
+                for (defs(f, in)) |d| try c.def(d);
+                c.next();
             }
-            for (defs(f, in)) |d| {
-                if (d >= f.num_vregs) return error.InvalidFunc;
-                k[d / bits] |= @as(W, 1) << @intCast(d % bits);
-                if (with_intervals) {
-                    iv[d].start = @min(iv[d].start, 2 * pos + 1);
-                    iv[d].end = 2 * pos + 1;
-                }
-            }
-            pos += 1;
         }
+        pos = c.pos;
     }
     var changed = true;
     while (changed) {
@@ -512,9 +541,10 @@ fn note(first: []u32, last: []u32, cnt: []u32, first_is_use: []bool, v: VReg, p:
 
 fn callPositions(gpa: std.mem.Allocator, f: anytype) Error!std.ArrayList(u32) {
     var calls: std.ArrayList(u32) = .empty;
+    errdefer calls.deinit(gpa);
     var pos: u32 = 0;
-    for (f.blocks) |b| for (b.insts) |in| {
-        if (in.is_call) try calls.append(gpa, pos);
+    for (f.blocks) |b| for (0..b.insts.len) |ii| {
+        if (isCall(f, b, ii)) try calls.append(gpa, pos);
         pos += 1;
     };
     return calls;
@@ -742,15 +772,8 @@ fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Re
     errdefer gpa.free(locs);
     @memset(locs, .none);
 
-    var calls: std.ArrayList(u32) = .empty;
+    var calls = try callPositions(gpa, f);
     defer calls.deinit(gpa);
-    {
-        var pos: u32 = 0;
-        for (f.blocks) |b| for (b.insts) |in| {
-            if (in.is_call) try calls.append(gpa, pos);
-            pos += 1;
-        };
-    }
 
     // Fixed intervals per register.
     var fixed_iv: std.ArrayList(Interval) = .empty;
@@ -769,12 +792,12 @@ fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Re
     };
 
     // Unhandled intervals sorted by start.
-    var order: std.ArrayList(Interval) = .empty;
+    var order = try std.ArrayList(Interval).initCapacity(gpa, f.num_vregs);
     defer order.deinit(gpa);
     for (iv, 0..) |x, v| {
         if (x.start == none) continue;
         if (f.fixed.len > v and f.fixed[v] != null) continue;
-        try order.append(gpa, x);
+        order.appendAssumeCapacity(x);
     }
     std.mem.sort(Interval, order.items, {}, struct {
         fn lt(_: void, a: Interval, b: Interval) bool {
@@ -782,8 +805,9 @@ fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Re
         }
     }.lt);
 
-    var active: std.ArrayList(Interval) = .empty; // sorted by end
-    defer active.deinit(gpa);
+    // At most one active interval per physical register; no heap growth is needed.
+    var active_buf: [@bitSizeOf(RegMask)]Interval = undefined;
+    var active: std.ArrayList(Interval) = .initBuffer(&active_buf); // sorted by end
     var free_slots: std.ArrayList(SlotUse) = .empty;
     defer free_slots.deinit(gpa);
     var slot_in_use: std.ArrayList(SlotUse) = .empty;
@@ -909,8 +933,8 @@ pub fn verifyCompact(f: CompactFunc, cfg: Config, r: Result) bool {
 
 fn verifyInput(f: anytype, cfg: Config, r: Result) bool {
     var pos: u32 = 0;
-    for (f.blocks) |b| for (b.insts) |in| {
-        if (in.is_call) for (r.intervals) |x| {
+    for (f.blocks) |b| for (0..b.insts.len) |ii| {
+        if (isCall(f, b, ii)) for (r.intervals) |x| {
             if (x.start == none) continue;
             if (x.start < 2 * pos and x.end > 2 * pos + 1) switch (r.locs[x.vreg]) {
                 .reg => |reg| if (cfg.callee_saved & (@as(RegMask, 1) << @intCast(reg)) == 0) {
@@ -928,8 +952,8 @@ fn verifyInput(f: anytype, cfg: Config, r: Result) bool {
         for (r.intervals, 0..) |w, wi| if (w.start != none and overlaps(w, span) and r.locs[wi] == .reg and r.locs[wi].reg == sg.reg) return false;
         for (r.segs[i + 1 ..]) |o| if (o.reg == sg.reg and o.first <= sg.last and sg.first <= o.last) return false;
         var cp: u32 = 0;
-        for (f.blocks) |b| for (b.insts) |in| {
-            if (in.is_call and (sg.first < cp or (sg.first == cp and sg.load)) and cp < sg.last and cfg.callee_saved & (@as(RegMask, 1) << @intCast(sg.reg)) == 0) return false;
+        for (f.blocks) |b| for (0..b.insts.len) |ii| {
+            if (isCall(f, b, ii) and (sg.first < cp or (sg.first == cp and sg.load)) and cp < sg.last and cfg.callee_saved & (@as(RegMask, 1) << @intCast(sg.reg)) == 0) return false;
             cp += 1;
         };
     }

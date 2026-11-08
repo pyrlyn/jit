@@ -381,26 +381,100 @@ pub const Func = struct {
                 };
             }
         };
+        // Validate known operands during inference. For forward references retain one
+        // type constraint per vreg, then check it after the copy/edge fixpoint.
+        const required = try gpa.alloc(?Type, ty.len);
+        defer gpa.free(required);
+        @memset(required, null);
+        const T = struct {
+            inline fn is(types: []const ?Type, need: []?Type, v: VReg, want: Type) error{TypeMismatch}!void {
+                if (types[v]) |have| {
+                    if (have != want) return error.TypeMismatch;
+                } else {
+                    _ = try set(need, v, want);
+                }
+            }
+        };
         var ch = false;
-        for (f.blocks.items, 0..) |b, bi| for (b.ops.items, 0..) |*o, oi| {
-            const r: ?struct { VReg, Type } = switch (o.*) {
-                .@"const" => |x| .{ x.dst, .i64 },
-                .arith => |x| .{ x.dst, .i64 },
-                .call => |x| .{ x.dst, .i64 },
-                .load => |x| .{ x.dst, x.ty },
-                .fconst => |x| .{ x.dst, x.ty },
-                .typed => |x| .{ x.dst, x.ty },
-                .fcmp => |x| .{ x.dst, .i64 },
-                .cvt => |x| .{ x.dst, x.to },
-                .splat => |x| .{ x.dst, x.ty },
-                .extract => |x| .{ x.dst, x.ty.lane() },
-                .copy, .bra, .cbra => blk: {
-                    if (try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
-                    break :blk null;
-                },
-                else => null,
-            };
-            if (r) |d| _ = try set(ty, d[0], d[1]);
+        for (f.blocks.items, 0..) |b, bi| for (b.ops.items, 0..) |*o, oi| switch (o.*) {
+            .@"const" => |x| {
+                _ = try set(ty, x.dst, .i64);
+            },
+            .copy, .bra => {
+                if (try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
+            },
+
+            .arith => |x| {
+                _ = try set(ty, x.dst, .i64);
+                try T.is(ty, required, x.a, .i64);
+                try T.is(ty, required, x.b, .i64);
+            },
+            .cbr => |x| {
+                try T.is(ty, required, x.a, .i64);
+                try T.is(ty, required, x.b, .i64);
+            },
+            .cbra => |x| {
+                if (try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
+                try T.is(ty, required, x.a, .i64);
+                try T.is(ty, required, x.b, .i64);
+            },
+            .ret => |v| try T.is(ty, required, v, .i64),
+            .call => |x| {
+                _ = try set(ty, x.dst, .i64);
+                for (x.args) |arg| try T.is(ty, required, arg, .i64);
+            },
+            .load => |x| {
+                _ = try set(ty, x.dst, x.ty);
+                try T.is(ty, required, x.base, .i64);
+            },
+            .store => |x| {
+                try T.is(ty, required, x.base, .i64);
+                try T.is(ty, required, x.src, x.ty);
+            },
+            .fconst => |x| {
+                _ = try set(ty, x.dst, x.ty);
+                if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
+            },
+            .typed => |x| {
+                _ = try set(ty, x.dst, x.ty);
+                if (x.ty == .i64) return error.TypeMismatch;
+                const fl = x.ty.isFloat();
+                switch (x.op) {
+                    .div, .min, .max => if (!fl) return error.TypeMismatch,
+                    .@"and", .@"or", .xor => if (fl) return error.TypeMismatch,
+                    else => {},
+                }
+                try T.is(ty, required, x.a, x.ty);
+                try T.is(ty, required, x.b, x.ty);
+            },
+            .fcmp => |x| {
+                _ = try set(ty, x.dst, .i64);
+                if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
+                try T.is(ty, required, x.a, x.ty);
+                try T.is(ty, required, x.b, x.ty);
+            },
+            .cvt => |x| {
+                _ = try set(ty, x.dst, x.to);
+                const ok = switch (x.to) {
+                    .i64 => x.from == .f32 or x.from == .f64,
+                    .f32 => x.from == .i64 or x.from == .f64,
+                    .f64 => x.from == .i64 or x.from == .f32,
+                    else => false,
+                };
+                if (!ok) return error.TypeMismatch;
+                try T.is(ty, required, x.src, x.from);
+            },
+            .splat => |x| {
+                _ = try set(ty, x.dst, x.ty);
+                if (!x.ty.isVector()) return error.TypeMismatch;
+                try T.is(ty, required, x.src, x.ty.lane());
+            },
+            .extract => |x| {
+                _ = try set(ty, x.dst, x.ty.lane());
+                if (!x.ty.isVector() or x.lane >= x.ty.lanes()) return error.TypeMismatch;
+                try T.is(ty, required, x.src, x.ty);
+            },
+            else => {},
         };
         // Another round only if the previous one typed some vreg.
         ch = true;
@@ -415,69 +489,10 @@ pub const Func = struct {
         }
         const out = try gpa.alloc(Type, @max(f.num_vregs, 1));
         errdefer gpa.free(out);
-        for (ty, 0..) |t_, i| out[i] = t_ orelse .i64; // never defined: reads as i64 0
-        const T = struct {
-            fn is(o_: []const Type, v: VReg, want: Type) error{TypeMismatch}!void {
-                if (o_[v] != want) return error.TypeMismatch;
-            }
-        };
-        for (f.blocks.items) |b| for (b.ops.items) |o| switch (o) {
-            .arith => |x| {
-                try T.is(out, x.a, .i64);
-                try T.is(out, x.b, .i64);
-            },
-            .cbr => |x| {
-                try T.is(out, x.a, .i64);
-                try T.is(out, x.b, .i64);
-            },
-            .cbra => |x| {
-                try T.is(out, x.a, .i64);
-                try T.is(out, x.b, .i64);
-            },
-            .ret => |v| try T.is(out, v, .i64),
-            .call => |x| for (x.args) |a| try T.is(out, a, .i64),
-            .load => |x| try T.is(out, x.base, .i64),
-            .store => |x| {
-                try T.is(out, x.base, .i64);
-                try T.is(out, x.src, x.ty);
-            },
-            .fconst => |x| if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch,
-            .typed => |x| {
-                if (x.ty == .i64) return error.TypeMismatch;
-                const fl = x.ty.isFloat();
-                switch (x.op) {
-                    .div, .min, .max => if (!fl) return error.TypeMismatch,
-                    .@"and", .@"or", .xor => if (fl) return error.TypeMismatch,
-                    else => {},
-                }
-                try T.is(out, x.a, x.ty);
-                try T.is(out, x.b, x.ty);
-            },
-            .fcmp => |x| {
-                if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
-                try T.is(out, x.a, x.ty);
-                try T.is(out, x.b, x.ty);
-            },
-            .cvt => |x| {
-                const ok = switch (x.to) {
-                    .i64 => x.from == .f32 or x.from == .f64,
-                    .f32 => x.from == .i64 or x.from == .f64,
-                    .f64 => x.from == .i64 or x.from == .f32,
-                    else => false,
-                };
-                if (!ok) return error.TypeMismatch;
-                try T.is(out, x.src, x.from);
-            },
-            .splat => |x| {
-                if (!x.ty.isVector()) return error.TypeMismatch;
-                try T.is(out, x.src, x.ty.lane());
-            },
-            .extract => |x| {
-                if (!x.ty.isVector() or x.lane >= x.ty.lanes()) return error.TypeMismatch;
-                try T.is(out, x.src, x.ty);
-            },
-            else => {},
-        };
+        for (ty, required, 0..) |t_, need, i| {
+            out[i] = t_ orelse .i64; // never defined: reads as i64 0
+            if (need) |want| if (out[i] != want) return error.TypeMismatch;
+        }
         return out;
     }
 
@@ -1219,4 +1234,29 @@ test "ir: interpreter calls with more than 6 arguments" {
     try f.emit(e, .{ .ret = 1 });
     try f.verify();
     try std.testing.expectEqual(@as(i64, 28), try interpret(&f, &.{1}, 100));
+}
+
+test "ir: operand constraints survive forward copies and undefined defaults" {
+    var f = try parse(t.allocator,
+        \\func forward 0
+        \\e:
+        \\  v1 = copy v2
+        \\  v3 = add.f64 v1 v2
+        \\  v2 = fconst.f64 1
+        \\  v0 = cvt.i64.f64 v3
+        \\  ret v0
+    );
+    defer f.deinit();
+    const ty = try f.typeCheck(t.allocator);
+    defer t.allocator.free(ty);
+    try t.expectEqualSlices(Type, &.{ .i64, .f64, .f64, .f64 }, ty);
+    for ([_][]const u8{
+        "func f 0\ne:\n v0 = add.f64 v1 v1\n v2 = cvt.i64.f64 v0\n ret v2\n", // undefined source defaults to i64
+        "func f 0\ne:\n v0 = add v1 v1\n v2 = add.f64 v1 v1\n v1 = fconst.f64 1\n ret v0\n", // conflicting forward uses
+        "func f 0\ne:\n v0 = copy v1\n v1 = copy v0\n v2 = add.f64 v0 v1\n v3 = cvt.i64.f64 v2\n ret v3\n", // untyped copy cycle
+    }) |src| {
+        var bad = try parse(t.allocator, src);
+        defer bad.deinit();
+        try t.expectError(error.TypeMismatch, bad.typeCheck(t.allocator));
+    }
 }
