@@ -404,3 +404,17 @@ test "v1: random programs match the interpreter on the host (fuzz)" {
         try checkHost(f, &sets);
     }
 }
+
+test "v1 decoder: no leak on any allocation failure" {
+    const bytes = try bc.encode(t.allocator, .{ .arg_count = 1, .version = bc.version_v1, .insts = &.{
+        .{ .push_arg = 0 }, .{ .push_i64 = 2 }, .add, .ret,
+    } });
+    defer t.allocator.free(bytes);
+    try t.checkAllAllocationFailures(t.allocator, struct {
+        fn f(gpa: std.mem.Allocator, b: []const u8) !void {
+            var d: bc.Diagnostic = .{};
+            const g = try bc.decode(gpa, b, &d);
+            g.deinit(gpa);
+        }
+    }.f, .{bytes});
+}

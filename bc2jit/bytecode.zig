@@ -293,8 +293,12 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, diag: *Diagnostic) Erro
     if (list.items.len == 0) return error.MissingRet;
     var f: Function = .{ .arg_count = arg_count, .insts = list.items, .version = ver, .offsets = offs.items };
     const depths = try flow(gpa, f, code.len, diag);
+    errdefer gpa.free(depths);
+    const offsets = try offs.toOwnedSlice(gpa);
+    errdefer gpa.free(offsets);
+    // Last, so a failure here leaves `list` to its errdefer and nothing else owned.
     f.insts = try list.toOwnedSlice(gpa);
-    f.offsets = try offs.toOwnedSlice(gpa);
+    f.offsets = offsets;
     f.depths = depths;
     return f;
 }

@@ -384,6 +384,133 @@ pub fn shortenBranches(b: *Builder) !void {
     }
 }
 
+/// `shortenBranches` followed by `serialize` through a validating Assembler into `cb`, with
+/// every instruction encoded once instead of twice (same bytes; call `cb.finalize()` after).
+/// 1. Every non-branch node is encoded at a compact offset (branches, labels and padding take
+///    no space yet), which gives its size.
+/// 2. Branch relaxation over those sizes, as in `shortenBranches`, gives final offsets.
+/// 3. Back to front, each node moves to its final offset (never before its compact one) and
+///    branches, padding and label bindings are emitted there; fixups of moved instructions
+///    are shifted with them.
+/// One u32 per node: the size of an instruction or embed, or the final offset of any other
+/// node (those take no space in the compact layout).
+pub fn serializeShortened(b: *Builder, cb: *CodeBuffer) !void {
+    const slot = try b.gpa.alloc(u32, b.nodes.items.len);
+    defer b.gpa.free(slot);
+    const labels = try b.gpa.alloc(core.Label, b.label_node.items.len);
+    defer b.gpa.free(labels);
+    for (labels) |*l| l.* = try cb.newLabel();
+    const a = x.AssemblerT(.{ .validate = true }).init(cb);
+    const fix0 = cb.fixups.items.len;
+    const start = cb.offset();
+    const isBranch = struct {
+        inline fn f(d: Node.Data) bool {
+            return d == .inst and switch (d.inst) {
+                .jmp8, .jcc8, .jmp32, .jcc32 => true,
+                else => false,
+            };
+        }
+    }.f;
+    var it = b.first;
+    while (it != Node.none) : (it = b.nodes.items[it].next) {
+        const p = &b.nodes.items[it];
+        const at = cb.offset();
+        switch (p.data) {
+            .inst => |*in| switch (in.*) {
+                .jmp, .jmp32 => |o| in.* = .{ .jmp8 = o },
+                .jcc, .jcc32 => |o| in.* = .{ .jcc8 = o },
+                .jmp8, .jcc8 => {},
+                else => try Builder.emitInst(a, in.*, labels),
+            },
+            .embed => |e| try cb.emitBytes(b.slice(e.off, e.len)),
+            else => {},
+        }
+        slot[it] = cb.offset() - at;
+    }
+    const compact_end = cb.offset();
+    const fix_end = cb.fixups.items.len;
+    var end = start;
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var off = start;
+        it = b.first;
+        while (it != Node.none) : (it = b.nodes.items[it].next) {
+            const d = b.nodes.items[it].data;
+            switch (d) {
+                .inst => |in| switch (in) {
+                    .jmp8, .jcc8, .jmp32, .jcc32 => {
+                        slot[it] = off;
+                        off += switch (in) {
+                            .jmp8, .jcc8 => 2,
+                            .jmp32 => 5,
+                            else => 6,
+                        };
+                    },
+                    else => off += slot[it],
+                },
+                .embed => off += slot[it],
+                .@"align" => |al| {
+                    slot[it] = off;
+                    off += (al.boundary - (off & (al.boundary - 1))) & (al.boundary - 1);
+                },
+                .label, .comment => slot[it] = off,
+            }
+        }
+        end = off;
+        it = b.first;
+        while (it != Node.none) : (it = b.nodes.items[it].next) {
+            const p = &b.nodes.items[it];
+            if (p.data != .inst) continue;
+            const in = &p.data.inst;
+            if (in.* != .jmp8 and in.* != .jcc8) continue;
+            const ln = b.label_node.items[in.target().?.id];
+            if (ln == Node.none) return error.UnboundLabel;
+            const disp: i64 = @as(i64, slot[ln]) - @as(i64, slot[it] + 2);
+            if (std.math.cast(i8, disp) == null) {
+                in.* = switch (in.*) {
+                    .jmp8 => |o| .{ .jmp32 = o },
+                    .jcc8 => |o| .{ .jcc32 = o },
+                    else => unreachable,
+                };
+                changed = true;
+            }
+        }
+    }
+    // Capacity for the final size now: emitting at `len = offset` below must never grow the
+    // buffer (growth only keeps the bytes below `len`).
+    try cb.ensure(end - compact_end);
+    var k = fix_end;
+    var next_off = end; // final offset of the node after `it`
+    var cpos = compact_end; // compact offset of the node after `it`
+    it = b.last;
+    while (it != Node.none) : (it = b.nodes.items[it].prev) {
+        const d = b.nodes.items[it].data;
+        if (d == .inst and !isBranch(d) or d == .embed) {
+            const sz = slot[it];
+            const off = next_off - sz;
+            cpos -= sz;
+            std.mem.copyBackwards(u8, cb.data[off..][0..sz], cb.data[cpos..][0..sz]);
+            const shift = off - cpos;
+            while (k > fix0 and cb.fixups.items[k - 1].at >= cpos) : (k -= 1) {
+                cb.fixups.items[k - 1].at += shift;
+                cb.fixups.items[k - 1].base += shift;
+            }
+            next_off = off;
+            continue;
+        }
+        cb.len = slot[it];
+        switch (d) {
+            .inst => |in| try Builder.emitInst(a, in, labels),
+            .label => |l| try a.bind(labels[l.id]),
+            .@"align" => |al| if (al.nop) try a.alignNop(al.boundary) else try a.alignTrap(al.boundary),
+            .comment, .embed => {},
+        }
+        next_off = slot[it];
+    }
+    cb.len = end;
+}
+
 // ---- tests ----------------------------------------------------------------------------
 const t = std.testing;
 
@@ -637,4 +764,56 @@ test "builder: scalar SSE nodes encode like LLVM" {
     defer txt.deinit(std.testing.allocator);
     try formatInstImpl(std.testing.allocator, &txt, .{ .sseRR = .{ .addsd, 1, 2 } });
     try std.testing.expectEqualStrings("addsd xmm1, xmm2", txt.items);
+}
+
+test "x64 builder: serializeShortened matches shortenBranches + serialize" {
+    // Short and long forward/backward branches, an alignment, embedded bytes, a call to a
+    // label (a fixup inside a moved instruction) and a non-empty buffer to start with.
+    const build = struct {
+        fn f(b: *Builder) !void {
+            const top = try b.newLabel();
+            const far = try b.newLabel();
+            const near = try b.newLabel();
+            const func = try b.newLabel();
+            try b.bind(top);
+            try b.emit(.call, .{func});
+            try b.emit(.jcc, .{ .e, near });
+            try b.emit(.jmp, .{far});
+            try b.bind(near);
+            for (0..40) |_| try b.emit(.addRI, .{ .rax, 0x12345 });
+            try b.alignNop(16);
+            try b.embed(&.{ 0xAA, 0xBB, 0xCC });
+            try b.emit(.jcc, .{ .ne, top });
+            try b.emit(.jmp, .{near});
+            try b.bind(far);
+            try b.add(.ret);
+            try b.alignTrap(8);
+            try b.bind(func);
+            try b.emit(.movRR, .{ .rax, .rcx });
+            try b.add(.ret);
+        }
+    }.f;
+    for ([_]usize{ 0, 5 }) |pre| {
+        var b1 = Builder.init(t.allocator);
+        defer b1.deinit();
+        try build(&b1);
+        try shortenBranches(&b1);
+        var want = CodeBuffer.init(t.allocator);
+        defer want.deinit();
+        for (0..pre) |_| try want.emitBytes(&.{0x90});
+        try b1.serialize(x.AssemblerT(.{ .validate = true }).init(&want));
+        try want.finalize();
+
+        var b2 = Builder.init(t.allocator);
+        defer b2.deinit();
+        try build(&b2);
+        var got = CodeBuffer.init(t.allocator);
+        defer got.deinit();
+        for (0..pre) |_| try got.emitBytes(&.{0x90});
+        try serializeShortened(&b2, &got);
+        try got.finalize();
+        if (pre == 0) try t.expectEqualSlices(u8, want.code(), got.code());
+        // With a prefix, alignment is taken from the absolute offset (here 5) in both.
+        try t.expectEqual(want.code().len, got.code().len);
+    }
 }

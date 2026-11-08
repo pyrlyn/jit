@@ -19,6 +19,15 @@ const VReg = ir.VReg;
 /// Errors from `toIr` / `lowerIr`.
 pub const Error = error{ OutOfMemory, BackendNotBuilt, CompileFailed };
 
+/// `ir.Func.emit` also rejects over-long argument lists and the reserved vreg; lowering never
+/// produces either, so they are reported as `CompileFailed`.
+fn emit(g: *ir.Func, b: u32, op: ir.Op) Error!void {
+    g.emit(b, op) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.TooManyArgs, error.BadVReg => error.CompileFailed,
+    };
+}
+
 const Layout = struct {
     args: u32,
     fn local(l: Layout, n: u8) VReg {
@@ -91,33 +100,33 @@ pub fn toIr(gpa: std.mem.Allocator, f: bc.Function) Error!ir.Func {
     for (0..n) |i| if (leader[i]) {
         block_of[i] = try g.addBlock(try std.fmt.allocPrint(A, "b{d}", .{i}));
     };
-    for (0..bc.max_locals) |k| try g.emit(entry, .{ .@"const" = .{ .dst = L.local(@intCast(k)), .imm = 0 } });
-    try g.emit(entry, .{ .br = block_of[0].? });
+    for (0..bc.max_locals) |k| try emit(&g, entry, .{ .@"const" = .{ .dst = L.local(@intCast(k)), .imm = 0 } });
+    try emit(&g, entry, .{ .br = block_of[0].? });
 
     var cur: u32 = entry;
     var extra: u32 = 0;
     for (f.insts, 0..) |inst, i| {
         if (block_of[i]) |b| {
             // Fall-through from the previous instruction into a leader.
-            if (i != 0 and !isTerminator(f.insts[i - 1])) try g.emit(cur, .{ .br = b });
+            if (i != 0 and !isTerminator(f.insts[i - 1])) try emit(&g, cur, .{ .br = b });
             cur = b;
         }
         const d: usize = depth[i];
         switch (inst) {
-            .push_i64 => |v| try g.emit(cur, .{ .@"const" = .{ .dst = L.slot(d), .imm = v } }),
-            .push_arg => |a| try g.emit(cur, .{ .copy = .{ .dst = L.slot(d), .src = a } }),
-            .dup => try g.emit(cur, .{ .copy = .{ .dst = L.slot(d), .src = L.slot(d - 1) } }),
+            .push_i64 => |v| try emit(&g, cur, .{ .@"const" = .{ .dst = L.slot(d), .imm = v } }),
+            .push_arg => |a| try emit(&g, cur, .{ .copy = .{ .dst = L.slot(d), .src = a } }),
+            .dup => try emit(&g, cur, .{ .copy = .{ .dst = L.slot(d), .src = L.slot(d - 1) } }),
             .drop => {},
             .swap => {
-                try g.emit(cur, .{ .copy = .{ .dst = L.tmp(), .src = L.slot(d - 1) } });
-                try g.emit(cur, .{ .copy = .{ .dst = L.slot(d - 1), .src = L.slot(d - 2) } });
-                try g.emit(cur, .{ .copy = .{ .dst = L.slot(d - 2), .src = L.tmp() } });
+                try emit(&g, cur, .{ .copy = .{ .dst = L.tmp(), .src = L.slot(d - 1) } });
+                try emit(&g, cur, .{ .copy = .{ .dst = L.slot(d - 1), .src = L.slot(d - 2) } });
+                try emit(&g, cur, .{ .copy = .{ .dst = L.slot(d - 2), .src = L.tmp() } });
             },
-            .load_local => |k| try g.emit(cur, .{ .copy = .{ .dst = L.slot(d), .src = L.local(k) } }),
-            .store_local => |k| try g.emit(cur, .{ .copy = .{ .dst = L.local(k), .src = L.slot(d - 1) } }),
-            .jmp => |tg| try g.emit(cur, .{ .br = block_of[f.indexOf(tg).?].? }),
-            .br_if => |x| try g.emit(cur, .{ .cbr = .{ .cond = irCond(x.cond), .a = L.slot(d - 2), .b = L.slot(d - 1), .then = block_of[f.indexOf(x.target).?].?, .@"else" = block_of[i + 1].? } }),
-            .ret => try g.emit(cur, .{ .ret = L.slot(d - 1) }),
+            .load_local => |k| try emit(&g, cur, .{ .copy = .{ .dst = L.slot(d), .src = L.local(k) } }),
+            .store_local => |k| try emit(&g, cur, .{ .copy = .{ .dst = L.local(k), .src = L.slot(d - 1) } }),
+            .jmp => |tg| try emit(&g, cur, .{ .br = block_of[f.indexOf(tg).?].? }),
+            .br_if => |x| try emit(&g, cur, .{ .cbr = .{ .cond = irCond(x.cond), .a = L.slot(d - 2), .b = L.slot(d - 1), .then = block_of[f.indexOf(x.target).?].?, .@"else" = block_of[i + 1].? } }),
+            .ret => try emit(&g, cur, .{ .ret = L.slot(d - 1) }),
             .div, .rem => {
                 // Guards make division total: b == 0 -> (0 | a), b == -1 -> (-a | 0), else sdiv/srem.
                 const a = L.slot(d - 2);
@@ -134,19 +143,19 @@ pub fn toIr(gpa: std.mem.Allocator, f: bc.Function) Error!ir.Func {
                 const nb = try g.addBlock(try name(A, i, &extra, "neg"));
                 const db = try g.addBlock(try name(A, i, &extra, "div"));
                 const join = try g.addBlock(try name(A, i, &extra, "join"));
-                try g.emit(cur, .{ .@"const" = .{ .dst = L.tmp(), .imm = 0 } });
-                try g.emit(cur, .{ .cbr = .{ .cond = .eq, .a = b, .b = L.tmp(), .then = zb, .@"else" = nb_chk } });
-                if (is_div) try g.emit(zb, .{ .@"const" = .{ .dst = a, .imm = 0 } }); // rem: a % 0 = a
-                try g.emit(zb, .{ .br = join });
-                try g.emit(nb_chk, .{ .@"const" = .{ .dst = L.tmp(), .imm = -1 } });
-                try g.emit(nb_chk, .{ .cbr = .{ .cond = .eq, .a = b, .b = L.tmp(), .then = nb, .@"else" = db } });
+                try emit(&g, cur, .{ .@"const" = .{ .dst = L.tmp(), .imm = 0 } });
+                try emit(&g, cur, .{ .cbr = .{ .cond = .eq, .a = b, .b = L.tmp(), .then = zb, .@"else" = nb_chk } });
+                if (is_div) try emit(&g, zb, .{ .@"const" = .{ .dst = a, .imm = 0 } }); // rem: a % 0 = a
+                try emit(&g, zb, .{ .br = join });
+                try emit(&g, nb_chk, .{ .@"const" = .{ .dst = L.tmp(), .imm = -1 } });
+                try emit(&g, nb_chk, .{ .cbr = .{ .cond = .eq, .a = b, .b = L.tmp(), .then = nb, .@"else" = db } });
                 if (is_div) {
-                    try g.emit(nb, .{ .@"const" = .{ .dst = L.tmp2(), .imm = 0 } });
-                    try g.emit(nb, .{ .arith = .{ .op = .sub, .dst = a, .a = L.tmp2(), .b = a } });
-                } else try g.emit(nb, .{ .@"const" = .{ .dst = a, .imm = 0 } });
-                try g.emit(nb, .{ .br = join });
-                try g.emit(db, .{ .arith = .{ .op = if (is_div) .sdiv else .srem, .dst = a, .a = a, .b = b } });
-                try g.emit(db, .{ .br = join });
+                    try emit(&g, nb, .{ .@"const" = .{ .dst = L.tmp2(), .imm = 0 } });
+                    try emit(&g, nb, .{ .arith = .{ .op = .sub, .dst = a, .a = L.tmp2(), .b = a } });
+                } else try emit(&g, nb, .{ .@"const" = .{ .dst = a, .imm = 0 } });
+                try emit(&g, nb, .{ .br = join });
+                try emit(&g, db, .{ .arith = .{ .op = if (is_div) .sdiv else .srem, .dst = a, .a = a, .b = b } });
+                try emit(&g, db, .{ .br = join });
                 cur = join;
             },
             else => {
@@ -162,7 +171,7 @@ pub fn toIr(gpa: std.mem.Allocator, f: bc.Function) Error!ir.Func {
                     .sar => .sar,
                     else => unreachable,
                 };
-                try g.emit(cur, .{ .arith = .{ .op = op, .dst = L.slot(d - 2), .a = L.slot(d - 2), .b = L.slot(d - 1) } });
+                try emit(&g, cur, .{ .arith = .{ .op = op, .dst = L.slot(d - 2), .a = L.slot(d - 2), .b = L.slot(d - 1) } });
             },
         }
     }

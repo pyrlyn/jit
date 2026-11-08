@@ -294,6 +294,18 @@ pub fn build(b: *std.Build) void {
         truncate.setCwd(b.path("."));
         upd_run.step.dependOn(&truncate.step);
         b.step("bench-update", "Re-measure and rewrite the benchmark baseline file").dependOn(&upd_run.step);
+
+        // IR Compiler time/memory (bench/compile_bench.zig), report only; PJIT_BENCH_MS = time budget per case.
+        const cbt = b.addExecutable(.{ .name = "compile_bench", .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/compile_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+        }) });
+        const cb_run = b.addRunArtifact(cbt);
+        cb_run.has_side_effects = true;
+        b.step("bench-compile", "Measure IR Compiler time and memory (x86-64, AArch64, RV64) on generated functions").dependOn(&cb_run.step);
     }
 
     // zig fmt: our sources only. AsmJit-derived and other generated files are excluded so they
