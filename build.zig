@@ -185,7 +185,16 @@ pub fn build(b: *std.Build) void {
     , .{pc_version}));
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(pc, .lib, "pkgconfig/pyrlyn-jit.pc").step);
     b.step("lib", "Build libpyrlyn-jit (static + shared) and install include/").dependOn(&b.addInstallArtifact(lib_static, .{}).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = capi_mod })).step);
+    // Keep the legacy C ABI tests rooted in their implementation; imported modules' tests
+    // are not discovered from the export-only library root.
+    const capi_tests = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    capi_tests.addOptions("pyrlyn_jit_options", opts);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = capi_tests })).step);
     // Plain object for foreign toolchains: Apple ld rejects Zig's archive members that are not
     // 8-byte aligned ("64-bit mach-o not 8-byte aligned"), so external linkers get the .o.
     // Separate module without stack probes: x86_64 Debug code otherwise references Zig's
@@ -244,6 +253,7 @@ pub fn build(b: *std.Build) void {
     bc_c_test.addCSourceFile(.{ .file = b.path("bc2jit/test_api.c"), .flags = &.{"-std=c11"} });
     bc_c_test.addIncludePath(b.path("include"));
     bc_c_test.linkLibrary(lib_static);
+    addLlvmPaths(b, bc_c_test, llvm_prefix);
     const run_bc_c = b.addRunArtifact(b.addExecutable(.{ .name = "test_bc2jit_c", .root_module = bc_c_test }));
     run_bc_c.skip_foreign_checks = true;
     test_step.dependOn(&run_bc_c.step);
@@ -253,6 +263,7 @@ pub fn build(b: *std.Build) void {
     bc_bench.addCSourceFile(.{ .file = b.path("bench/bc2jit_api.c"), .flags = &.{"-std=c11"} });
     bc_bench.addIncludePath(b.path("include"));
     bc_bench.linkLibrary(lib_static);
+    addLlvmPaths(b, bc_bench, llvm_prefix);
     const bc_bench_exe = b.addExecutable(.{ .name = "bench_bc2jit_api", .root_module = bc_bench });
     b.step("bench-bc2jit-api", "Build the C API JIT benchmark (use -Doptimize=ReleaseFast)").dependOn(&b.addInstallArtifact(bc_bench_exe, .{}).step);
 
@@ -262,6 +273,7 @@ pub fn build(b: *std.Build) void {
         m.addCSourceFile(.{ .file = b.path("examples/c/main.c"), .flags = &.{"-std=c11"} });
         m.addIncludePath(b.path("include"));
         m.linkLibrary(lib_static);
+        addLlvmPaths(b, m, llvm_prefix);
         examples_step.dependOn(&b.addRunArtifact(b.addExecutable(.{ .name = "example_c", .root_module = m })).step);
     }
     // C++ is built with the system compiler (`c++`, override with -Dcxx=...). Zig 0.17's bundled
@@ -412,4 +424,13 @@ pub fn build(b: *std.Build) void {
     };
     b.step("fmt", "Format sources with zig fmt (generated/AsmJit-derived files excluded)").dependOn(&b.addFmt(.{ .paths = fmt_paths, .exclude_paths = fmt_exclude }).step);
     b.step("fmt-check", "Check formatting with zig fmt --check (same exclusions as fmt)").dependOn(&b.addFmt(.{ .paths = fmt_paths, .exclude_paths = fmt_exclude, .check = true }).step);
+}
+
+// Static-library system dependencies propagate to C consumers, but their search/rpaths do not.
+fn addLlvmPaths(b: *std.Build, module: *std.Build.Module, prefix: ?[]const u8) void {
+    if (prefix) |p| {
+        const lib: std.Build.LazyPath = .{ .cwd_relative = b.pathJoin(&.{ p, "lib" }) };
+        module.addLibraryPath(lib);
+        module.addRPath(lib);
+    }
 }

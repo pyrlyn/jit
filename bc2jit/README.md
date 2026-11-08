@@ -62,6 +62,7 @@ idle executable page for reuse (up to eight 16 KiB pages, 128 KiB total). This c
 for the assembler and bytecode APIs; live functions never share a page. `JitRuntime.trimCache()`
 or `pjit_jit_trim_cache()` from `<pyrlyn_jit.h>` releases idle pages without affecting live code.
 Calls after release are invalid even if the runtime has retained the underlying page.
+Trim the cache before unloading a dynamically loaded library to return its retained pages.
 
 Measure API paths and enabled/disabled library/binary sizes with
 `python3 scripts/bench_bc2jit_api.py`; see [the recorded results](../bench/BC2JIT_API_RESULTS.md).
@@ -80,7 +81,8 @@ lives here, next to the assemblers it targets; the KotlinX emitter is a separate
 - `-a`, `--arch ARCH` (required; also `--arch=ARCH`): `x86-64`, `aarch64` or `riscv`, exact and
   case-sensitive. Missing, empty or unknown values print one line on stderr listing the allowed
   values and exit with status 2.
-- `--no-jit`: emit code without mapping or executing it, including for the host target.
+- `--no-jit`: emit code without mapping or executing it, including for the host target;
+  requires `--backend=pyrlyn` (LLVM backends do not expose machine-code output).
 - `-o`, `--output FILE`: write the raw machine code to FILE.
 - `ARG...`: up to four integers (decimal, or `0x`/`0o`/`0b` prefixed, may be negative) passed to
   the function when it is executed; missing ones are 0.

@@ -49,7 +49,7 @@ pub const Error = error{ MapFailed, ProtectFailed, OutOfBounds };
 pub const Function = struct {
     mem: []align(4096) u8,
     /// Initialized code prefix; the rest is trap-filled. Unknown for manually constructed
-    /// handles, so their whole mapping is treated as dirty when recycled.
+    /// handles, which bypass the cache and are unmapped on release.
     code_len: usize = std.math.maxInt(usize),
     pub fn ptr(self: Function, comptime F: type) F {
         return @ptrCast(@alignCast(self.mem.ptr));
@@ -82,10 +82,10 @@ fn takeCached(size: usize) ?Cached {
 
 fn cacheReleased(f: Function) bool {
     const mem = f.mem;
-    if (mem.len != page or !cache_mutex.tryLock()) return false;
+    if (mem.len != page or f.code_len > mem.len or !cache_mutex.tryLock()) return false;
     defer cache_mutex.unlock();
     if (cache_count == cache_capacity) return false;
-    cache[cache_count] = .{ .mem = mem, .used = @min(f.code_len, mem.len) };
+    cache[cache_count] = .{ .mem = mem, .used = f.code_len };
     cache_count += 1;
     return true;
 }
@@ -310,12 +310,15 @@ test "runtime cache: bound, exclusive ownership, trap tail and trim" {
     try t.expectEqual(@as(usize, 0), trimCache());
 }
 
-test "runtime cache: large mappings and contention bypass retention" {
+test "runtime cache: external handles, large mappings and contention bypass retention" {
     const t = std.testing;
     _ = trimCache();
     defer _ = trimCache();
     var cb = CodeBuffer.init(t.allocator);
     defer cb.deinit();
+    const external: Function = .{ .mem = try mapWritable(page) };
+    external.release();
+    try t.expectEqual(@as(usize, 0), trimCache());
     try cb.emitBytes(&@as([page + 1]u8, @splat(0)));
     const large = try add(&cb);
     try t.expectEqual(2 * page, large.mem.len);

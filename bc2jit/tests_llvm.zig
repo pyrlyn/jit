@@ -86,6 +86,8 @@ test "cli: LLVM backends, optimization and incompatible flags" {
         &.{ "-a", host.flagName(), "--backend" },
         &.{ "-a", host.flagName(), "--backend=unknown", "f.kxbc" },
         &.{ "-a", host.flagName(), "--no-opt", "f.kxbc" },
+        &.{ "-a", host.flagName(), "--backend=llvm-jit", "--no-jit", "f.kxbc" },
+        &.{ "-a", host.flagName(), "--backend=llvm-interpreter", "--no-jit", "f.kxbc" },
         &.{ "-a", host.flagName(), "--backend=llvm-jit", "-o", "out.bin", "f.kxbc" },
         &.{ "-a", if (host == .riscv64) "aarch64" else "riscv", "--backend=llvm-interpreter", "f.kxbc" },
     };

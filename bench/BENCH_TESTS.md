@@ -26,7 +26,7 @@ compared against AsmJit), plus the AArch64 / JitRuntime paths shown in `examples
 | `x86_64_avx` | AVX/AVX2/FMA through the table-driven VEX encoder (1537 instrs) |
 | `x86_64_avx512` | EVEX: opmask/zeroing, broadcast, {er}, compare into k, masked store (1537 instrs) |
 | `aarch64_emit` | 256 copies of the sum loop (movz, labels, cbz, ldr, add/sub imm, b, movImm) + finalize |
-| `jit_runtime_add_release` | `JitRuntime.add` (mmap + copy + protect) and `release` of a finalized 16-loop buffer |
+| `jit_runtime_add_release` | `JitRuntime.add` (cached mapping or mmap + copy/protect/flush) and `release` of a finalized 16-loop buffer |
 | `e2e_aarch64_compile_run` | emit sum loop, finalize, `JitRuntime.add`, call it on 64 i64s, check result, release (native arm64 only) |
 | `bc2jit_decode_small` | KXBC decode + validate of a ~100-byte module (4 all-opcode units), free |
 | `bc2jit_decode_64k` | KXBC decode + validate of a 65 523-byte module (2730 all-opcode units, max u16 code length) |
@@ -91,3 +91,10 @@ function. Raw samples are saved under `zig-out/bc2jit-compare/`; no regression b
 rewritten. See [recorded results](BC2JIT_API_RESULTS.md).
 
 `zig build bench-test -Dbc2jit=false` skips bytecode cases and runs core JIT cases normally.
+
+The bytecode API comparison requires at least 2× full-cycle speedup in every paired run
+by default (`--min-speedup=2`). Both builds use the same bounded executable-page cache.
+The timed cycle includes fresh decode/emission, a call and ownership release. A separate
+`cold_jit` metric includes explicit cache trimming/OS unmapping; it has no 2× claim.
+The 2026-11-08 mapping-reuse baseline update tightens only `jit_runtime_add_release`,
+`e2e_aarch64_compile_run`, and `bc2jit_e2e_aarch64`, using the median of three run medians.

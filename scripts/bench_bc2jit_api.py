@@ -79,7 +79,7 @@ def main():
         lines.append(f"| {key} | {span('off')} | {span('on')} |")
     lines += ["", "This is a small-function microbenchmark, not an application throughput estimate. This arithmetic fixture uses direct lowering in both bytecode versions; v1 control flow, locals, deep stacks and extended operations still use the IR compiler.",
               "", "Reproduce: `python3 scripts/bench_bc2jit_api.py --zig /path/to/zig --report bench/BC2JIT_API_RESULTS.md`.",
-              "Raw samples: `zig-out/bc2jit-compare/results.json`. Existing regression baselines are unchanged.", ""]
+              "Raw samples: `zig-out/bc2jit-compare/results.json`. This script does not rewrite regression baselines.", ""]
     speedups = {f"v{v}": median("off", "direct_jit_ns") / median("on", f"bc_v{v}_jit_ns") for v in (0, 1)}
     minimum_speedups = {f"v{v}": min(off["direct_jit_ns"] / on[f"bc_v{v}_jit_ns"]
                                      for off, on in zip(samples["off"], samples["on"])) for v in (0, 1)}

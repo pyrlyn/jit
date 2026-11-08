@@ -125,6 +125,8 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     }
     // CLI contract: usage errors go to stderr with exit status 2.
     const usage_cases = [_]struct { args: []const []const u8, stderr: []const u8 }{
+        .{ .args = &.{ "--arch", "aarch64", "--backend", "llvm-jit", "--no-jit", "x.kxbc" }, .stderr = "bc2jit: --no-jit requires the pyrlyn backend\n" },
+        .{ .args = &.{ "--arch", "aarch64", "--backend", "llvm-interpreter", "--no-jit", "x.kxbc" }, .stderr = "bc2jit: --no-jit requires the pyrlyn backend\n" },
         .{ .args = &.{"x.kxbc"}, .stderr = "bc2jit: missing required option --arch (allowed: x86-64, aarch64, riscv)\n" },
         .{ .args = &.{ "--arch", "mips", "x.kxbc" }, .stderr = "bc2jit: unknown --arch value 'mips' (allowed: x86-64, aarch64, riscv)\n" },
         .{ .args = &.{"--arch"}, .stderr = "bc2jit: option --arch requires a value (allowed: x86-64, aarch64, riscv)\n" },
