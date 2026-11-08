@@ -776,8 +776,13 @@ pub fn parse(gpa: std.mem.Allocator, src: []const u8) ParseError!Func {
 /// Reference interpreter. `mem` backs load/store (vA is an address inside it). Calls go to
 /// real function pointers. Returns error.StepLimit after `max_steps` instructions.
 pub fn interpret(f: *const Func, args: []const i64, max_steps: usize) !i64 {
-    const regs = try std.heap.page_allocator.alloc(Val, @max(f.num_vregs, 1));
-    defer std.heap.page_allocator.free(regs);
+    return interpretWithAllocator(std.heap.page_allocator, f, args, max_steps);
+}
+
+/// Interpreter with caller-owned scratch allocation, for embedding in foreign runtimes.
+pub fn interpretWithAllocator(gpa: std.mem.Allocator, f: *const Func, args: []const i64, max_steps: usize) !i64 {
+    const regs = try gpa.alloc(Val, @max(f.num_vregs, 1));
+    defer gpa.free(regs);
     @memset(regs, 0);
     for (args, 0..) |a, i| regs[i] = fromI(a);
     var b: u32 = 0;
@@ -1259,4 +1264,12 @@ test "ir: operand constraints survive forward copies and undefined defaults" {
         defer bad.deinit();
         try t.expectError(error.TypeMismatch, bad.typeCheck(t.allocator));
     }
+}
+
+test "interpreter uses the supplied allocator" {
+    var f = try parse(std.testing.allocator, "func f 1\ne:\n  ret v0\n");
+    defer f.deinit();
+    try std.testing.expectEqual(@as(i64, 42), try interpretWithAllocator(std.testing.allocator, &f, &.{42}, 10));
+    try std.testing.expectError(error.StepLimit, interpretWithAllocator(std.testing.allocator, &f, &.{42}, 0));
+    try std.testing.expectError(error.OutOfMemory, interpretWithAllocator(std.testing.failing_allocator, &f, &.{42}, 10));
 }

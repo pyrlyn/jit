@@ -28,6 +28,7 @@ jobs:
       - run: zig build fmt-check
       - run: zig build test --summary all
       - run: zig build test-x86-32 --summary all
+      - run: zig build test-capi -Dtarget=x86-linux-musl --summary all
       - run: zig build lib -Dx86-features=sse4_2,popcnt,avx2
       - name: Install qemu-user (RISC-V execution tests)
         run: sudo apt-get update -q && sudo apt-get install -y -q qemu-user
