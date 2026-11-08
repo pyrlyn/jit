@@ -5,7 +5,7 @@
 //! - allocatable: x9..x15 (caller-saved) and x19..x28 (callee-saved); x0..x7 (arguments)
 //!   are not allocated, so parameter and call-argument moves never conflict; x18 (platform
 //!   register on Apple) is never touched;
-//! - x8 is a scratch for `srem`; x16/x17 (IP0/IP1) are scratch for spilled operands, large offsets and call targets;
+//! - x8 is a scratch for `srem` and large load/store offsets; x16/x17 (IP0/IP1) are scratch for spilled operands, large offsets and call targets;
 //! - frame: `Assembler.prolog(used callee-saved, out + slots)`: outgoing stack arguments at
 //!   [sp + 8i], spill slot k at [sp + out + 8k] (sp never moves inside the body);
 //!   one shared epilog label.
@@ -133,16 +133,11 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
     defer arena.deinit();
     const A = arena.allocator();
     const types = try rc.check(A, f);
-    const rf = try rc.buildFunc(A, f, types, .gp, false);
     const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable };
-    var res = try ra.allocate(gpa, rf, rcfg);
+    var res = try rc.allocateClass(gpa, f, types, .gp, false, rcfg);
     defer res.deinit(gpa);
-    std.debug.assert(ra.verify(rf, rcfg, res));
-    const ff = try rc.buildFunc(A, f, types, .fp, false);
-    const fcfg: ra.Config = .{ .allocatable = opts.fp_allocatable };
-    var fres = try ra.allocate(gpa, ff, fcfg);
+    var fres = try rc.allocateClass(gpa, f, types, .fp, false, .{ .allocatable = opts.fp_allocatable });
     defer fres.deinit(gpa);
-    std.debug.assert(ra.verify(ff, fcfg, fres));
     const nslots = res.num_slots + fres.num_slots;
 
     // ---- frame ----
@@ -157,7 +152,9 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
         nsaved += 1;
     };
     const saved = saved_buf[0..nsaved];
-    if (out + nslots * 8 > 4080) return error.TooManySpills;
+    // `sub sp` takes a 24-bit frame in two shifted 12-bit immediates (see `prolog` below).
+    const frame: u32 = std.mem.alignForward(u32, out + nslots * 8, 16);
+    if (frame > 0xFFF000) return error.TooManySpills;
 
     const L = struct {
         locs: []const ra.Loc,
@@ -169,7 +166,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
             return switch (s.flocs[v]) {
                 .reg => |r| @intCast(r),
                 .stack => |k| blk: {
-                    try as.word(fpenc.ldst(true, .f64, scratch, 31, s.slot(s.fbase + k)));
+                    try s.slotAccess(as, true, true, scratch, s.fbase + k);
                     break :blk scratch;
                 },
                 .none => blk: {
@@ -181,7 +178,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
         fn fput(s: @This(), as: anytype, v: ir.VReg, src: u5) !void {
             switch (s.flocs[v]) {
                 .reg => |r| if (r != src) try as.word(fpenc.fmovRR(@intCast(r), src)),
-                .stack => |k| try as.word(fpenc.ldst(false, .f64, src, 31, s.slot(s.fbase + k))),
+                .stack => |k| try s.slotAccess(as, false, true, src, s.fbase + k),
                 .none => {},
             }
         }
@@ -189,22 +186,33 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
         fn faddr(as: anytype, tp: ir.Type, base: X, disp: i32) !struct { u5, u32 } {
             const sz: i32 = if (tp == .f64) 8 else 4;
             if (disp >= 0 and disp <= 4095 * sz and @mod(disp, sz) == 0) return .{ @intCast(@backingInt(base)), @intCast(disp) };
-            try as.movImm(s1, @bitCast(@as(i64, disp)));
-            try as.add(s1, base, s1);
+            // The offset goes in x8 (never allocated): `base` may be s1 (a spilled base).
+            try as.movImm(.x8, @bitCast(@as(i64, disp)));
+            try as.add(s1, base, .x8);
             return .{ @intCast(@backingInt(s1)), 0 };
         }
         fn reg(r: u8) X {
             return @fromBackingInt(@intCast(r));
         }
-        fn slot(s: @This(), k: u32) u15 {
-            return @intCast(s.out + 8 * k);
+        /// `ldr`/`str` of an x (`fp = false`) or d register at frame slot `k`, sp-relative.
+        /// Past the scaled 12-bit offset range the offset goes in x8 (`[sp, x8]`).
+        fn slotAccess(s: @This(), as: anytype, load: bool, fp: bool, rt: u5, k: u32) !void {
+            const off = s.out + 8 * k;
+            if (off <= 32760) {
+                if (fp) return as.word(fpenc.ldst(load, .f64, rt, 31, off));
+                const x_: X = @fromBackingInt(rt);
+                return if (load) as.ldr(x_, sp, @intCast(off)) else as.str(x_, sp, @intCast(off));
+            }
+            try as.movImm(.x8, off);
+            const op: u32 = if (fp) 0xFC206800 else 0xF8206800; // str x|d <t>, [sp, x8]
+            try as.word(op | @as(u32, @intFromBool(load)) << 22 | 8 << 16 | 31 << 5 | rt);
         }
         /// Register holding `v` (loads spilled values into `scratch`).
         fn get(s: @This(), as: anytype, v: ir.VReg, scratch: X) !X {
             return switch (s.locs[v]) {
                 .reg => |r| reg(r),
                 .stack => |k| blk: {
-                    try as.ldr(scratch, sp, s.slot(k));
+                    try s.slotAccess(as, true, false, @intCast(@backingInt(scratch)), k);
                     break :blk scratch;
                 },
                 .none => blk: { // undefined value: reads as 0
@@ -216,22 +224,30 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
         fn put(s: @This(), as: anytype, v: ir.VReg, src: X) !void {
             switch (s.locs[v]) {
                 .reg => |r| if (reg(r) != src) try as.mov(reg(r), src),
-                .stack => |k| try as.str(src, sp, s.slot(k)),
+                .stack => |k| try s.slotAccess(as, false, false, @intCast(@backingInt(src)), k),
                 .none => {},
             }
         }
         /// Address `base + disp` as (register, unsigned scaled offset).
         fn addr(as: anytype, base: X, disp: i32) !struct { X, u15 } {
             if (disp >= 0 and disp <= 32760 and @mod(disp, 8) == 0) return .{ base, @intCast(disp) };
-            try as.movImm(s1, @bitCast(@as(i64, disp)));
-            try as.add(s1, base, s1);
+            // The offset goes in x8 (never allocated): `base` may be s1 (a spilled base).
+            try as.movImm(.x8, @bitCast(@as(i64, disp)));
+            try as.add(s1, base, .x8);
             return .{ s1, 0 };
         }
     };
     const ctx: L = .{ .locs = res.locs, .out = out, .flocs = fres.locs, .fbase = res.num_slots };
 
     // ---- prolog ----
-    const n = try a.prolog(saved, out + nslots * 8);
+    // Up to 4080 bytes `prolog` subtracts the frame itself; a larger one is two `sub sp`
+    // (imm12 << 12, then imm12) here, and the epilog resets sp from x29 instead.
+    const big = frame > 4080;
+    const n = try a.prolog(saved, if (big) 0 else frame);
+    if (big) {
+        if (frame >> 12 != 0) try a.word(0xD14003FF | (frame >> 12) << 10); // sub sp, sp, #hi, lsl 12
+        if (frame & 0xFFF != 0) try a.subImm(sp, sp, @intCast(frame & 0xFFF));
+    }
     for (0..f.params) |i| {
         if (i < CC.args.len) {
             try ctx.put(a, @intCast(i), CC.args[i]);
@@ -240,6 +256,11 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
             try ctx.put(a, @intCast(i), s0);
         }
     }
+    // Values read before any def on some path are 0 (IR semantics, as in `ir.interpret`).
+    if (res.entry_undef.len != 0) try a.movImm(s0, 0);
+    for (res.entry_undef) |v| try ctx.put(a, v, s0);
+    if (fres.entry_undef.len != 0) try a.word(fpenc.fmovFromGp(.f64, fs0, 31));
+    for (fres.entry_undef) |v| try ctx.fput(a, v, fs0);
 
     const labels = try gpa.alloc(a64.Label, f.blocks.items.len);
     defer gpa.free(labels);
@@ -402,6 +423,8 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: Optio
         };
     }
     try a.bind(epilog);
+    // sp back to just below the saved registers (16 bytes per pair or odd last one).
+    if (big) try a.subImm(sp, .x29, @intCast(16 * ((saved.len + 1) / 2)));
     try a.epilog(saved, n);
     return .{ .spills = res.spills + fres.spills, .slots = nslots };
 }
@@ -521,6 +544,168 @@ test "a64 compiler: block parameters (SSA input)" {
         const want = try ir.interpret(&f, &.{n}, 1 << 20);
         try t.expectEqual(want, try run(&f, .{}, &.{n}));
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.x19) }, &.{n}));
+    }
+}
+
+test "a64 compiler: a block parameter live into its use block keeps its register" {
+    // `lowerBlockParams` puts the edge copies for `a`'s parameter after `a`, so v2 is live
+    // into `a` without being live out of it; the constants at the top of `a` must not take
+    // its register.
+    var f = try ir.parse(t.allocator,
+        \\func f 1
+        \\e:
+        \\  v1 = const 3
+        \\  cbr lt v0 v1 a:v0 b:v1
+        \\a(v2):
+        \\  v3 = const 100
+        \\  v4 = const 1
+        \\  v5 = add v3 v4
+        \\  v6 = add v2 v5
+        \\  ret v6
+        \\b(v7):
+        \\  ret v7
+    );
+    defer f.deinit();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    _ = try compile(t.allocator, &f, &cb, .{});
+    if (!can_run) return;
+    for ([_]i64{ 0, 1, 2, 5 }) |n| {
+        const want = try ir.interpret(&f, &.{n}, 1000);
+        try t.expectEqual(want, try run(&f, .{}, &.{n}));
+    }
+}
+
+test "a64 compiler: a branch back to the entry block keeps the parameters" {
+    // v0 is used on every pass through `e`, including after the back edge e -> e.
+    var f = try ir.parse(t.allocator,
+        \\func f 2
+        \\e:
+        \\  v3 = load v0 0
+        \\  v4 = add v3 v3
+        \\  v5 = const 1
+        \\  v1 = sub v1 v5
+        \\  cbr gt v1 v5 e x
+        \\x:
+        \\  ret v4
+    );
+    defer f.deinit();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    _ = try compile(t.allocator, &f, &cb, .{});
+    if (!can_run) return;
+    var cell: i64 = 21;
+    const p: i64 = @intCast(@intFromPtr(&cell));
+    for ([_]i64{ 1, 3, 10 }) |n| {
+        const want = try ir.interpret(&f, &.{ p, n }, 1000);
+        try t.expectEqual(want, try run(&f, .{}, &.{ p, n }));
+        try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.x19) | bit(.x9) }, &.{ p, n }));
+    }
+}
+
+test "a64 compiler: a value undefined on some path reads as 0" {
+    // e -> j skips the def of v2 (and of the float v4): the interpreter reads 0 there.
+    // v1 is unused, so its argument register x1 still holds the caller's value.
+    var f = try ir.parse(t.allocator,
+        \\func f 2
+        \\e:
+        \\  v9 = const 7
+        \\  cbr gt v0 v9 a j
+        \\a:
+        \\  v2 = const 5
+        \\  v4 = fconst.f64 2.5
+        \\  br j
+        \\j:
+        \\  v3 = add v2 v0
+        \\  v5 = fconst.f64 0
+        \\  v6 = fcmp.f64 eq v4 v5
+        \\  v7 = add v3 v6
+        \\  ret v7
+    );
+    defer f.deinit();
+    if (!can_run) return;
+    for ([_]i64{ 1, 10 }) |n| {
+        const want = try ir.interpret(&f, &.{ n, 1000 }, 1000);
+        for ([_]ra.RegMask{ allocatable, bit(.x1) | bit(.x9), bit(.x1) }) |m| {
+            try t.expectEqual(want, try run(&f, .{ .allocatable = m }, &.{ n, 1000 }));
+        }
+    }
+}
+
+/// IR with `n` values live at once (then 8 floats): with few registers the spill area passes
+/// the `sub sp` (4080) and scaled ldr/str (32760) immediate limits; FP slots come after.
+fn bigFrameSource(gpa: std.mem.Allocator, n: u32) ![]u8 {
+    var src: std.ArrayList(u8) = .empty;
+    errdefer src.deinit(gpa);
+    try src.appendSlice(gpa, "func f 1\ne:\n");
+    for (1..n + 1) |i| try src.print(gpa, "  v{d} = add v{d} v0\n", .{ i, i - 1 });
+    var nv: usize = n + 1;
+    for (0..8) |j| try src.print(gpa, "  v{d} = cvt.f64.i64 v{d}\n", .{ nv + j, j + 1 });
+    const fv = nv;
+    nv += 8;
+    var acc: usize = n;
+    var i: usize = n - 1;
+    while (i >= 1) : (i -= 1) {
+        try src.print(gpa, "  v{d} = add v{d} v{d}\n", .{ nv, acc, i });
+        acc = nv;
+        nv += 1;
+    }
+    for (0..8) |j| {
+        try src.print(gpa, "  v{d} = cvt.i64.f64 v{d}\n  v{d} = add v{d} v{d}\n", .{ nv, fv + j, nv + 1, acc, nv });
+        acc = nv + 1;
+        nv += 2;
+    }
+    try src.print(gpa, "  ret v{d}\n", .{acc});
+    return src.toOwnedSlice(gpa);
+}
+
+test "a64 compiler: frames past the immediate offset ranges" {
+    for ([_]u32{ 600, 4200 }) |n| {
+        const src = try bigFrameSource(t.allocator, n);
+        defer t.allocator.free(src);
+        var f = try ir.parse(t.allocator, src);
+        defer f.deinit();
+        var cb = CodeBuffer.init(t.allocator);
+        defer cb.deinit();
+        const st = try compile(t.allocator, &f, &cb, .{ .allocatable = bit(.x9) });
+        try t.expect(st.slots * 8 > if (n > 1000) @as(u32, 32760) else 4080);
+        if (!can_run) continue;
+        for ([_]i64{ 1, 3 }) |x| {
+            const want = try ir.interpret(&f, &.{x}, 1_000_000);
+            try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.x9) }, &.{x}));
+            try t.expectEqual(want, try run(&f, .{}, &.{x}));
+        }
+    }
+}
+
+test "a64 compiler: a spilled base with an out-of-range offset" {
+    // disp -8 needs `base + disp` in a register; with spills the base is loaded into the
+    // same scratch register the offset used to be built in.
+    var f = try ir.parse(t.allocator,
+        \\func g 1
+        \\e:
+        \\  v1 = const 8
+        \\  v2 = add v0 v1
+        \\  v5 = const 100
+        \\  v3 = load v2 -8
+        \\  store v2 -8 v5
+        \\  v8 = load v0 0
+        \\  v6 = add v3 v8
+        \\  v7 = sub v6 v2
+        \\  ret v7
+    );
+    defer f.deinit();
+    var cb = CodeBuffer.init(t.allocator);
+    defer cb.deinit();
+    _ = try compile(t.allocator, &f, &cb, .{});
+    if (!can_run) return;
+    var cell: i64 = 7;
+    const p: i64 = @intCast(@intFromPtr(&cell));
+    const want: i64 = 7 + 100 - (p + 8);
+    for ([_]ra.RegMask{ allocatable, bit(.x19) }) |m| {
+        cell = 7;
+        try t.expectEqual(want, try run(&f, .{ .allocatable = m }, &.{p}));
+        try t.expectEqual(@as(i64, 100), cell);
     }
 }
 

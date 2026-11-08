@@ -83,16 +83,14 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     defer arena.deinit();
     const A = arena.allocator();
     const types = try rc.check(A, f);
-    const rf = try rc.buildFunc(A, f, types, .gp, true);
     const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls, .algo = opts.algo, .split = opts.split };
-    var res = try ra.allocate(gpa, rf, rcfg);
+    var res = try rc.allocateClass(gpa, f, types, .gp, true, rcfg);
     defer res.deinit(gpa);
-    std.debug.assert(ra.verify(rf, rcfg, res));
-    const ff = try rc.buildFunc(A, f, types, .fp, false);
-    const fcfg: ra.Config = .{ .allocatable = opts.fp_allocatable };
-    var fres = try ra.allocate(gpa, ff, fcfg);
+    var fres = try rc.allocateClass(gpa, f, types, .fp, false, .{ .allocatable = opts.fp_allocatable });
     defer fres.deinit(gpa);
-    std.debug.assert(ra.verify(ff, fcfg, fres));
+    // Vregs saved/restored around calls (split ranges), ascending.
+    var save_vregs: std.ArrayList(ir.VReg) = .empty;
+    for (res.save_slot, 0..) |s, v| if (s != null) try save_vregs.append(A, @intCast(v));
 
     // ---- frame ----
     const used = res.usedRegs();
@@ -183,6 +181,11 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
             try ctx.put(@intCast(i), s0);
         }
     }
+    // Values read before any def on some path are 0 (IR semantics, as in `ir.interpret`).
+    if (res.entry_undef.len != 0) try b.emit(.movRI, .{ s0, 0 });
+    for (res.entry_undef) |v| try ctx.put(v, s0);
+    if (fres.entry_undef.len != 0) try b.emit(.sseRR, .{ .xorps, fs0, fs0 });
+    for (fres.entry_undef) |v| try ctx.fput(v, fs0);
 
     const labels = try gpa.alloc(bld.Label, f.blocks.items.len);
     defer gpa.free(labels);
@@ -365,7 +368,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                 },
                 .call => |c| {
                     // Split ranges: save caller-saved registers live across this call.
-                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                    for (save_vregs.items) |v| if (res.savedAcross(v, pos)) {
                         try b.emit(.movMR, .{ ctx.slot(res.save_slot[v].?), @fromBackingInt(@intCast(res.locs[v].reg)) });
                     };
                     // Argument registers are never allocated: plain moves, no parallel-move cycles.
@@ -388,7 +391,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     const pop: u32 = cc.shadow + pad + 8 * @as(u32, @intCast(nstack));
                     if (pop != 0) try b.emit(.addRI, .{ .rsp, @intCast(pop) });
                     var restored = false;
-                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                    for (save_vregs.items) |v| if (res.savedAcross(v, pos)) {
                         if (!restored) try b.emit(.movRR, .{ s1, .rax });
                         restored = true;
                         try b.emit(.movRM, .{ @fromBackingInt(@intCast(res.locs[v].reg)), ctx.slot(res.save_slot[v].?) });
@@ -449,8 +452,12 @@ pub fn compile(gpa: std.mem.Allocator, f: *const ir.Func, cb: *CodeBuffer, opts:
     defer b.deinit();
     var st = try lower(gpa, f, &b, opts);
     try b.runPasses(.{ bld.removeDeadCode, bld.removeJumpsToNext });
-    if (opts.shorten_branches) try bld.shortenBranches(&b);
-    try b.serialize(x.AssemblerT(.{ .validate = true }).init(cb));
+    // The node list is complete: drop its growth slack before the output buffer grows.
+    b.nodes.shrinkAndFree(gpa, b.nodes.items.len);
+    if (opts.shorten_branches)
+        try bld.serializeShortened(&b, cb)
+    else
+        try b.serialize(x.AssemblerT(.{ .validate = true }).init(cb));
     try cb.finalize();
     st.nodes = b.count();
     return st;
@@ -471,6 +478,34 @@ fn run(f: *const ir.Func, opts: Options, args: []const i64) !i64 {
     var a: [6]i64 = @splat(0);
     for (args, 0..) |v, i| a[i] = v;
     return fun.ptr(*const fn (i64, i64, i64, i64, i64, i64) callconv(.c) i64)(a[0], a[1], a[2], a[3], a[4], a[5]);
+}
+
+test "x64 compiler: a value undefined on some path reads as 0" {
+    // e -> j skips the def of v2 (and of the float v4): the interpreter reads 0 there.
+    var f = try ir.parse(t.allocator,
+        \\func f 2
+        \\e:
+        \\  v9 = const 7
+        \\  cbr gt v0 v9 a j
+        \\a:
+        \\  v2 = const 5
+        \\  v4 = fconst.f64 2.5
+        \\  br j
+        \\j:
+        \\  v3 = add v2 v0
+        \\  v5 = fconst.f64 0
+        \\  v6 = fcmp.f64 eq v4 v5
+        \\  v7 = add v3 v6
+        \\  ret v7
+    );
+    defer f.deinit();
+    if (!can_run) return error.SkipZigTest;
+    for ([_]i64{ 1, 10 }) |n| {
+        const want = try ir.interpret(&f, &.{ n, 1000 }, 1000);
+        for ([_]ra.RegMask{ allocatable, bit(.rsi) | bit(.rax), bit(.rsi) }) |m| {
+            try t.expectEqual(want, try run(&f, .{ .allocatable = m }, &.{ n, 1000 }));
+        }
+    }
 }
 
 test "compiler: fib compiles to expected shape (byte-level, any host)" {

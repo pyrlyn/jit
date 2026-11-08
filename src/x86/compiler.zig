@@ -21,6 +21,7 @@ const x = @import("assembler.zig");
 const bld = @import("builder.zig");
 const ir = @import("../core/ir.zig");
 const ra = @import("../core/regalloc.zig");
+const rc = @import("../core/reg_classes.zig");
 const CodeBuffer = @import("../core/code_buffer.zig").CodeBuffer;
 const Gp = x.Gp;
 
@@ -69,33 +70,12 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const A = arena.allocator();
-    const blocks = try A.alloc(ra.Block, f.blocks.items.len);
-    for (f.blocks.items, 0..) |blk, bi| {
-        const extra: usize = if (bi == 0) 1 else 0;
-        const insts = try A.alloc(ra.Inst, blk.ops.items.len + extra);
-        if (bi == 0) {
-            const params = try A.alloc(ra.VReg, f.params);
-            for (params, 0..) |*p, i| p.* = @intCast(i);
-            insts[0] = .{ .defs = params };
-        }
-        for (blk.ops.items, 0..) |o, i| {
-            var buf: [ir.max_args]ir.VReg = undefined;
-            const u = try A.dupe(ra.VReg, o.uses(&buf));
-            const d: []const ra.VReg = if (o.def()) |dv| try A.dupe(ra.VReg, &.{dv}) else &.{};
-            insts[i + extra] = .{ .uses = u, .defs = d, .is_call = o == .call, .is_copy = o == .copy };
-        }
-        const succs: []const u32 = switch (blk.ops.items[blk.ops.items.len - 1]) {
-            .br => |tg| try A.dupe(u32, &.{tg}),
-            .cbr => |c| try A.dupe(u32, &.{ c.then, c.@"else" }),
-            else => &.{},
-        };
-        blocks[bi] = .{ .insts = insts, .succs = succs };
-    }
-    const rf: ra.Func = .{ .blocks = blocks, .num_vregs = @max(f.num_vregs, 1) };
     const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls, .algo = opts.algo, .split = opts.split };
-    var res = try ra.allocate(gpa, rf, rcfg);
+    var res = try rc.allocateClass(gpa, f, null, .gp, true, rcfg);
     defer res.deinit(gpa);
-    std.debug.assert(ra.verify(rf, rcfg, res));
+    // Vregs saved/restored around calls (split ranges), ascending.
+    var save_vregs: std.ArrayList(ir.VReg) = .empty;
+    for (res.save_slot, 0..) |s, v| if (s != null) try save_vregs.append(A, @intCast(v));
 
     const used = res.usedRegs();
     var saved: std.ArrayList(Gp) = .empty;
@@ -160,6 +140,9 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
         try b.emit(.movRM, .{ s0, cc.stackArg(@intCast(i)) });
         try ctx.put(@intCast(i), s0);
     }
+    // Values read before any def on some path are 0 (IR semantics, as in `ir.interpret`).
+    if (res.entry_undef.len != 0) try b.emit(.movRI, .{ s0, 0 });
+    for (res.entry_undef) |v| try ctx.put(v, s0);
 
     const labels = try gpa.alloc(bld.Label, f.blocks.items.len);
     defer gpa.free(labels);
@@ -265,7 +248,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     try b.emit(.movMR, .{ x.ptr(base, c.disp), v });
                 },
                 .call => |c| {
-                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                    for (save_vregs.items) |v| if (res.savedAcross(v, pos)) {
                         try b.emit(.movMR, .{ ctx.slot(res.save_slot[v].?), L.reg(res.locs[v].reg) });
                     };
                     const n: u32 = @intCast(c.args.len);
@@ -280,7 +263,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     try b.emit(.callR, .{s0});
                     if (4 * n + pad != 0) try b.emit(.addRI, .{ .esp, @intCast(4 * n + pad) });
                     var restored = false;
-                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                    for (save_vregs.items) |v| if (res.savedAcross(v, pos)) {
                         if (!restored) try b.emit(.movRR, .{ s0, .eax });
                         restored = true;
                         try b.emit(.movRM, .{ L.reg(res.locs[v].reg), ctx.slot(res.save_slot[v].?) });
