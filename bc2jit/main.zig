@@ -22,6 +22,16 @@ pub fn main(init: std.process.Init) !void {
     var diag: bc.Diagnostic = .{};
     const f = bc.decode(arena, bytes, &diag) catch |e|
         fail("{s}: offset {d}: {s}", .{ o.input, diag.offset, bc.errorMessage(e) });
+    if (o.backend != .pyrlyn) {
+        var llvm_diag: @import("pyrlyn_jit").llvm.Diagnostic = .{};
+        var program = driver.compileLlvm(arena, f, .{
+            .mode = if (o.backend == .llvm_jit) .jit else .interpreter,
+            .optimize = o.optimize,
+        }, &llvm_diag) catch |e| fail("LLVM: {s}: {s}", .{ @errorName(e), llvm_diag.message() });
+        defer program.deinit();
+        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.allocPrint(arena, "{d}\n", .{program.call(o.args)}));
+        return;
+    }
     var c = driver.compile(arena, o.target, f) catch |e|
         fail("--arch {s}: {s}", .{ o.target.flagName(), driver.errorMessage(e) });
     defer c.deinit();

@@ -16,6 +16,8 @@ pub const regalloc = @import("core/regalloc.zig");
 pub const reg_classes = @import("core/reg_classes.zig");
 /// Compiler IR: text parser, verifier, printer, reference interpreter.
 pub const ir = @import("core/ir.zig");
+/// Optional LLVM C API backend for integer IR (JIT and LLVM Interpreter).
+pub const llvm = @import("core/llvm.zig");
 pub const JitRuntime = @import("core/jit_runtime.zig");
 
 /// `pyrlyn_jit.x86_64.Assembler`, `.Gp`, `.ptr`, ... (void if disabled at build time)
