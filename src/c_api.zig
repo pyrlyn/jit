@@ -380,7 +380,9 @@ export fn pjit_ir_eval(src: ?[*]const u8, len: usize, args: ?[*]const i64, nargs
     const types = f.typeCheck(gpa) catch |e| return status(e);
     defer gpa.free(types);
     const a: []const i64 = if (nargs == 0) &.{} else args.?[0..nargs];
-    o.* = ir.interpret(&f, a, steps) catch |e| return status(e);
+    // Keep interpreter scratch on the same C allocator as parsing and type checking.
+    // Foreign-linked Windows executables need not provide Zig's native page allocator.
+    o.* = ir.interpretWithAllocator(gpa, &f, a, steps) catch |e| return status(e);
     return OK;
 }
 
