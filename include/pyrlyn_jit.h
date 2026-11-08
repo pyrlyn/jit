@@ -1,6 +1,7 @@
 /* pyrlyn-jit C API. Stable ABI: functions only take/return scalars, opaque handles and the
  * plain structs below. Every call validates its arguments and returns pjit_status
- * (never aborts on bad input). Link with libpyrlyn-jit (static or shared) and libc.
+ * for invalid argument values. Non-NULL pointers must reference valid storage.
+ * Link with libpyrlyn-jit (static or shared) and libc.
  *
  * Versioning: PJIT_VERSION is the header version (MAJOR << 16 | MINOR << 8 | PATCH);
  * pjit_version() is the library version. Within one MAJOR the ABI only grows: functions and
@@ -135,9 +136,13 @@ static inline pjit_x64_op pjit_x64_mem(uint8_t base, int32_t disp, uint8_t size)
 /* ---- IR compiler (text IR, see src/core/ir.zig): IR -> register allocation -> machine code ---- */
 enum { PJIT_ARCH_HOST = 0, PJIT_ARCH_X86_64, PJIT_ARCH_AARCH64, PJIT_ARCH_X86, PJIT_ARCH_RISCV64 };
 /* Compiles one IR function for `arch` into `b` (empty or reset) and finalizes it. The result is
- * `int64_t f(int64_t...)` in the target's C ABI; run it with pjit_jit_add when arch is the host. */
+ * `int64_t f(int64_t...)` in the host OS's ABI for 64-bit targets, or
+ * `int32_t f(int32_t...)` (cdecl, 32-bit arithmetic) for PJIT_ARCH_X86.
+ * Run it with pjit_jit_add only when arch matches the host. */
 int pjit_ir_compile(pjit_buffer *b, const char *src, size_t len, int arch);
-/* Reference interpreter: *out = f(args[0..nargs)); max_steps 0 = default limit. */
+/* Reference interpreter with 64-bit integer semantics: *out = f(args[0..nargs)).
+ * max_steps 0 = default limit; values above SIZE_MAX return PJIT_ERR_INVALID_ARGUMENT.
+ * IR memory accesses and calls use real addresses: callers must supply valid pointers. */
 int pjit_ir_eval(const char *src, size_t len, const int64_t *args, size_t nargs, uint64_t max_steps, int64_t *out);
 
 /* ---- executable memory (W^X: never writable and executable at once) ---- */

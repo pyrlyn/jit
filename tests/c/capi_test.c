@@ -33,6 +33,8 @@ int main(void) {
 
     /* NULL handling */
     EQ(pjit_buffer_new(NULL), PJIT_ERR_INVALID_ARGUMENT);
+    EXPECT(strcmp(pjit_last_error(), "InvalidArgument") == 0);
+    pjit_clear_error();
     pjit_buffer_free(NULL);
     pjit_func_free(NULL);
     EXPECT(pjit_func_ptr(NULL) == NULL);
@@ -58,7 +60,11 @@ int main(void) {
     /* raw emitters: both ISAs encode on any host */
     EQ(pjit_a64_emit(b, "add", (pjit_a64_op[]){pjit_a64_x(0), pjit_a64_x(0), pjit_a64_x(1)}, 3), PJIT_OK);
     EQ(pjit_a64_emit(b, "nope", NULL, 0), PJIT_ERR_UNKNOWN_MNEMONIC);
+    EXPECT(strcmp(pjit_last_error(), "UnknownMnemonic") == 0);
+    EQ(pjit_x64_emit(b, "nope", NULL, 0), PJIT_ERR_UNKNOWN_MNEMONIC);
+    EXPECT(strcmp(pjit_last_error(), "UnknownMnemonic") == 0);
     EQ(pjit_x64_emit(b, "mov", (pjit_x64_op[]){pjit_x64_reg(PJIT_RAX, 8), pjit_x64_imm(1)}, 2), PJIT_OK);
+    EXPECT(strcmp(pjit_last_error(), "UnknownMnemonic") == 0);
     EQ(pjit_x64_emit(b, "mov", (pjit_x64_op[]){pjit_x64_reg(PJIT_RAX, 8), pjit_x64_reg(PJIT_RAX, 4)}, 2), PJIT_ERR_NO_MATCHING_FORM);
     EQ(pjit_label_new(b, &l), PJIT_OK);
     EQ(pjit_x64_jump(b, 99, l), PJIT_ERR_INVALID_ARGUMENT);
@@ -81,6 +87,25 @@ int main(void) {
     EXPECT(*pjit_last_error() == 0);
     EQ(pjit_ir_eval("func f 1\ne:\n  v1 = copy v0\n", 26, (int64_t[]){1}, 1, 0, &r), PJIT_ERR_IR_VERIFY);
 
+    const char bad_type[] = "func f 0\ne:\n  v0 = fconst.f64 1\n  ret v0\n";
+    r = 123;
+    EQ(pjit_ir_eval(bad_type, sizeof bad_type - 1, NULL, 0, 0, &r), PJIT_ERR_IR_TYPE);
+    EQ(r, 123); /* errors leave the output alone */
+    const char bad_lane[] = "func f 1\ne:\n  v1 = splat.v2i64 v0\n  v2 = extract.v2i64 v1 2\n  ret v2\n";
+    EQ(pjit_ir_eval(bad_lane, sizeof bad_lane - 1, (int64_t[]){1}, 1, 0, &r), PJIT_ERR_IR_TYPE);
+    EXPECT(strcmp(pjit_last_error(), "TypeMismatch") == 0);
+    EQ(pjit_ir_eval(add_ir, sizeof add_ir - 1, NULL, 2, 0, &r), PJIT_ERR_INVALID_ARGUMENT);
+    EXPECT(strcmp(pjit_last_error(), "InvalidArgument") == 0);
+    EQ(pjit_ir_eval(add_ir, sizeof add_ir - 1, (int64_t[]){40, 2}, 2, UINT64_MAX, &r),
+       SIZE_MAX < UINT64_MAX ? PJIT_ERR_INVALID_ARGUMENT : PJIT_OK);
+
+    /* AArch64 branch entry point, including a valid finalized branch. */
+    EQ(pjit_label_new(b, &l), PJIT_OK);
+    EQ(pjit_a64_branch(b, -1, l), PJIT_OK);
+    EQ(pjit_label_bind(b, l), PJIT_OK);
+    EQ(pjit_finalize(b), PJIT_OK);
+    pjit_buffer_reset(b);
+
     /* IR: compile for every arch (bytes only), run on the host */
     for (int a = PJIT_ARCH_X86_64; a <= PJIT_ARCH_RISCV64; a++) {
         pjit_buffer_reset(b);
@@ -92,8 +117,15 @@ int main(void) {
     pjit_buffer_reset(b);
     EQ(pjit_ir_compile(b, fib_ir, sizeof fib_ir - 1, PJIT_ARCH_HOST), PJIT_OK);
     EQ(pjit_jit_add(b, &f), PJIT_OK);
+#if defined(__i386__) || defined(_M_IX86)
+    /* The x86 backend uses 32-bit values and cdecl. Keep Fibonacci in int32_t range. */
+    int32_t (*fib)(int32_t) = (int32_t (*)(int32_t))pjit_func_ptr(f);
+    const int64_t max_k = 45;
+#else
     int64_t (*fib)(int64_t) = (int64_t (*)(int64_t))pjit_func_ptr(f);
-    for (int64_t k = 0; k <= 90; k += 15) {
+    const int64_t max_k = 90;
+#endif
+    for (int64_t k = 0; k <= max_k; k += 15) {
         int64_t want;
         EQ(pjit_ir_eval(fib_ir, sizeof fib_ir - 1, &k, 1, 0, &want), PJIT_OK);
         EQ(fib(k), want);

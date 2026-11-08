@@ -1,5 +1,5 @@
 //! Stable C ABI (see include/pyrlyn_jit.h). Every entry point validates its arguments and returns a
-//! `pjit_status`; no Zig panics or UB are reachable through bad input from C.
+//! `pjit_status`. Pointers must be valid; interpreted/generated IR may access caller memory.
 const std = @import("std");
 const builtin = @import("builtin");
 const cbm = @import("core/code_buffer.zig");
@@ -45,7 +45,8 @@ const Status = enum(c_int) {
 fn status(e: anyerror) c_int {
     const s: Status = switch (e) {
         error.OutOfMemory => .out_of_memory,
-        error.InvalidOperand, error.InvalidImmediate, error.OutOfBounds => .invalid_argument,
+        error.InvalidArgument, error.InvalidOperand, error.InvalidImmediate, error.OutOfBounds => .invalid_argument,
+        error.UnknownMnemonic => .unknown_mnemonic,
         error.NoMatchingForm => .no_matching_form,
         error.InvalidLabel, error.TooManyLabels => .invalid_label,
         error.LabelAlreadyBound => .label_already_bound,
@@ -70,8 +71,8 @@ const EINVAL: c_int = @backingInt(Status.invalid_argument);
 
 const gpa = std.heap.c_allocator;
 
-/// Detail of the last failing call on this thread (the Zig error name), "" after a success
-/// of `pjit_clear_error`.
+/// Detail of the last failing call on this thread (the Zig error name).
+/// Successful calls preserve it; `pjit_clear_error` resets it to "".
 threadlocal var last_error: [64:0]u8 = @splat(0);
 fn setLastError(name: []const u8) void {
     const n = @min(name.len, last_error.len);
@@ -121,7 +122,7 @@ export fn pjit_status_str(s: c_int) [*:0]const u8 {
 // ---- buffer / labels ------------------------------------------------------------------------
 
 export fn pjit_buffer_new(out: ?*?*Buffer) c_int {
-    const o = out orelse return EINVAL;
+    const o = out orelse return status(error.InvalidArgument);
     const b = gpa.create(Buffer) catch return status(error.OutOfMemory);
     b.* = .{ .cb = cbm.CodeBuffer.init(gpa) };
     o.* = b;
@@ -145,29 +146,29 @@ export fn pjit_buffer_code(b: ?*const Buffer, len: ?*usize) ?[*]const u8 {
 }
 
 export fn pjit_buffer_emit_bytes(b: ?*Buffer, bytes: ?[*]const u8, n: usize) c_int {
-    const p = b orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
     if (n == 0) return OK;
-    const src = bytes orelse return EINVAL;
+    const src = bytes orelse return status(error.InvalidArgument);
     p.cb.emitBytes(src[0..n]) catch |e| return status(e);
     return OK;
 }
 
 export fn pjit_label_new(b: ?*Buffer, out: ?*u32) c_int {
-    const p = b orelse return EINVAL;
-    const o = out orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    const o = out orelse return status(error.InvalidArgument);
     const l = p.cb.newLabel() catch |e| return status(e);
     o.* = l.id;
     return OK;
 }
 
 export fn pjit_label_bind(b: ?*Buffer, label: u32) c_int {
-    const p = b orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
     p.cb.bind(.{ .id = label }) catch |e| return status(e);
     return OK;
 }
 
 export fn pjit_finalize(b: ?*Buffer) c_int {
-    const p = b orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
     p.cb.finalize() catch |e| return status(e);
     return OK;
 }
@@ -248,11 +249,11 @@ fn a64Op(o: A64Op) ?a64.Op {
 }
 
 export fn pjit_a64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const A64Op, n: usize) c_int {
-    const p = b orelse return EINVAL;
-    const mn = lookup(a64_map, mnemonic) orelse return @backingInt(Status.unknown_mnemonic);
-    if (n > 8 or (n > 0 and ops == null)) return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    const mn = lookup(a64_map, mnemonic) orelse return status(error.UnknownMnemonic);
+    if (n > 8 or (n > 0 and ops == null)) return status(error.InvalidArgument);
     var conv: [8]a64.Op = undefined;
-    for (0..n) |i| conv[i] = a64Op(ops.?[i]) orelse return EINVAL;
+    for (0..n) |i| conv[i] = a64Op(ops.?[i]) orelse return status(error.InvalidArgument);
     const word = a64.encodeMn(mn, conv[0..n]) orelse return status(error.NoMatchingForm);
     p.cb.ensure(4) catch |e| return status(e);
     p.cb.put32(word);
@@ -261,8 +262,8 @@ export fn pjit_a64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const A6
 
 /// `b label` (cond < 0) or `b.<cond> label` (cond 0..15).
 export fn pjit_a64_branch(b: ?*Buffer, cond: c_int, label: u32) c_int {
-    const p = b orelse return EINVAL;
-    if (cond > 15) return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    if (cond > 15) return status(error.InvalidArgument);
     const at = p.cb.offset();
     const word: u32 = if (cond < 0) 0x1400_0000 else 0x5400_0000 | @as(u32, @intCast(cond));
     p.cb.addFixup(.{ .at = at, .base = at, .label = label, .kind = if (cond < 0) .a64_imm26 else .a64_imm19 }) catch |e| return status(e);
@@ -305,19 +306,19 @@ fn x64Op(o: X64Op) ?gp.Op {
 }
 
 export fn pjit_x64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const X64Op, n: usize) c_int {
-    const p = b orelse return EINVAL;
-    const forms = lookup(gp_map, mnemonic) orelse return @backingInt(Status.unknown_mnemonic);
-    if (n > 4 or (n > 0 and ops == null)) return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    const forms = lookup(gp_map, mnemonic) orelse return status(error.UnknownMnemonic);
+    if (n > 4 or (n > 0 and ops == null)) return status(error.InvalidArgument);
     var conv: [4]gp.Op = undefined;
-    for (0..n) |i| conv[i] = x64Op(ops.?[i]) orelse return EINVAL;
+    for (0..n) |i| conv[i] = x64Op(ops.?[i]) orelse return status(error.InvalidArgument);
     gp.emitOps(&p.cb, forms, conv[0..n]) catch |e| return status(e);
     return OK;
 }
 
 /// `jmp label` (cc < 0) or `j<cc> label` (cc 0..15, x86 condition code), rel32.
 export fn pjit_x64_jump(b: ?*Buffer, cc: c_int, label: u32) c_int {
-    const p = b orelse return EINVAL;
-    if (cc > 15) return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    if (cc > 15) return status(error.InvalidArgument);
     p.cb.ensure(6) catch |e| return status(e);
     const start = p.cb.offset();
     const len: u32 = if (cc < 0) 5 else 6;
@@ -352,8 +353,8 @@ fn parseIr(src: ?[*]const u8, len: usize) !ir.Func {
 /// Parses IR text (`docs/ROADMAP.md` §2, `src/core/ir.zig`) and compiles it for `arch`
 /// (`PJIT_ARCH_*`) into `b`, which must be empty or reset; the buffer is finalized.
 export fn pjit_ir_compile(b: ?*Buffer, src: ?[*]const u8, len: usize, arch: c_int) c_int {
-    const p = b orelse return EINVAL;
-    const a0 = std.enums.fromInt(Arch, arch) orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    const a0 = std.enums.fromInt(Arch, arch) orelse return status(error.InvalidArgument);
     const a = if (a0 == .host) hostArch() orelse return status(error.UnsupportedArch) else a0;
     var f = parseIr(src, len) catch |e| return status(e);
     defer f.deinit();
@@ -369,14 +370,17 @@ export fn pjit_ir_compile(b: ?*Buffer, src: ?[*]const u8, len: usize, arch: c_in
 
 /// Runs IR text in the reference interpreter (no code generation): `out = f(args...)`.
 export fn pjit_ir_eval(src: ?[*]const u8, len: usize, args: ?[*]const i64, nargs: usize, max_steps: u64, out: ?*i64) c_int {
-    const o = out orelse return EINVAL;
-    if (nargs > ir.max_args or (nargs > 0 and args == null)) return EINVAL;
+    const o = out orelse return status(error.InvalidArgument);
+    if (nargs > ir.max_args or (nargs > 0 and args == null)) return status(error.InvalidArgument);
+    const steps = if (max_steps == 0) 1 << 24 else std.math.cast(usize, max_steps) orelse return status(error.InvalidArgument);
     var f = parseIr(src, len) catch |e| return status(e);
     defer f.deinit();
     f.verify() catch |e| return status(e);
-    if (nargs != f.params) return EINVAL;
+    if (nargs != f.params) return status(error.InvalidArgument);
+    const types = f.typeCheck(gpa) catch |e| return status(e);
+    defer gpa.free(types);
     const a: []const i64 = if (nargs == 0) &.{} else args.?[0..nargs];
-    o.* = ir.interpret(&f, a, if (max_steps == 0) 1 << 24 else @intCast(max_steps)) catch |e| return status(e);
+    o.* = ir.interpret(&f, a, steps) catch |e| return status(e);
     return OK;
 }
 
@@ -386,8 +390,8 @@ const Func = struct { f: rt.Function };
 
 /// Copies finalized code into W^X executable memory.
 export fn pjit_jit_add(b: ?*const Buffer, out: ?*?*Func) c_int {
-    const p = b orelse return EINVAL;
-    const o = out orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    const o = out orelse return status(error.InvalidArgument);
     if (p.cb.fixups.items.len != 0) return status(error.UnboundLabel); // not finalized
     const f = rt.add(&p.cb) catch |e| return status(e);
     const h = gpa.create(Func) catch {

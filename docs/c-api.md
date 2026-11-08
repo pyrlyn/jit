@@ -44,17 +44,22 @@ whose members are not 8-byte aligned. The build therefore also emits a plain obj
 5. Or compile IR text instead of emitting instructions: `pjit_ir_compile(b, src, len, arch)`
    with `PJIT_ARCH_HOST`, `PJIT_ARCH_X86_64`, `PJIT_ARCH_AARCH64`, `PJIT_ARCH_X86` or
    `PJIT_ARCH_RISCV64` (IR syntax: `src/core/ir.zig`). Non-host targets give bytes only.
-   `pjit_ir_eval` runs the same text in the reference interpreter (for checking results).
+   64-bit targets use `int64_t` parameters/results; `PJIT_ARCH_X86` uses `int32_t`, cdecl,
+   and 32-bit arithmetic. The OS calling convention is selected at library build time.
+   `pjit_ir_eval` uses 64-bit integer semantics, so it is not a reference for x86 overflow.
+   Its step limit must fit `size_t`; zero selects the default limit.
 6. `pjit_jit_add` copies the code into W^X executable memory. `pjit_func_ptr` gives the entry
    point, and `pjit_func_free` releases it.
 
 ## Errors
 
-Every function returns a `pjit_status`; `pjit_status_str` describes it, and
+Every status-returning function returns a `pjit_status`; `pjit_status_str` describes it, and
 `pjit_last_error()` returns the detail (internal error name, e.g. `Syntax`, `UnsupportedType`)
-of the last failure on the calling thread ("" when none; `pjit_clear_error` resets it). Invalid input never
-crashes. Bad registers, unknown enum values, NULL pointers, unknown mnemonics, operand sets
-that no form accepts, foreign labels and out-of-range branches all return errors. The
+of the last failure on the calling thread ("" when none; `pjit_clear_error` resets it). Successful
+calls preserve the last error. Bad registers, unknown enum values, NULL pointers, unknown mnemonics, operand sets
+that no form accepts, foreign labels and out-of-range branches all return errors. IR is native
+code input, not a sandbox: memory operations and calls in the interpreter or generated code
+require valid addresses supplied by the caller. The
 library is fuzzed (`src/fuzz.zig`); the C API has Zig unit tests (`src/c_api.zig`) and C tests
 that call every exported function, including error paths (`tests/c/capi_test.c`,
 `zig build test-capi`, part of `zig build test`).

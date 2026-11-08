@@ -150,7 +150,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib_shared);
     b.installDirectory(.{ .source_dir = b.path("include"), .install_dir = .header, .install_subdir = "" });
     // pkg-config file (zig-out/lib/pkgconfig/pyrlyn-jit.pc); prefix is relocatable via pcfiledir.
-    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.1.0";
+    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.2.0";
     const pc = b.addWriteFiles().add("pyrlyn-jit.pc", b.fmt(
         \\prefix=${{pcfiledir}}/../..
         \\libdir=${{prefix}}/lib
