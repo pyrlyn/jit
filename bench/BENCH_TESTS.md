@@ -41,8 +41,8 @@ being timed is the same code the AsmJit golden-file tests check byte for byte.
 
 bc2jit cases (`bc2jit_*`) import `bc2jit/lib.zig` as module `bc2jit`. The "all-opcode unit" is
 `push_arg×3, dup, drop, mul, sub, push_i64, dup, mul, add, add` (24 bytes, every opcode, stack depth
-1 -> 5 -> 1). IR / builder / register-allocator passes on `main` have no existing benchmark; add
-cases here when one is wanted.
+1 -> 5 -> 1). IR Compiler time and peak heap are covered separately by `zig build bench-compile`
+(see below); they are not part of the emitter regression baseline.
 
 ## Measurement and thresholds
 
@@ -67,3 +67,17 @@ When a change makes a case notably faster (more than ~5% below baseline, the tes
 `<-- IMPROVED`), run `zig build bench-update` and commit the new baseline in the same PR.
 Stale, loose baselines would let later regressions through. Never loosen a baseline or tolerance
 just to make a regressed case pass.
+
+## IR Compiler time and memory
+
+`zig build bench-compile` measures AArch64, x86-64 and RV64 compilation for four
+function sizes. `PJIT_BENCH_MS` sets the time budget per case; `PJIT_BENCH_ONLY`
+selects one case, such as `x86_64/huge`. `PJIT_BENCH_SEED` changes the generated
+workload. `PJIT_BENCH_CHECKSUM=1` uses a deterministic call address and prints a
+machine-code checksum outside the timed region.
+
+For a before/after comparison, build the same harness against both library revisions
+and run `python3 scripts/compare_compile_bench.py BEFORE AFTER --repeats 5 --ms 400`.
+The script alternates execution order, checks code equivalence and reports per-case
+and geometric-mean changes. See [COMPILE_PERFORMANCE.md](COMPILE_PERFORMANCE.md)
+for the measured results, metric boundaries and full build commands.

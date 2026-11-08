@@ -310,6 +310,9 @@ fn interpret(f: kbc.Function, args: [4]i64) i64 {
         },
         .drop => sp -= 1,
         .ret => return st[sp - 1],
+        // Prog.init emits only v0 arithmetic; reject accidental expansion of this
+        // reference interpreter's workload when the bytecode enum gains variants.
+        else => @panic("unexpected opcode in the v0 benchmark workload"),
     };
     unreachable;
 }
