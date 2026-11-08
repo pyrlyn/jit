@@ -150,7 +150,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib_shared);
     b.installDirectory(.{ .source_dir = b.path("include"), .install_dir = .header, .install_subdir = "" });
     // pkg-config file (zig-out/lib/pkgconfig/pyrlyn-jit.pc); prefix is relocatable via pcfiledir.
-    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.1.0";
+    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.2.0";
     const pc = b.addWriteFiles().add("pyrlyn-jit.pc", b.fmt(
         \\prefix=${{pcfiledir}}/../..
         \\libdir=${{prefix}}/lib
@@ -192,6 +192,17 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(lib_static);
     }
 
+    // C-side ABI tests (tests/c/capi_test.c): every exported function called from C.
+    {
+        const m = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+        m.addCSourceFile(.{ .file = b.path("tests/c/capi_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Werror" } });
+        m.addIncludePath(b.path("include"));
+        m.linkLibrary(lib_static);
+        const run_capi = b.addRunArtifact(b.addExecutable(.{ .name = "capi_test", .root_module = m }));
+        run_capi.expectExitCode(0);
+        test_step.dependOn(&run_capi.step);
+        b.step("test-capi", "Build and run the C ABI tests (tests/c)").dependOn(&run_capi.step);
+    }
     const examples_step = b.step("examples", "Build and run examples/{c,cpp,zig} (+ rust with -Drust=true)");
     {
         const m = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });

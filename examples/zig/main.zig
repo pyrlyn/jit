@@ -38,4 +38,20 @@ pub fn main() !void {
     const r = f.ptr(*const fn (i64, i64) callconv(.c) i64)(40, 2);
     std.debug.print("pyrlyn_jit (Zig): add(40, 2) = {d}\n", .{r});
     if (r != 42) return error.WrongResult;
+
+    // IR compiler (same pipeline as the C API's pjit_ir_compile), checked against the interpreter.
+    var g = try pjit.ir.parse(gpa.allocator(), "func add 2\ne:\n  v2 = add v0 v1\n  ret v2\n");
+    defer g.deinit();
+    var cb2 = pjit.CodeBuffer.init(gpa.allocator());
+    defer cb2.deinit();
+    _ = try switch (builtin.cpu.arch) {
+        .aarch64 => pjit.aarch64_compiler.compile(gpa.allocator(), &g, &cb2, .{}),
+        .x86_64 => pjit.x86_64_compiler.compile(gpa.allocator(), &g, &cb2, .{}),
+        else => @compileError("unsupported host"),
+    };
+    const f2 = try pjit.JitRuntime.add(&cb2);
+    defer f2.release();
+    const r2 = f2.ptr(*const fn (i64, i64) callconv(.c) i64)(40, 2);
+    std.debug.print("pyrlyn_jit (Zig): IR add(40, 2) = {d}\n", .{r2});
+    if (r2 != try pjit.ir.interpret(&g, &.{ 40, 2 }, 1000)) return error.WrongResult;
 }
