@@ -242,4 +242,5 @@ test "driver: canExecute is exactly target == host" {
 test {
     _ = @import("tests_extra.zig");
     _ = @import("tests_v1.zig");
+    _ = @import("tests_llvm.zig");
 }

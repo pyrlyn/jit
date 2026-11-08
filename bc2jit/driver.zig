@@ -45,6 +45,15 @@ pub fn compile(gpa: std.mem.Allocator, target: lower.Target, f: bc.Function) Err
     return .{ .cb = cb, .exec = exec };
 }
 
+/// Optional LLVM backend. Optimizes once, then reuses the program for JIT/interpreter calls.
+/// `f` must have been validated by bytecode.decode. Always uses the host target.
+pub fn compileLlvm(gpa: std.mem.Allocator, f: bc.Function, options: jit.llvm.Options, diag: *jit.llvm.Diagnostic) (lower_ir.Error || jit.llvm.Error)!jit.llvm.Program {
+    diag.len = 0;
+    var g = try lower_ir.toIr(gpa, f);
+    defer g.deinit();
+    return jit.llvm.prepare(gpa, &g, options, diag);
+}
+
 /// Message for a `compile` error.
 pub fn errorMessage(e: Error) []const u8 {
     return switch (e) {

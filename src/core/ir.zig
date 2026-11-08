@@ -219,44 +219,80 @@ pub const Func = struct {
         return @intCast(f.blocks.items.len - 1);
     }
     pub fn emit(f: *Func, block: u32, op: Op) !void {
+        // `uses` fills a `max_args` buffer, and `num_vregs = v + 1` must not overflow.
+        switch (op) {
+            .call => |c| if (c.args.len > max_args) return error.TooManyArgs,
+            .bra => |c| if (c.args.len > max_args) return error.TooManyArgs,
+            .cbra => |c| if (2 + c.then_args.len + c.else_args.len > max_args) return error.TooManyArgs,
+            else => {},
+        }
+        var buf: [max_args]VReg = undefined;
+        for (op.uses(&buf)) |u| if (u == std.math.maxInt(VReg)) return error.BadVReg;
+        if (op.def()) |d| if (d == std.math.maxInt(VReg)) return error.BadVReg;
         try f.blocks.items[block].ops.append(f.alloc(), op);
         if (op.def()) |d| f.num_vregs = @max(f.num_vregs, d + 1);
-        var buf: [max_args]VReg = undefined;
         for (op.uses(&buf)) |u| f.num_vregs = @max(f.num_vregs, u + 1);
     }
 
     pub const VerifyError = error{ EmptyFunction, MissingTerminator, TerminatorNotLast, BadBlock, BadVReg, TooManyArgs, ArgCountMismatch, MultipleDefs };
     /// Structural checks: every block ends with exactly one terminator, branch targets exist,
-    /// vregs are in range, calls have at most 6 arguments.
+    /// vregs are in range, calls and edges carry at most `max_args` arguments.
     pub fn verify(f: *const Func) VerifyError!void {
         if (f.blocks.items.len == 0) return error.EmptyFunction;
         const nb = f.blocks.items.len;
         for (f.blocks.items) |b| {
             if (b.ops.items.len == 0 or !b.ops.items[b.ops.items.len - 1].isTerminator()) return error.MissingTerminator;
-            for (b.ops.items, 0..) |o, i| {
-                if (o.isTerminator() and i + 1 != b.ops.items.len) return error.TerminatorNotLast;
-                switch (o) {
-                    .br => |tg| if (tg >= nb or f.blocks.items[tg].params.len != 0) return if (tg >= nb) error.BadBlock else error.ArgCountMismatch,
-                    .cbr => |c| if (c.then >= nb or c.@"else" >= nb) return error.BadBlock else if (f.blocks.items[c.then].params.len != 0 or f.blocks.items[c.@"else"].params.len != 0) return error.ArgCountMismatch,
-                    .call => |c| if (c.args.len > max_args) return error.TooManyArgs,
-                    .bra => |c| {
-                        if (c.target >= nb) return error.BadBlock;
-                        if (c.args.len > max_args) return error.TooManyArgs;
-                        if (c.args.len != f.blocks.items[c.target].params.len) return error.ArgCountMismatch;
-                    },
-                    .cbra => |c| {
-                        if (c.then >= nb or c.@"else" >= nb) return error.BadBlock;
-                        if (2 + c.then_args.len + c.else_args.len > max_args) return error.TooManyArgs;
-                        if (c.then_args.len != f.blocks.items[c.then].params.len or
-                            c.else_args.len != f.blocks.items[c.@"else"].params.len) return error.ArgCountMismatch;
-                    },
-
-                    else => {},
+            // One switch per op (terminator position, branch targets and argument counts, vreg
+            // range), checked in that order as before.
+            const n = f.num_vregs;
+            const last = b.ops.items.len - 1;
+            const C = struct {
+                inline fn all(vs: []const VReg, n_: u32) bool {
+                    for (vs) |v| if (v >= n_) return false;
+                    return true;
                 }
-                var buf: [max_args]VReg = undefined;
-                for (o.uses(&buf)) |u| if (u >= f.num_vregs) return error.BadVReg;
-                if (o.def()) |d| if (d >= f.num_vregs) return error.BadVReg;
-            }
+            };
+            for (b.ops.items, 0..) |*o, i| switch (o.*) {
+                inline .@"const", .fconst => |x| if (x.dst >= n) return error.BadVReg,
+                inline .copy, .cvt, .splat, .extract => |x| if (x.src >= n or x.dst >= n) return error.BadVReg,
+                inline .arith, .typed, .fcmp => |x| if (x.a >= n or x.b >= n or x.dst >= n) return error.BadVReg,
+                .load => |x| if (x.base >= n or x.dst >= n) return error.BadVReg,
+                .store => |x| if (x.base >= n or x.src >= n) return error.BadVReg,
+                .call => |c| {
+                    if (c.args.len > max_args) return error.TooManyArgs;
+                    if (!C.all(c.args, n) or c.dst >= n) return error.BadVReg;
+                },
+                .br => |tg| {
+                    if (i != last) return error.TerminatorNotLast;
+                    if (tg >= nb) return error.BadBlock;
+                    if (f.blocks.items[tg].params.len != 0) return error.ArgCountMismatch;
+                },
+                .cbr => |c| {
+                    if (i != last) return error.TerminatorNotLast;
+                    if (c.then >= nb or c.@"else" >= nb) return error.BadBlock;
+                    if (f.blocks.items[c.then].params.len != 0 or f.blocks.items[c.@"else"].params.len != 0) return error.ArgCountMismatch;
+                    if (c.a >= n or c.b >= n) return error.BadVReg;
+                },
+                .bra => |c| {
+                    if (i != last) return error.TerminatorNotLast;
+                    if (c.target >= nb) return error.BadBlock;
+                    if (c.args.len > max_args) return error.TooManyArgs;
+                    if (c.args.len != f.blocks.items[c.target].params.len) return error.ArgCountMismatch;
+                    if (!C.all(c.args, n)) return error.BadVReg;
+                },
+                .cbra => |c| {
+                    if (i != last) return error.TerminatorNotLast;
+                    if (c.then >= nb or c.@"else" >= nb) return error.BadBlock;
+                    if (2 + c.then_args.len + c.else_args.len > max_args) return error.TooManyArgs;
+                    if (c.then_args.len != f.blocks.items[c.then].params.len or
+                        c.else_args.len != f.blocks.items[c.@"else"].params.len) return error.ArgCountMismatch;
+                    if (c.a >= n or c.b >= n or !C.all(c.then_args, n) or !C.all(c.else_args, n)) return error.BadVReg;
+                },
+                .ret => |v| {
+                    if (i != last) return error.TerminatorNotLast;
+                    if (v >= n) return error.BadVReg;
+                },
+            };
         }
         for (f.blocks.items) |b| for (b.params) |p| if (p >= f.num_vregs) return error.BadVReg;
         if (f.params > f.num_vregs and f.params > 0) return error.BadVReg;
@@ -311,75 +347,96 @@ pub const Func = struct {
                 return true;
             }
         }.f_;
-        // Defs with fixed types, then propagate copies / block arguments to a fixpoint.
-        var changed = true;
-        while (changed) {
-            changed = false;
-            for (f.blocks.items) |b| for (b.ops.items) |o| {
-                const r: ?struct { VReg, Type } = switch (o) {
-                    .@"const" => |x| .{ x.dst, .i64 },
-                    .arith => |x| .{ x.dst, .i64 },
-                    .call => |x| .{ x.dst, .i64 },
-                    .load => |x| .{ x.dst, x.ty },
-                    .fconst => |x| .{ x.dst, x.ty },
-                    .typed => |x| .{ x.dst, x.ty },
-                    .fcmp => |x| .{ x.dst, .i64 },
-                    .cvt => |x| .{ x.dst, x.to },
-                    .splat => |x| .{ x.dst, x.ty },
-                    .extract => |x| .{ x.dst, x.ty.lane() },
-                    .copy => |x| if (ty[x.src]) |st| .{ x.dst, st } else null,
-                    .bra => |x| blk: {
-                        for (x.args, f.blocks.items[x.target].params) |a, p| if (ty[a]) |at| {
-                            if (try set(ty, p, at)) changed = true;
-                        };
-                        break :blk null;
-                    },
+        // Defs with fixed types in one pass; copies / block arguments whose source is not
+        // typed yet go to a worklist that is iterated to a fixpoint (types only flow from
+        // source to destination, and every constraint is an equality, so the order does not
+        // change the result or whether there is a mismatch).
+        const Pending = struct { b: u32, i: u32 };
+        var work: std.ArrayList(Pending) = .empty;
+        defer work.deinit(gpa);
+        const flow = struct {
+            /// Propagates what it can; true if some source is still untyped.
+            fn edge(t_: []?Type, fb: []const Block, args: []const VReg, target: u32, ch: *bool) error{TypeMismatch}!bool {
+                var open = false;
+                for (args, fb[target].params) |a, p| if (t_[a]) |at| {
+                    if (try set(t_, p, at)) ch.* = true;
+                } else {
+                    open = true;
+                };
+                return open;
+            }
+            fn op(t_: []?Type, fb: []const Block, o: *const Op, ch: *bool) error{TypeMismatch}!bool {
+                return switch (o.*) {
+                    .copy => |x| if (t_[x.src]) |st| blk: {
+                        if (try set(t_, x.dst, st)) ch.* = true;
+                        break :blk false;
+                    } else true,
+                    .bra => |x| try edge(t_, fb, x.args, x.target, ch),
                     .cbra => |x| blk: {
-                        for (x.then_args, f.blocks.items[x.then].params) |a, p| if (ty[a]) |at| {
-                            if (try set(ty, p, at)) changed = true;
-                        };
-                        for (x.else_args, f.blocks.items[x.@"else"].params) |a, p| if (ty[a]) |at| {
-                            if (try set(ty, p, at)) changed = true;
-                        };
-                        break :blk null;
+                        const a = try edge(t_, fb, x.then_args, x.then, ch);
+                        const b = try edge(t_, fb, x.else_args, x.@"else", ch);
+                        break :blk a or b;
                     },
-                    else => null,
+                    else => false,
                 };
-                if (r) |d| if (try set(ty, d[0], d[1])) {
-                    changed = true;
-                };
-            };
-        }
-        const out = try gpa.alloc(Type, @max(f.num_vregs, 1));
-        errdefer gpa.free(out);
-        for (ty, 0..) |t_, i| out[i] = t_ orelse .i64; // never defined: reads as i64 0
-        const T = struct {
-            fn is(o_: []const Type, v: VReg, want: Type) error{TypeMismatch}!void {
-                if (o_[v] != want) return error.TypeMismatch;
             }
         };
-        for (f.blocks.items) |b| for (b.ops.items) |o| switch (o) {
+        // Validate known operands during inference. For forward references retain one
+        // type constraint per vreg, then check it after the copy/edge fixpoint.
+        const required = try gpa.alloc(?Type, ty.len);
+        defer gpa.free(required);
+        @memset(required, null);
+        const T = struct {
+            inline fn is(types: []const ?Type, need: []?Type, v: VReg, want: Type) error{TypeMismatch}!void {
+                if (types[v]) |have| {
+                    if (have != want) return error.TypeMismatch;
+                } else {
+                    _ = try set(need, v, want);
+                }
+            }
+        };
+        var ch = false;
+        for (f.blocks.items, 0..) |b, bi| for (b.ops.items, 0..) |*o, oi| switch (o.*) {
+            .@"const" => |x| {
+                _ = try set(ty, x.dst, .i64);
+            },
+            .copy, .bra => {
+                if (try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
+            },
+
             .arith => |x| {
-                try T.is(out, x.a, .i64);
-                try T.is(out, x.b, .i64);
+                _ = try set(ty, x.dst, .i64);
+                try T.is(ty, required, x.a, .i64);
+                try T.is(ty, required, x.b, .i64);
             },
             .cbr => |x| {
-                try T.is(out, x.a, .i64);
-                try T.is(out, x.b, .i64);
+                try T.is(ty, required, x.a, .i64);
+                try T.is(ty, required, x.b, .i64);
             },
             .cbra => |x| {
-                try T.is(out, x.a, .i64);
-                try T.is(out, x.b, .i64);
+                if (try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
+                try T.is(ty, required, x.a, .i64);
+                try T.is(ty, required, x.b, .i64);
             },
-            .ret => |v| try T.is(out, v, .i64),
-            .call => |x| for (x.args) |a| try T.is(out, a, .i64),
-            .load => |x| try T.is(out, x.base, .i64),
+            .ret => |v| try T.is(ty, required, v, .i64),
+            .call => |x| {
+                _ = try set(ty, x.dst, .i64);
+                for (x.args) |arg| try T.is(ty, required, arg, .i64);
+            },
+            .load => |x| {
+                _ = try set(ty, x.dst, x.ty);
+                try T.is(ty, required, x.base, .i64);
+            },
             .store => |x| {
-                try T.is(out, x.base, .i64);
-                try T.is(out, x.src, x.ty);
+                try T.is(ty, required, x.base, .i64);
+                try T.is(ty, required, x.src, x.ty);
             },
-            .fconst => |x| if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch,
+            .fconst => |x| {
+                _ = try set(ty, x.dst, x.ty);
+                if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
+            },
             .typed => |x| {
+                _ = try set(ty, x.dst, x.ty);
                 if (x.ty == .i64) return error.TypeMismatch;
                 const fl = x.ty.isFloat();
                 switch (x.op) {
@@ -387,15 +444,17 @@ pub const Func = struct {
                     .@"and", .@"or", .xor => if (fl) return error.TypeMismatch,
                     else => {},
                 }
-                try T.is(out, x.a, x.ty);
-                try T.is(out, x.b, x.ty);
+                try T.is(ty, required, x.a, x.ty);
+                try T.is(ty, required, x.b, x.ty);
             },
             .fcmp => |x| {
+                _ = try set(ty, x.dst, .i64);
                 if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
-                try T.is(out, x.a, x.ty);
-                try T.is(out, x.b, x.ty);
+                try T.is(ty, required, x.a, x.ty);
+                try T.is(ty, required, x.b, x.ty);
             },
             .cvt => |x| {
+                _ = try set(ty, x.dst, x.to);
                 const ok = switch (x.to) {
                     .i64 => x.from == .f32 or x.from == .f64,
                     .f32 => x.from == .i64 or x.from == .f64,
@@ -403,18 +462,37 @@ pub const Func = struct {
                     else => false,
                 };
                 if (!ok) return error.TypeMismatch;
-                try T.is(out, x.src, x.from);
+                try T.is(ty, required, x.src, x.from);
             },
             .splat => |x| {
+                _ = try set(ty, x.dst, x.ty);
                 if (!x.ty.isVector()) return error.TypeMismatch;
-                try T.is(out, x.src, x.ty.lane());
+                try T.is(ty, required, x.src, x.ty.lane());
             },
             .extract => |x| {
+                _ = try set(ty, x.dst, x.ty.lane());
                 if (!x.ty.isVector() or x.lane >= x.ty.lanes()) return error.TypeMismatch;
-                try T.is(out, x.src, x.ty);
+                try T.is(ty, required, x.src, x.ty);
             },
             else => {},
         };
+        // Another round only if the previous one typed some vreg.
+        ch = true;
+        while (ch and work.items.len != 0) {
+            ch = false;
+            var keep: usize = 0;
+            for (work.items) |w| if (try flow.op(ty, f.blocks.items, &f.blocks.items[w.b].ops.items[w.i], &ch)) {
+                work.items[keep] = w;
+                keep += 1;
+            };
+            work.items.len = keep;
+        }
+        const out = try gpa.alloc(Type, @max(f.num_vregs, 1));
+        errdefer gpa.free(out);
+        for (ty, required, 0..) |t_, need, i| {
+            out[i] = t_ orelse .i64; // never defined: reads as i64 0
+            if (need) |want| if (out[i] != want) return error.TypeMismatch;
+        }
         return out;
     }
 
@@ -534,12 +612,14 @@ fn parseType(s: []const u8) ParseError!Type {
     return std.meta.stringToEnum(Type, s) orelse error.Syntax;
 }
 
-pub const ParseError = error{ Syntax, UnknownLabel, DuplicateLabel, OutOfMemory, InvalidCharacter, Overflow };
+pub const ParseError = error{ Syntax, UnknownLabel, DuplicateLabel, OutOfMemory, InvalidCharacter, Overflow, TooManyArgs, BadVReg };
 
 fn parseVReg(tok: ?[]const u8) ParseError!VReg {
     const s = tok orelse return error.Syntax;
     if (s.len < 2 or s[0] != 'v') return error.Syntax;
-    return std.fmt.parseInt(VReg, s[1..], 10);
+    const v = try std.fmt.parseInt(VReg, s[1..], 10);
+    // maxInt is reserved: `num_vregs = v + 1` must fit.
+    return if (v == std.math.maxInt(VReg)) error.Overflow else v;
 }
 fn parseInt(comptime T: type, tok: ?[]const u8) ParseError!T {
     return std.fmt.parseInt(T, tok orelse return error.Syntax, 0);
@@ -580,9 +660,11 @@ pub fn parse(gpa: std.mem.Allocator, src: []const u8) ParseError!Func {
         const line = std.mem.trim(u8, raw[0 .. std.mem.indexOfScalar(u8, raw, '#') orelse raw.len], " \t\r");
         if (line.len == 0) continue;
         if (line[line.len - 1] == ':') {
-            cur = names.get(headerName(line)).?;
+            // Pass 1 skipped one-character lines (a lone ':'): not a block header.
+            cur = names.get(headerName(line)) orelse return error.Syntax;
             if (std.mem.indexOfScalar(u8, line, '(')) |lp| {
                 const rp = std.mem.lastIndexOfScalar(u8, line, ')') orelse return error.Syntax;
+                if (rp < lp) return error.Syntax;
                 var ps: std.ArrayList(VReg) = .empty;
                 var pit = std.mem.tokenizeAny(u8, line[lp + 1 .. rp], " \t,");
                 while (pit.next()) |tok| {
@@ -719,10 +801,11 @@ pub fn interpret(f: *const Func, args: []const i64, max_steps: usize) !i64 {
                     @memcpy(p[0..x.ty.size()], std.mem.asBytes(&regs[x.src])[0..x.ty.size()]);
                 },
                 .call => |x| {
-                    var a: [6]i64 = @splat(0);
-                    for (x.args, 0..) |v, i| a[i] = toI(regs[v]);
-                    const F = *const fn (i64, i64, i64, i64, i64, i64) callconv(.c) i64;
-                    regs[x.dst] = fromI(@as(F, @ptrFromInt(x.addr))(a[0], a[1], a[2], a[3], a[4], a[5]));
+                    // Up to `max_args` (what `verify` accepts); unused trailing args are 0.
+                    const F = fn (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) callconv(.c) i64;
+                    var a: std.meta.ArgsTuple(F) = undefined;
+                    inline for (0..max_args) |i| a[i] = if (i < x.args.len) toI(regs[x.args[i]]) else 0;
+                    regs[x.dst] = fromI(@call(.auto, @as(*const F, @ptrFromInt(x.addr)), a));
                 },
                 .fconst => |x| regs[x.dst] = x.bits,
                 .typed => |x| regs[x.dst] = typedArith(x.op, x.ty, regs[x.a], regs[x.b]),
@@ -1117,4 +1200,63 @@ test "ir: int-only check" {
     defer g.deinit();
     try t.expect(!g.isIntOnly());
     try t.expectEqual(@as(i64, 1), try interpret(&g, &.{}, 10));
+}
+
+test "ir: malformed input is an error, not a panic" {
+    const bad = [_][]const u8{
+        "func f 0\n:\n",
+        "func f 0\na)(:\n  ret v0\n",
+        "func f 0\na:\n  v4294967295 = const 1\n  ret v0\n",
+        "func f 1\na:\n  v1 = call 0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0\n  ret v1\n",
+        "func f 1\na:\n  br a v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0\n",
+    };
+    for (bad) |src| {
+        if (parse(std.testing.allocator, src)) |f_| {
+            var f = f_;
+            f.deinit();
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
+fn sum7(a: i64, b: i64, c: i64, d: i64, e: i64, g: i64, h: i64) callconv(.c) i64 {
+    return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * g + 7 * h;
+}
+
+test "ir: interpreter calls with more than 6 arguments" {
+    var f = Func.init(std.testing.allocator);
+    defer f.deinit();
+    f.params = 1;
+    f.num_vregs = 1;
+    const e = try f.addBlock("e");
+    const args = try f.alloc().dupe(VReg, &.{ 0, 0, 0, 0, 0, 0, 0 });
+    try f.emit(e, .{ .call = .{ .dst = 1, .addr = @intFromPtr(&sum7), .args = args } });
+    try f.emit(e, .{ .ret = 1 });
+    try f.verify();
+    try std.testing.expectEqual(@as(i64, 28), try interpret(&f, &.{1}, 100));
+}
+
+test "ir: operand constraints survive forward copies and undefined defaults" {
+    var f = try parse(t.allocator,
+        \\func forward 0
+        \\e:
+        \\  v1 = copy v2
+        \\  v3 = add.f64 v1 v2
+        \\  v2 = fconst.f64 1
+        \\  v0 = cvt.i64.f64 v3
+        \\  ret v0
+    );
+    defer f.deinit();
+    const ty = try f.typeCheck(t.allocator);
+    defer t.allocator.free(ty);
+    try t.expectEqualSlices(Type, &.{ .i64, .f64, .f64, .f64 }, ty);
+    for ([_][]const u8{
+        "func f 0\ne:\n v0 = add.f64 v1 v1\n v2 = cvt.i64.f64 v0\n ret v2\n", // undefined source defaults to i64
+        "func f 0\ne:\n v0 = add v1 v1\n v2 = add.f64 v1 v1\n v1 = fconst.f64 1\n ret v0\n", // conflicting forward uses
+        "func f 0\ne:\n v0 = copy v1\n v1 = copy v0\n v2 = add.f64 v0 v1\n v3 = cvt.i64.f64 v2\n ret v3\n", // untyped copy cycle
+    }) |src| {
+        var bad = try parse(t.allocator, src);
+        defer bad.deinit();
+        try t.expectError(error.TypeMismatch, bad.typeCheck(t.allocator));
+    }
 }

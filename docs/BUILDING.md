@@ -3,6 +3,10 @@
 Dependencies:
 - **Zig 0.17.0**, pinned in `mise.toml` (`mise install`, then `mise exec -- zig ...` or an activated shell).
 - No other dependencies for the library, tests and examples (stdlib only, links libc).
+- Optional LLVM backend: `-Dllvm-prefix=PREFIX` uses LLVM headers in `PREFIX/include` and
+  shared `libLLVM` in `PREFIX/lib` (including MCJIT, Interpreter and PassBuilder). Tested with
+  LLVM 23.1.5. The default build does not translate LLVM headers or link LLVM. See
+  [bc2jit LLVM backend](../bc2jit/README.md#llvm-backend) for execution and test commands.
 - Optional, only for the AsmJit benchmark and regenerating encoding tests: `clang` (Xcode
   command line tools), `objdump`, CMake + Ninja, Python 3, and an AsmJit checkout at `../asmjit-loc`.
 

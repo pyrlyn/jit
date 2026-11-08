@@ -82,6 +82,19 @@ fn decodeOk(bytes: []const u8) !bc.Function {
 
 /// Compiles for the host through the driver and checks against `eval` for every arg set.
 fn checkHost(f: bc.Function, arg_sets: []const [4]i64) !void {
+    if (comptime jit.llvm.enabled) {
+        for ([_]jit.llvm.Mode{ .jit, .interpreter }) |mode| {
+            for ([_]bool{ false, true }) |optimize| {
+                var diag: jit.llvm.Diagnostic = .{};
+                var program = driver.compileLlvm(t.allocator, f, .{ .mode = mode, .optimize = optimize }, &diag) catch |e| {
+                    std.debug.print("LLVM {s}: {s}\n", .{ @errorName(e), diag.message() });
+                    return e;
+                };
+                defer program.deinit();
+                for (arg_sets) |a| try t.expectEqual(try bc.eval(f, a, 1 << 24), program.call(a));
+            }
+        }
+    }
     const host = Target.host() orelse return error.SkipZigTest;
     if (!host.isBuilt()) return error.SkipZigTest;
     var c = try driver.compile(t.allocator, host, f);
@@ -403,4 +416,18 @@ test "v1: random programs match the interpreter on the host (fuzz)" {
         };
         try checkHost(f, &sets);
     }
+}
+
+test "v1 decoder: no leak on any allocation failure" {
+    const bytes = try bc.encode(t.allocator, .{ .arg_count = 1, .version = bc.version_v1, .insts = &.{
+        .{ .push_arg = 0 }, .{ .push_i64 = 2 }, .add, .ret,
+    } });
+    defer t.allocator.free(bytes);
+    try t.checkAllAllocationFailures(t.allocator, struct {
+        fn f(gpa: std.mem.Allocator, b: []const u8) !void {
+            var d: bc.Diagnostic = .{};
+            const g = try bc.decode(gpa, b, &d);
+            g.deinit(gpa);
+        }
+    }.f, .{bytes});
 }

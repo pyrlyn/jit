@@ -71,6 +71,50 @@ pub const Func = struct {
     fixed: []const ?u8 = &.{},
 };
 
+/// Compact compiler input: operand lists share a flat array. Public slice-based `Func`
+/// remains available for callers that build allocation inputs themselves.
+pub const CompactInst = struct {
+    offset: u32,
+    nuses: u8,
+    ndefs: u8,
+    is_call: bool = false,
+    is_copy: bool = false,
+};
+pub const CompactBlock = struct {
+    insts: []const CompactInst,
+    succs: []const u32 = &.{},
+};
+pub const CompactFunc = struct {
+    blocks: []const CompactBlock,
+    operands: []const VReg,
+    num_vregs: u32,
+    fixed: []const ?u8 = &.{},
+};
+
+inline fn uses(f: anytype, in: anytype) []const VReg {
+    if (@TypeOf(f) == Func) return in.uses;
+    return f.operands[in.offset..][0..in.nuses];
+}
+inline fn defs(f: anytype, in: anytype) []const VReg {
+    if (@TypeOf(f) == Func) return in.defs;
+    return f.operands[@as(usize, in.offset) + in.nuses ..][0..in.ndefs];
+}
+
+inline fn isCall(f: anytype, b: anytype, i: usize) bool {
+    if (@hasDecl(@TypeOf(f), "isCall")) return f.isCall(b, i);
+    return b.insts[i].is_call;
+}
+
+/// Compiler-only linear input: collectBlock visits operands at their original
+/// positions, and isCall reads the tag without materializing operand lists.
+pub fn allocateLinearSource(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Result {
+    std.debug.assert(cfg.algo == .linear and !cfg.split);
+    return allocateLinearInput(gpa, f, cfg);
+}
+pub fn verifySource(f: anytype, cfg: Config, r: Result) bool {
+    return verifyInput(f, cfg, r);
+}
+
 pub const Config = struct {
     /// Registers available for allocation (bit i = physical register i).
     allocatable: RegMask,
@@ -109,15 +153,22 @@ pub const Result = struct {
     /// Register segments of spilled vregs, sorted by (vreg, first); `seg_start[v]..seg_start[v+1]`.
     segs: []const Seg = &.{},
     seg_start: []const u32 = &.{},
+    /// Indices into `segs` of the segments with `load`, sorted by (first, vreg).
+    load_order: []const u32 = &.{},
     /// Copies removed by coalescing (both ends share a register).
     coalesced: u32 = 0,
+    /// Vregs live into the entry block: read on some path before any def. The compiler sets
+    /// them to 0 after the parameter moves (as the IR interpreter does), ascending.
+    entry_undef: []const VReg = &.{},
     pub fn deinit(r: *Result, gpa: std.mem.Allocator) void {
+        if (r.entry_undef.len != 0) gpa.free(r.entry_undef);
         gpa.free(r.locs);
         gpa.free(r.intervals);
         gpa.free(r.save_slot);
         if (r.seg_start.len != 0) {
             gpa.free(r.segs);
             gpa.free(r.seg_start);
+            gpa.free(r.load_order);
         }
     }
     fn segsOf(r: Result, v: VReg) []const Seg {
@@ -131,7 +182,16 @@ pub const Result = struct {
     }
     /// Calls `f(ctx, vreg, reg)` for each segment that must be loaded from its slot before `pos`.
     pub fn loadsAt(r: Result, pos: u32, ctx: anytype, comptime f: anytype) !void {
-        for (r.segs) |sg| if (sg.load and sg.first == pos) try f(ctx, sg.vreg, sg.reg);
+        const Ctx = struct { segs: []const Seg, pos: u32 };
+        var i = std.sort.partitionPoint(u32, r.load_order, Ctx{ .segs = r.segs, .pos = pos }, struct {
+            fn before(c: Ctx, k: u32) bool {
+                return c.segs[k].first < c.pos;
+            }
+        }.before);
+        while (i < r.load_order.len and r.segs[r.load_order[i]].first == pos) : (i += 1) {
+            const sg = r.segs[r.load_order[i]];
+            try f(ctx, sg.vreg, sg.reg);
+        }
     }
     /// All registers used by `locs` or segments (for callee-saved register saving).
     pub fn usedRegs(r: Result) RegMask {
@@ -156,91 +216,172 @@ const SlotUse = struct { slot: u32, end: u32 };
 /// Live-out sets per block (exposed for tests and the compiler).
 pub fn liveness(gpa: std.mem.Allocator, f: Func) Error![]std.DynamicBitSetUnmanaged {
     const nb = f.blocks.len;
-    const live_in = try gpa.alloc(std.DynamicBitSetUnmanaged, nb);
-    defer {
-        for (live_in) |*s| s.deinit(gpa);
-        gpa.free(live_in);
-    }
+    const nw = liveWords(f);
+    const out = try liveOut(gpa, f);
+    defer gpa.free(out);
     const live_out = try gpa.alloc(std.DynamicBitSetUnmanaged, nb);
-    for (0..nb) |i| {
-        live_in[i] = try std.DynamicBitSetUnmanaged.initEmpty(gpa, f.num_vregs);
-        live_out[i] = try std.DynamicBitSetUnmanaged.initEmpty(gpa, f.num_vregs);
+    var made: usize = 0;
+    errdefer {
+        for (live_out[0..made]) |*s| s.deinit(gpa);
+        gpa.free(live_out);
     }
-    var tmp = try std.DynamicBitSetUnmanaged.initEmpty(gpa, f.num_vregs);
-    defer tmp.deinit(gpa);
+    for (live_out, 0..) |*s, bi| {
+        s.* = try std.DynamicBitSetUnmanaged.initEmpty(gpa, f.num_vregs);
+        made += 1;
+        @memcpy(s.masks[0..nw], out[bi * nw ..][0..nw]);
+    }
+    return live_out;
+}
+
+const LiveWord = usize;
+fn liveWords(f: anytype) usize {
+    return (@as(usize, f.num_vregs) + @bitSizeOf(LiveWord) - 1) / @bitSizeOf(LiveWord);
+}
+
+/// Live-out sets as one flat word array: block `bi` is `out[bi * liveWords(f) ..][0..liveWords(f)]`,
+/// followed by the entry block's live-in set (`liveWords(f)` more words).
+fn liveOut(gpa: std.mem.Allocator, f: anytype) Error![]LiveWord {
+    return liveOutIntervals(gpa, f, false, &.{});
+}
+
+// Build local interval endpoints while collecting gen/kill: both need the same
+// forward uses/defs walk. `liveness` callers can omit intervals.
+fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals: bool, iv: []Interval) Error![]LiveWord {
+    const nb = f.blocks.len;
+    for (f.blocks) |b| for (b.succs) |succ| if (succ >= nb) return error.InvalidFunc;
+    // Per block: gen (upward-exposed uses), kill (defs) and live-in, as flat word arrays, so
+    // the fixpoint iterates over words only: in = gen ∪ (out − kill).
+    const W = LiveWord;
+    const bits = @bitSizeOf(W);
+    const nw = liveWords(f);
+    // gen | kill | in, then `out` (returned) in its own allocation.
+    const flat = try gpa.alloc(W, 3 * nb * nw);
+    defer gpa.free(flat);
+    @memset(flat, 0);
+    const gen = flat[0 .. nb * nw];
+    const kill = flat[nb * nw .. 2 * nb * nw];
+    const in_ = flat[2 * nb * nw .. 3 * nb * nw];
+    const out = try gpa.alloc(W, (nb + 1) * nw);
+    errdefer gpa.free(out);
+    @memset(out, 0);
+    const Collector = struct {
+        g: []W,
+        k: []W,
+        iv: []Interval,
+        n: u32,
+        first: u32,
+        pos: u32,
+        pub inline fn use(c: *@This(), u: VReg) Error!void {
+            if (u >= c.n) return error.InvalidFunc;
+            const bit = @as(W, 1) << @intCast(u % bits);
+            const exposed = c.k[u / bits] & bit == 0;
+            c.g[u / bits] |= bit & ~c.k[u / bits];
+            if (with_intervals) {
+                c.iv[u].start = @min(c.iv[u].start, 2 * (if (exposed) c.first else c.pos));
+                c.iv[u].end = 2 * c.pos;
+            }
+        }
+        pub inline fn def(c: *@This(), d: VReg) Error!void {
+            if (d >= c.n) return error.InvalidFunc;
+            c.k[d / bits] |= @as(W, 1) << @intCast(d % bits);
+            if (with_intervals) {
+                c.iv[d].start = @min(c.iv[d].start, 2 * c.pos + 1);
+                c.iv[d].end = 2 * c.pos + 1;
+            }
+        }
+        pub inline fn next(c: *@This()) void {
+            c.pos += 1;
+        }
+    };
+    var pos: u32 = 0;
+    for (f.blocks, 0..) |b, bi| {
+        var c: Collector = .{ .g = gen[bi * nw ..][0..nw], .k = kill[bi * nw ..][0..nw], .iv = iv, .n = f.num_vregs, .first = pos, .pos = pos };
+        if (@hasDecl(@TypeOf(f), "collectBlock")) {
+            try f.collectBlock(b, &c);
+        } else {
+            for (b.insts) |in| {
+                for (uses(f, in)) |u| try c.use(u);
+                for (defs(f, in)) |d| try c.def(d);
+                c.next();
+            }
+        }
+        pos = c.pos;
+    }
     var changed = true;
     while (changed) {
         changed = false;
         var bi = nb;
         while (bi > 0) {
             bi -= 1;
-            const b = f.blocks[bi];
-            for (b.succs) |s| {
-                if (s >= nb) return error.InvalidFunc;
-                live_out[bi].setUnion(live_in[s]);
+            const o = out[bi * nw ..][0..nw];
+            for (f.blocks[bi].succs) |s| {
+                for (o, in_[s * nw ..][0..nw]) |*ow, iw| ow.* |= iw;
             }
-            // in = uses ∪ (out − defs), walking instructions backwards
-            tmp.unsetAll();
-            tmp.setUnion(live_out[bi]);
-            var ii = b.insts.len;
-            while (ii > 0) {
-                ii -= 1;
-                for (b.insts[ii].defs) |d| tmp.unset(d);
-                for (b.insts[ii].uses) |u| tmp.set(u);
-            }
-            if (!tmp.eql(live_in[bi])) {
-                live_in[bi].unsetAll();
-                live_in[bi].setUnion(tmp);
-                changed = true;
+            const g = gen[bi * nw ..][0..nw];
+            const k = kill[bi * nw ..][0..nw];
+            for (in_[bi * nw ..][0..nw], g, k, o) |*iw, gw, kw, ow| {
+                const nv = gw | (ow & ~kw);
+                if (nv != iw.*) {
+                    iw.* = nv;
+                    changed = true;
+                }
             }
         }
     }
-    return live_out;
-}
-
-fn extend(iv: []Interval, v: VReg, p: u32) void {
-    if (iv[v].start == none or p < iv[v].start) iv[v].start = p;
-    if (iv[v].end == none or p > iv[v].end) iv[v].end = p;
+    if (nb != 0) @memcpy(out[nb * nw ..], in_[0..nw]);
+    return out;
 }
 
 pub fn buildIntervals(gpa: std.mem.Allocator, f: Func) Error![]Interval {
-    const live_out = try liveness(gpa, f);
-    defer {
-        for (live_out) |*s| s.deinit(gpa);
-        gpa.free(live_out);
-    }
+    return buildIntervalsUndef(gpa, f, null);
+}
+
+/// `buildIntervals`, plus the entry block's live-in vregs in `undef` (owned by `gpa` when
+/// non-empty; see `Result.entry_undef`).
+fn buildIntervalsUndef(gpa: std.mem.Allocator, f: anytype, undef: ?*[]VReg) Error![]Interval {
     const iv = try gpa.alloc(Interval, f.num_vregs);
+    errdefer gpa.free(iv);
     for (iv, 0..) |*x, v| x.* = .{ .vreg = @intCast(v), .start = none, .end = none };
-    var pos: u32 = 0; // instruction index across the whole function (block order = layout)
-    for (f.blocks, 0..) |b, bi| {
-        const first = pos;
-        for (b.insts) |in| {
-            for (in.uses) |u| {
-                if (u >= f.num_vregs) return error.InvalidFunc;
-                extend(iv, u, 2 * pos);
-            }
-            for (in.defs) |d| {
-                if (d >= f.num_vregs) return error.InvalidFunc;
-                extend(iv, d, 2 * pos + 1);
-            }
-            pos += 1;
-        }
-        const last_pos: u32 = if (pos == first) 2 * first else 2 * (pos - 1) + 1;
-        var it = live_out[bi].iterator(.{});
-        while (it.next()) |v| {
-            extend(iv, @intCast(v), last_pos);
-            // Live-out of a block => live through the whole block if also live-in; we keep
-            // one interval without holes, so extending to the block start is conservative.
-        }
-    }
-    // Live-in: a vreg live into block B is live from B's first position. With one interval
-    // per vreg, extending to the start of every block where it is live-out covers loops.
-    pos = 0;
+    const live_out = try liveOutIntervals(gpa, f, true, iv);
+    defer gpa.free(live_out);
+    const nw = liveWords(f);
+    var pos: u32 = 0;
     for (f.blocks, 0..) |b, bi| {
         const first = pos;
         pos += @intCast(b.insts.len);
-        var it = live_out[bi].iterator(.{});
-        while (it.next()) |v| extend(iv, @intCast(v), 2 * first);
+        const last_pos: u32 = if (pos == first) 2 * first else 2 * (pos - 1) + 1;
+        // Live-out of a block: live to its end and, with one interval per vreg and no
+        // holes, conservatively from its start too (covers loops). Both in one pass.
+        for (live_out[bi * nw ..][0..nw], 0..) |w0, wi| {
+            // Interior blocks of a consecutive live-out run cannot change either
+            // endpoint. Visit only its first/last block, preserving lifetime holes.
+            const prev = if (bi == 0) 0 else live_out[(bi - 1) * nw + wi];
+            const next = if (bi + 1 == f.blocks.len) 0 else live_out[(bi + 1) * nw + wi];
+            var w = w0 & ~(prev & next);
+            while (w != 0) : (w &= w - 1) {
+                const x = &iv[wi * @bitSizeOf(LiveWord) + @ctz(w)];
+                if (x.start == none or 2 * first < x.start) x.start = 2 * first;
+                if (x.end == none or last_pos > x.end) x.end = last_pos;
+            }
+        }
+    }
+    if (undef) |u| {
+        const entry_in = live_out[f.blocks.len * nw ..][0..nw];
+        var cnt: usize = 0;
+        for (entry_in) |w| cnt += @popCount(w);
+        u.* = &.{};
+        if (cnt != 0) {
+            const list = try gpa.alloc(VReg, cnt);
+            var k: usize = 0;
+            for (entry_in, 0..) |w0, wi| {
+                var w = w0;
+                while (w != 0) : (w &= w - 1) {
+                    list[k] = @intCast(wi * @bitSizeOf(LiveWord) + @ctz(w));
+                    k += 1;
+                }
+            }
+            u.* = list;
+        }
     }
     return iv;
 }
@@ -250,11 +391,15 @@ pub fn crossesCallAt(iv: Interval, pos: u32) bool {
     return iv.start != none and iv.start < 2 * pos and iv.end > 2 * pos + 1;
 }
 
+/// `call_pos` is sorted (ascending instruction positions).
 fn crossesCall(call_pos: []const u32, iv: Interval) bool {
-    for (call_pos) |c| {
-        if (iv.start < 2 * c and iv.end > 2 * c + 1) return true;
-    }
-    return false;
+    // First call with 2c > start; it is crossed iff 2c + 1 < end (later calls end later).
+    const i = std.sort.partitionPoint(u32, call_pos, iv.start, struct {
+        fn f(start: u32, c: u32) bool {
+            return 2 * c <= start;
+        }
+    }.f);
+    return i < call_pos.len and iv.end > 2 * call_pos[i] + 1;
 }
 
 fn overlaps(a: Interval, b: Interval) bool {
@@ -262,9 +407,13 @@ fn overlaps(a: Interval, b: Interval) bool {
 }
 
 pub fn allocate(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
+    return allocateInput(gpa, f, cfg);
+}
+
+fn allocateInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Result {
     var r = switch (cfg.algo) {
-        .linear => try allocateLinear(gpa, f, cfg),
-        .graph => try allocateGraph(gpa, f, cfg),
+        .linear => try allocateLinearInput(gpa, f, cfg),
+        .graph => try allocateGraphInput(gpa, f, cfg),
     };
     if (cfg.split) {
         errdefer r.deinit(gpa);
@@ -274,7 +423,7 @@ pub fn allocate(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
 }
 
 /// Step 7: per-block register segments for spilled vregs (see header).
-fn splitSpilled(gpa: std.mem.Allocator, f: Func, cfg: Config, r: *Result) Error!void {
+fn splitSpilled(gpa: std.mem.Allocator, f: anytype, cfg: Config, r: *Result) Error!void {
     const n = f.num_vregs;
     var calls = try callPositions(gpa, f);
     defer calls.deinit(gpa);
@@ -289,35 +438,65 @@ fn splitSpilled(gpa: std.mem.Allocator, f: Func, cfg: Config, r: *Result) Error!
     defer gpa.free(cnt);
     const first_is_use = try gpa.alloc(bool, n);
     defer gpa.free(first_is_use);
+    @memset(cnt, 0);
+    // Spilled vregs touched in the current block (in first-touch order; sorted before use so
+    // segments are created in vreg order as before).
+    var touched: std.ArrayList(VReg) = .empty;
+    defer touched.deinit(gpa);
+    // Register-allocated intervals overlapping the current block (segments never leave it).
+    var reg_ivs: std.ArrayList(u32) = .empty;
+    defer reg_ivs.deinit(gpa);
+    var reg_all: std.ArrayList(u32) = .empty;
+    defer reg_all.deinit(gpa);
+    for (r.intervals, 0..) |w, wi| if (w.start != none and r.locs[wi] == .reg) try reg_all.append(gpa, @intCast(wi));
     var base: u32 = 0;
+    var ci: usize = 0; // first call at or after `base`
     for (f.blocks) |b| {
-        @memset(cnt, 0);
+        const len: u32 = @intCast(b.insts.len);
+        defer base += len;
+        if (len == 0) continue;
+        touched.clearRetainingCapacity();
         for (b.insts, 0..) |in, k| {
             const p = base + @as(u32, @intCast(k));
-            for (in.uses) |u| note(first, last, cnt, first_is_use, u, p, true);
-            for (in.defs) |d| note(first, last, cnt, first_is_use, d, p, false);
-        }
-        for (0..n) |v| {
-            if (cnt[v] < 2 or r.locs[v] != .stack) continue;
-            if (f.fixed.len > v and f.fixed[v] != null) continue;
-            const span: Interval = .{ .vreg = @intCast(v), .start = 2 * first[v], .end = 2 * last[v] + 1 };
-            var mask = cfg.allocatable;
-            var crosses = false;
-            for (calls.items) |c| if (first[v] < c and c < last[v]) {
-                crosses = true;
+            for (uses(f, in)) |u| if (r.locs[u] == .stack) {
+                if (cnt[u] == 0) try touched.append(gpa, u);
+                note(first, last, cnt, first_is_use, u, p, true);
             };
-            if (crosses) mask &= cfg.callee_saved;
-            for (r.intervals, 0..) |w, wi| {
-                if (w.start == none or !overlaps(w, span)) continue;
-                if (r.locs[wi] == .reg) mask &= ~(@as(RegMask, 1) << @intCast(r.locs[wi].reg));
-            }
-            for (segs.items) |sg| if (sg.first <= last[v] and first[v] <= sg.last) {
+            for (defs(f, in)) |d| if (r.locs[d] == .stack) {
+                if (cnt[d] == 0) try touched.append(gpa, d);
+                note(first, last, cnt, first_is_use, d, p, false);
+            };
+        }
+        while (ci < calls.items.len and calls.items[ci] < base) ci += 1;
+        var ce = ci;
+        while (ce < calls.items.len and calls.items[ce] < base + len) ce += 1;
+        const block_calls = calls.items[ci..ce];
+        const block_span: Interval = .{ .vreg = 0, .start = 2 * base, .end = 2 * (base + len - 1) + 1 };
+        reg_ivs.clearRetainingCapacity();
+        for (reg_all.items) |wi| if (overlaps(r.intervals[wi], block_span)) try reg_ivs.append(gpa, wi);
+        const block_segs = segs.items.len;
+        std.mem.sort(VReg, touched.items, {}, std.sort.asc(VReg));
+        for (touched.items) |v| {
+            defer cnt[v] = 0;
+            if (cnt[v] < 2) continue;
+            if (f.fixed.len > v and f.fixed[v] != null) continue;
+            const span: Interval = .{ .vreg = v, .start = 2 * first[v], .end = 2 * last[v] + 1 };
+            var mask = cfg.allocatable;
+            // A segment loaded for a call argument (first == c, a use) is live in its register
+            // before the call and read again after it: crossing too.
+            for (block_calls) |c| if ((first[v] < c or (first[v] == c and first_is_use[v])) and c < last[v]) {
+                mask &= cfg.callee_saved;
+                break;
+            };
+            for (reg_ivs.items) |wi| if (overlaps(r.intervals[wi], span)) {
+                mask &= ~(@as(RegMask, 1) << @intCast(r.locs[wi].reg));
+            };
+            for (segs.items[block_segs..]) |sg| if (sg.first <= last[v] and first[v] <= sg.last) {
                 mask &= ~(@as(RegMask, 1) << @intCast(sg.reg));
             };
             if (mask == 0) continue;
-            try segs.append(gpa, .{ .vreg = @intCast(v), .first = first[v], .last = last[v], .reg = @intCast(@ctz(mask)), .load = first_is_use[v] });
+            try segs.append(gpa, .{ .vreg = v, .first = first[v], .last = last[v], .reg = @intCast(@ctz(mask)), .load = first_is_use[v] });
         }
-        base += @intCast(b.insts.len);
     }
     std.mem.sort(Seg, segs.items, {}, struct {
         fn lt(_: void, a: Seg, b: Seg) bool {
@@ -331,8 +510,24 @@ fn splitSpilled(gpa: std.mem.Allocator, f: Func, cfg: Config, r: *Result) Error!
         while (k < segs.items.len and segs.items[k].vreg < v) k += 1;
         start[v] = k;
     }
+    // Segments that need a load, by (first, vreg): `loadsAt` finds them by binary search.
+    var nload: usize = 0;
+    for (segs.items) |sg| nload += @intFromBool(sg.load);
+    const order = try gpa.alloc(u32, nload);
+    errdefer gpa.free(order);
+    nload = 0;
+    for (segs.items, 0..) |sg, i| if (sg.load) {
+        order[nload] = @intCast(i);
+        nload += 1;
+    };
+    std.mem.sort(u32, order, segs.items, struct {
+        fn lt(s: []const Seg, a: u32, b: u32) bool {
+            return s[a].first < s[b].first or (s[a].first == s[b].first and s[a].vreg < s[b].vreg);
+        }
+    }.lt);
     r.segs = try segs.toOwnedSlice(gpa);
     r.seg_start = start;
+    r.load_order = order;
 }
 
 fn note(first: []u32, last: []u32, cnt: []u32, first_is_use: []bool, v: VReg, p: u32, use: bool) void {
@@ -344,18 +539,19 @@ fn note(first: []u32, last: []u32, cnt: []u32, first_is_use: []bool, v: VReg, p:
     cnt[v] += 1;
 }
 
-fn callPositions(gpa: std.mem.Allocator, f: Func) Error!std.ArrayList(u32) {
+fn callPositions(gpa: std.mem.Allocator, f: anytype) Error!std.ArrayList(u32) {
     var calls: std.ArrayList(u32) = .empty;
+    errdefer calls.deinit(gpa);
     var pos: u32 = 0;
-    for (f.blocks) |b| for (b.insts) |in| {
-        if (in.is_call) try calls.append(gpa, pos);
+    for (f.blocks) |b| for (0..b.insts.len) |ii| {
+        if (isCall(f, b, ii)) try calls.append(gpa, pos);
         pos += 1;
     };
     return calls;
 }
 
 /// Caller-saved registers holding call-crossing values get a save slot (split ranges).
-fn saveSlots(gpa: std.mem.Allocator, f: Func, cfg: Config, iv: []const Interval, locs: []const Loc, calls: []const u32, num_slots: *u32) Error![]?u32 {
+fn saveSlots(gpa: std.mem.Allocator, f: anytype, cfg: Config, iv: []const Interval, locs: []const Loc, calls: []const u32, num_slots: *u32) Error![]?u32 {
     const save = try gpa.alloc(?u32, f.num_vregs);
     @memset(save, null);
     for (iv, 0..) |x, v| {
@@ -370,9 +566,15 @@ fn saveSlots(gpa: std.mem.Allocator, f: Func, cfg: Config, iv: []const Interval,
 
 /// Chaitin-Briggs graph colouring over the interval interference graph (see header, step 6).
 pub fn allocateGraph(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
+    return allocateGraphInput(gpa, f, cfg);
+}
+
+fn allocateGraphInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Result {
     const n = f.num_vregs;
-    const iv = try buildIntervals(gpa, f);
+    var undef: []VReg = &.{};
+    const iv = try buildIntervalsUndef(gpa, f, &undef);
     errdefer gpa.free(iv);
+    errdefer if (undef.len != 0) gpa.free(undef);
     const locs = try gpa.alloc(Loc, n);
     errdefer gpa.free(locs);
     @memset(locs, .none);
@@ -397,8 +599,8 @@ pub fn allocateGraph(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result 
     defer gpa.free(occ);
     @memset(occ, 0);
     for (f.blocks) |b| for (b.insts) |in| {
-        for (in.uses) |u| occ[u] += 1;
-        for (in.defs) |d| occ[d] += 1;
+        for (uses(f, in)) |u| occ[u] += 1;
+        for (defs(f, in)) |d| occ[d] += 1;
     };
 
     // Nodes, allowed masks, adjacency (bitsets over vregs).
@@ -445,17 +647,19 @@ pub fn allocateGraph(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result 
     defer gpa.free(alias);
     for (alias, 0..) |*a, v| a.* = @intCast(v);
     var coalesced: u32 = 0;
+    var both = try std.DynamicBitSetUnmanaged.initEmpty(gpa, n);
+    defer both.deinit(gpa);
     if (cfg.coalesce) for (f.blocks) |b| for (b.insts) |in| {
-        if (!in.is_copy or in.uses.len != 1 or in.defs.len != 1) continue;
-        const x0 = root(alias, in.uses[0]);
-        const y0 = root(alias, in.defs[0]);
+        if (!in.is_copy or uses(f, in).len != 1 or defs(f, in).len != 1) continue;
+        const x0 = root(alias, uses(f, in)[0]);
+        const y0 = root(alias, defs(f, in)[0]);
         if (x0 == y0 or isFixed(f.fixed, x0) or isFixed(f.fixed, y0)) continue;
         if (iv[x0].start == none or iv[y0].start == none or adj[x0].isSet(y0)) continue;
         const m = allowed[x0] & allowed[y0];
         const kk: u32 = @popCount(m);
         if (kk == 0) continue;
-        var both = try adj[x0].clone(gpa);
-        defer both.deinit(gpa);
+        both.unsetAll();
+        both.setUnion(adj[x0]);
         both.setUnion(adj[y0]);
         var sig: u32 = 0;
         var it = both.iterator(.{});
@@ -552,25 +756,24 @@ pub fn allocateGraph(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result 
         num_slots = @max(num_slots, slot + 1);
     }
     const save = try saveSlots(gpa, f, cfg, iv, locs, calls.items, &num_slots);
-    return .{ .locs = locs, .intervals = iv, .num_slots = num_slots, .spills = @intCast(spilled.items.len), .save_slot = save, .coalesced = coalesced };
+    return .{ .locs = locs, .intervals = iv, .num_slots = num_slots, .spills = @intCast(spilled.items.len), .save_slot = save, .coalesced = coalesced, .entry_undef = undef };
 }
 
 pub fn allocateLinear(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
-    const iv = try buildIntervals(gpa, f);
+    return allocateLinearInput(gpa, f, cfg);
+}
+
+fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Result {
+    var undef: []VReg = &.{};
+    const iv = try buildIntervalsUndef(gpa, f, &undef);
     errdefer gpa.free(iv);
+    errdefer if (undef.len != 0) gpa.free(undef);
     const locs = try gpa.alloc(Loc, f.num_vregs);
     errdefer gpa.free(locs);
     @memset(locs, .none);
 
-    var calls: std.ArrayList(u32) = .empty;
+    var calls = try callPositions(gpa, f);
     defer calls.deinit(gpa);
-    {
-        var pos: u32 = 0;
-        for (f.blocks) |b| for (b.insts) |in| {
-            if (in.is_call) try calls.append(gpa, pos);
-            pos += 1;
-        };
-    }
 
     // Fixed intervals per register.
     var fixed_iv: std.ArrayList(Interval) = .empty;
@@ -589,12 +792,12 @@ pub fn allocateLinear(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result
     };
 
     // Unhandled intervals sorted by start.
-    var order: std.ArrayList(Interval) = .empty;
+    var order = try std.ArrayList(Interval).initCapacity(gpa, f.num_vregs);
     defer order.deinit(gpa);
     for (iv, 0..) |x, v| {
         if (x.start == none) continue;
         if (f.fixed.len > v and f.fixed[v] != null) continue;
-        try order.append(gpa, x);
+        order.appendAssumeCapacity(x);
     }
     std.mem.sort(Interval, order.items, {}, struct {
         fn lt(_: void, a: Interval, b: Interval) bool {
@@ -602,14 +805,16 @@ pub fn allocateLinear(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result
         }
     }.lt);
 
-    var active: std.ArrayList(Interval) = .empty; // sorted by end
-    defer active.deinit(gpa);
+    // At most one active interval per physical register; no heap growth is needed.
+    var active_buf: [@bitSizeOf(RegMask)]Interval = undefined;
+    var active: std.ArrayList(Interval) = .initBuffer(&active_buf); // sorted by end
     var free_slots: std.ArrayList(SlotUse) = .empty;
     defer free_slots.deinit(gpa);
     var slot_in_use: std.ArrayList(SlotUse) = .empty;
     defer slot_in_use.deinit(gpa);
     var num_slots: u32 = 0;
     var spills: u32 = 0;
+    var next_slot_end: u32 = none;
 
     for (order.items) |cur| {
         // Expire old intervals.
@@ -619,11 +824,17 @@ pub fn allocateLinear(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result
                 _ = active.orderedRemove(k);
             } else k += 1;
         }
-        k = 0;
-        while (k < slot_in_use.items.len) {
-            if (slot_in_use.items[k].end < cur.start) {
-                try free_slots.append(gpa, slot_in_use.swapRemove(k));
-            } else k += 1;
+        if (next_slot_end < cur.start) {
+            next_slot_end = none;
+            k = 0;
+            while (k < slot_in_use.items.len) {
+                if (slot_in_use.items[k].end < cur.start) {
+                    try free_slots.append(gpa, slot_in_use.swapRemove(k));
+                } else {
+                    next_slot_end = @min(next_slot_end, slot_in_use.items[k].end);
+                    k += 1;
+                }
+            }
         }
 
         var mask = cfg.allocatable;
@@ -678,6 +889,7 @@ pub fn allocateLinear(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result
         };
         locs[spilled.vreg] = .{ .stack = slot };
         try slot_in_use.append(gpa, .{ .slot = slot, .end = spilled.end });
+        next_slot_end = @min(next_slot_end, spilled.end);
         spills += 1;
     }
     // Split ranges: caller-saved registers holding call-crossing values get a save slot.
@@ -690,7 +902,7 @@ pub fn allocateLinear(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result
         save[v] = num_slots;
         num_slots += 1;
     }
-    return .{ .locs = locs, .intervals = iv, .num_slots = num_slots, .spills = spills, .save_slot = save };
+    return .{ .locs = locs, .intervals = iv, .num_slots = num_slots, .spills = spills, .save_slot = save, .entry_undef = undef };
 }
 
 fn root(alias: []u32, v: VReg) u32 {
@@ -708,9 +920,21 @@ fn insertByEnd(gpa: std.mem.Allocator, list: *std.ArrayList(Interval), x: Interv
 /// Interference checker: overlapping intervals never share a register or a spill slot, and
 /// intervals crossing a call only use callee-saved registers.
 pub fn verify(f: Func, cfg: Config, r: Result) bool {
+    return verifyInput(f, cfg, r);
+}
+
+pub fn allocateCompact(gpa: std.mem.Allocator, f: CompactFunc, cfg: Config) Error!Result {
+    return allocateInput(gpa, f, cfg);
+}
+
+pub fn verifyCompact(f: CompactFunc, cfg: Config, r: Result) bool {
+    return verifyInput(f, cfg, r);
+}
+
+fn verifyInput(f: anytype, cfg: Config, r: Result) bool {
     var pos: u32 = 0;
-    for (f.blocks) |b| for (b.insts) |in| {
-        if (in.is_call) for (r.intervals) |x| {
+    for (f.blocks) |b| for (0..b.insts.len) |ii| {
+        if (isCall(f, b, ii)) for (r.intervals) |x| {
             if (x.start == none) continue;
             if (x.start < 2 * pos and x.end > 2 * pos + 1) switch (r.locs[x.vreg]) {
                 .reg => |reg| if (cfg.callee_saved & (@as(RegMask, 1) << @intCast(reg)) == 0) {
@@ -728,8 +952,8 @@ pub fn verify(f: Func, cfg: Config, r: Result) bool {
         for (r.intervals, 0..) |w, wi| if (w.start != none and overlaps(w, span) and r.locs[wi] == .reg and r.locs[wi].reg == sg.reg) return false;
         for (r.segs[i + 1 ..]) |o| if (o.reg == sg.reg and o.first <= sg.last and sg.first <= o.last) return false;
         var cp: u32 = 0;
-        for (f.blocks) |b| for (b.insts) |in| {
-            if (in.is_call and sg.first < cp and cp < sg.last and cfg.callee_saved & (@as(RegMask, 1) << @intCast(sg.reg)) == 0) return false;
+        for (f.blocks) |b| for (0..b.insts.len) |ii| {
+            if (isCall(f, b, ii) and (sg.first < cp or (sg.first == cp and sg.load)) and cp < sg.last and cfg.callee_saved & (@as(RegMask, 1) << @intCast(sg.reg)) == 0) return false;
             cp += 1;
         };
     }
@@ -1107,4 +1331,49 @@ test "regalloc: random programs verify with splitting and coalescing" {
             try t.expect(verify(f, cfg, r));
         };
     }
+}
+
+test "regalloc: a live-in value dying inside a block holds its register from the block start" {
+    // Layout b0, b1, b2: v1 is defined in b2 (laid out after its use block b1) and dies in
+    // b1, so it is not live-out of b1. v2/v3, defined at the top of b1, must not take its
+    // register.
+    const blocks = [_]Block{
+        .{ .insts = &.{.{}}, .succs = &.{2} },
+        .{ .insts = &.{ .{ .defs = &.{2} }, .{ .defs = &.{3} }, .{ .uses = &.{ 2, 3 }, .defs = &.{4} }, .{ .uses = &.{ 1, 4 }, .defs = &.{5} }, .{ .uses = &.{5} } } },
+        .{ .insts = &.{ .{ .defs = &.{1} }, .{} }, .succs = &.{1} },
+    };
+    const f: Func = .{ .blocks = &blocks, .num_vregs = 6 };
+    for ([_]Algo{ .linear, .graph }) |algo| {
+        const cfg: Config = .{ .allocatable = 0b111, .algo = algo };
+        var r = try allocate(t.allocator, f, cfg);
+        defer r.deinit(t.allocator);
+        try t.expect(verify(f, cfg, r));
+        try t.expect(r.intervals[1].start <= 2 * 1); // b1 starts at position 1
+        for ([_]VReg{ 2, 3 }) |v| if (r.locs[v] == .reg and r.locs[1] == .reg) try t.expect(r.locs[v].reg != r.locs[1].reg);
+    }
+}
+
+test "regalloc: a split segment loaded for a call argument and used after it is call-safe" {
+    // b1: v2 = call(v0); use v0 v1 v2. With no callee-saved register, v0's segment starting
+    // at the call must not sit in a (clobbered) caller-saved register.
+    const blocks = [_]Block{
+        .{ .insts = &.{ .{ .defs = &.{0} }, .{ .defs = &.{1} } }, .succs = &.{1} },
+        .{ .insts = &.{ .{ .uses = &.{0}, .defs = &.{2}, .is_call = true }, .{ .uses = &.{ 0, 1, 2 } } } },
+    };
+    const f: Func = .{ .blocks = &blocks, .num_vregs = 3 };
+    for ([_]Algo{ .linear, .graph }) |algo| {
+        const cfg: Config = .{ .allocatable = 0b11, .callee_saved = 0, .split = true, .algo = algo };
+        var r = try allocate(t.allocator, f, cfg);
+        defer r.deinit(t.allocator);
+        try t.expect(verify(f, cfg, r));
+        try t.expect(r.regAt(0, 3) == null);
+    }
+    // verify rejects such a segment.
+    var r = try allocate(t.allocator, f, .{ .allocatable = 0b11, .callee_saved = 0, .split = true });
+    defer r.deinit(t.allocator);
+    const bad = [_]Seg{.{ .vreg = 0, .first = 2, .last = 3, .reg = 1, .load = true }};
+    const saved = r.segs;
+    r.segs = &bad;
+    defer r.segs = saved;
+    if (r.locs[0] == .stack) try t.expect(!verify(f, .{ .allocatable = 0b11, .callee_saved = 0, .split = true }, r));
 }

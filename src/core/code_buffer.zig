@@ -101,13 +101,17 @@ pub const CodeBuffer = struct {
     noinline fn grow(self: *CodeBuffer, n: usize) Error!void {
         @branchHint(.cold);
         if (self.len + n > self.limit()) return error.CodeTooLarge;
-        var cap = @max(self.data.len * 2, 4096);
-        while (cap - self.len < n) cap *= 2;
+        // 1.5x: less unused capacity than doubling (the buffer is usually the largest
+        // allocation alive at the end of a compile); `remap` keeps growth steps cheap.
+        var cap = @max(self.data.len + self.data.len / 2, 1024);
+        while (cap - self.len < n) cap += cap / 2;
         cap = @min(cap, self.limit() + 16); // +16: room for the 16-byte instruction store
-        if (self.gpa.resize(self.data, cap)) {
-            self.data = self.data.ptr[0..cap];
+        // remap: in place or moved by the allocator (e.g. realloc), without the old and the
+        // new buffer both being live in this function.
+        if (self.data.len != 0) if (self.gpa.remap(self.data, cap)) |nd| {
+            self.data = nd;
             return;
-        }
+        };
         const nd = try self.gpa.alloc(u8, cap);
         @memcpy(nd[0..self.len], self.data[0..self.len]);
         self.gpa.free(self.data);

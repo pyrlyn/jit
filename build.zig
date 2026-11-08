@@ -6,6 +6,8 @@ pub fn build(b: *std.Build) void {
     const targets = b.option([]const u8, "targets", "Comma-separated backends to compile in (x86_64,aarch64)") orelse "x86_64,aarch64";
 
     const opts = b.addOptions();
+    const llvm_prefix = b.option([]const u8, "llvm-prefix", "Enable the optional LLVM backend using PREFIX/include and PREFIX/lib (shared libLLVM)");
+    opts.addOption(bool, "llvm", llvm_prefix != null);
     const want_x86_64 = std.mem.indexOf(u8, targets, "x86_64") != null;
     const want_aarch64 = std.mem.indexOf(u8, targets, "aarch64") != null;
     opts.addOption(bool, "x86_64", want_x86_64);
@@ -29,6 +31,19 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     pyrlyn_jit.addOptions("pyrlyn_jit_options", opts);
+    if (llvm_prefix) |prefix| {
+        const bindings = b.addTranslateC(.{
+            .root_source_file = b.path("src/core/llvm_c.h"),
+            .target = target,
+            .optimize = optimize,
+        });
+        bindings.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
+        pyrlyn_jit.addImport("llvm_c", bindings.createModule());
+        const lib: std.Build.LazyPath = .{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) };
+        pyrlyn_jit.addLibraryPath(lib);
+        pyrlyn_jit.addRPath(lib);
+        pyrlyn_jit.linkSystemLibrary("LLVM", .{ .use_pkg_config = .no });
+    }
 
     const tests = b.addTest(.{ .root_module = pyrlyn_jit });
     // Standalone fuzz driver (seeded, replayable); `zig build test --fuzz` also works (see SECURITY.md).
@@ -101,7 +116,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
-    @import("bc2jit/build_steps.zig").add(b, target, optimize, pyrlyn_jit, test_step);
+    @import("bc2jit/build_steps.zig").add(b, target, optimize, pyrlyn_jit, test_step, llvm_prefix != null);
 
     // 32-bit x86 Compiler execution tests (x86-linux; runs natively on x86_64 Linux kernels).
     const x86_32_mod = b.createModule(.{
@@ -277,7 +292,16 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .link_libc = true,
-            .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+            .imports = &.{
+                .{ .name = "pyrlyn_jit", .module = jit_fast },
+                .{ .name = "bc2jit", .module = b.createModule(.{
+                    .root_source_file = b.path("bc2jit/lib.zig"),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+                }) },
+            },
         }) });
         const tr = target.result;
         const base_path = (b.fmt("bench/baseline-{s}-{s}.txt", .{ @tagName(tr.cpu.arch), @tagName(tr.os.tag) }));
@@ -296,6 +320,18 @@ pub fn build(b: *std.Build) void {
         truncate.setCwd(b.path("."));
         upd_run.step.dependOn(&truncate.step);
         b.step("bench-update", "Re-measure and rewrite the benchmark baseline file").dependOn(&upd_run.step);
+
+        // IR Compiler time/memory (bench/compile_bench.zig), report only; PJIT_BENCH_MS = time budget per case.
+        const cbt = b.addExecutable(.{ .name = "compile_bench", .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/compile_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+        }) });
+        const cb_run = b.addRunArtifact(cbt);
+        cb_run.has_side_effects = true;
+        b.step("bench-compile", "Measure IR Compiler time and memory (x86-64, AArch64, RV64) on generated functions").dependOn(&cb_run.step);
     }
 
     // zig fmt: our sources only. AsmJit-derived and other generated files are excluded so they
