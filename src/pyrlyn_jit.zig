@@ -2,6 +2,9 @@
 //! Each target is a separate module compiled in only if enabled via `-Dtargets=`.
 const opts = @import("pyrlyn_jit_options");
 
+/// C ABI implementation, instantiated by the library export root.
+pub const c_api = @import("c_api.zig");
+
 pub const CodeBuffer = @import("core/code_buffer.zig").CodeBuffer;
 pub const Label = @import("core/code_buffer.zig").Label;
 pub const Arch = @import("core/arch.zig").Arch;

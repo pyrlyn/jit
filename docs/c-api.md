@@ -94,3 +94,14 @@ All four examples also compile IR text for the host and check the result (C/C++/
 A `pjit_buffer` must not be used from several threads at once. Different buffers and functions
 are independent. On Apple Silicon, `pjit_jit_add` toggles the calling thread's JIT write
 protection for the duration of the copy.
+
+## KXBC bytecode
+
+`<bc2jit.h>` provides validated KXBC v0/v1 compilation and optional JIT execution in the
+same library. See [the Zig/C API and ownership contract](../bc2jit/README.md#zig-and-c-apis).
+Enabled by default; `-Dbc2jit=false` retains C stubs returning `PJIT_BC2JIT_DISABLED`.
+
+`pjit_func_free` and `pjit_bc2jit_free` release ownership. A bounded runtime cache may retain
+up to eight idle 16 KiB mappings; call `pjit_jit_trim_cache()` to release idle mappings (returns
+bytes unmapped, zero under contention). Live functions are unaffected. Never use an entry or
+code pointer after freeing its owner.

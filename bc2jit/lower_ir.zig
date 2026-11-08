@@ -188,11 +188,11 @@ pub fn lowerIr(gpa: std.mem.Allocator, t: lower.Target, f: bc.Function, cb: *jit
     defer g.deinit();
     switch (t) {
         .x86_64 => if (comptime opts.x86_64) {
-            _ = jit.x86_64_compiler.compile(gpa, &g, cb, .{}) catch return error.CompileFailed;
+            _ = jit.x86_64_compiler.compile(gpa, &g, cb, .{}) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.CompileFailed;
         } else return error.BackendNotBuilt,
         .aarch64 => if (comptime opts.aarch64) {
-            _ = jit.aarch64_compiler.compile(gpa, &g, cb, .{}) catch return error.CompileFailed;
+            _ = jit.aarch64_compiler.compile(gpa, &g, cb, .{}) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.CompileFailed;
         } else return error.BackendNotBuilt,
-        .riscv64 => _ = jit.riscv_compiler.compile(gpa, &g, cb, .{}) catch return error.CompileFailed,
+        .riscv64 => _ = jit.riscv_compiler.compile(gpa, &g, cb, .{}) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.CompileFailed,
     }
 }

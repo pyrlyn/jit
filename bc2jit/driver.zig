@@ -18,12 +18,16 @@ pub const Compiled = struct {
     pub fn code(c: *const Compiled) []const u8 {
         return c.cb.code();
     }
+    /// Callable C-ABI entry point, or null for code-only/foreign targets.
+    pub fn entry(c: *const Compiled) ?Fn {
+        return if (c.exec) |e| e.ptr(Fn) else null;
+    }
     /// Calls the function; only valid when `exec != null`.
     pub fn call(c: *const Compiled, args: [4]i64) i64 {
         const f = c.exec.?.ptr(Fn);
         return f(args[0], args[1], args[2], args[3]);
     }
-    /// Releases the executable mapping and the code buffer.
+    /// Releases code and executable ownership; the runtime may cache the idle mapping.
     pub fn deinit(c: *Compiled) void {
         if (c.exec) |e| e.release();
         c.cb.deinit();
@@ -35,13 +39,23 @@ pub const Error = lower.Error || lower_ir.Error || jit.JitRuntime.Error;
 
 /// Lowers `f` for `target`; maps it executable only if the target is the host.
 /// v0 modules use the direct register-per-slot lowering (`lower.zig`, SysV on x86-64); v1
-/// modules go through the IR Compilers (`lower_ir.zig`, host C ABI incl. Win64).
+/// modules use the same direct path when their instructions fit its stack and ABI;
+/// otherwise they use the IR Compilers (`lower_ir.zig`, host C ABI incl. Win64).
 pub fn compile(gpa: std.mem.Allocator, target: lower.Target, f: bc.Function) Error!Compiled {
+    return compileWithOptions(gpa, target, f, .{});
+}
+
+pub const Options = struct {
+    /// False emits code without allocating executable memory, even on the host.
+    executable: bool = true,
+};
+
+pub fn compileWithOptions(gpa: std.mem.Allocator, target: lower.Target, f: bc.Function, options: Options) Error!Compiled {
     var cb = jit.CodeBuffer.init(gpa);
     errdefer cb.deinit();
-    if (f.version == bc.version) try lower.lower(target, f, &cb) else try lower_ir.lowerIr(gpa, target, f, &cb);
+    if (canLowerDirect(target, f)) try lower.lower(target, f, &cb) else try lower_ir.lowerIr(gpa, target, f, &cb);
     const runnable = if (f.version == bc.version) target.canExecute() else lower.Target.host() == target;
-    const exec: ?jit.JitRuntime.Function = if (runnable) try jit.JitRuntime.add(&cb) else null;
+    const exec: ?jit.JitRuntime.Function = if (options.executable and runnable) try jit.JitRuntime.add(&cb) else null;
     return .{ .cb = cb, .exec = exec };
 }
 
@@ -52,6 +66,21 @@ pub fn compileLlvm(gpa: std.mem.Allocator, f: bc.Function, options: jit.llvm.Opt
     var g = try lower_ir.toIr(gpa, f);
     defer g.deinit();
     return jit.llvm.prepare(gpa, &g, options, diag);
+}
+
+// v1's straight-line arithmetic subset has exactly the v0 semantics. Avoid building IR
+// when no control flow, locals, extended operations or spilling is needed. Windows x64
+// still requires the IR path for v1 because the direct emitter implements SysV only.
+fn canLowerDirect(target: lower.Target, f: bc.Function) bool {
+    if (f.version == bc.version) return true;
+    if (target == .x86_64 and @import("builtin").os.tag == .windows) return false;
+    var depth: isize = 0;
+    for (f.insts) |inst| {
+        if (!std.meta.activeTag(inst).inV0()) return false;
+        depth += inst.stackEffect();
+        if (depth > bc.max_depth) return false;
+    }
+    return true;
 }
 
 /// Message for a `compile` error.

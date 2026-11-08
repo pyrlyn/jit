@@ -18,6 +18,7 @@ zig build test -Doptimize=ReleaseFast              # tests with optimizations
 zig build run-example_aarch64                      # AArch64 JIT, executes natively
 zig build run-example_x86_64 -Dtarget=x86_64-macos # x86-64 JIT, executes under Rosetta
 zig build run-example_hooks                        # validation + hooks demo
+zig build -Dbc2jit=false                          # omit KXBC support (C stubs stay linkable)
 zig build -Dtargets=aarch64                        # compile only the AArch64 backend
 ```
 
@@ -59,7 +60,7 @@ cc main.c $(pkg-config --cflags pyrlyn-jit) /opt/pyrlyn-jit/lib/libpyrlyn-jit.a 
 `CMakeLists.txt` is a thin adapter: it runs `zig build install` into the build directory and
 exposes IMPORTED targets `pyrlyn-jit::pyrlyn-jit` (static) and `pyrlyn-jit::pyrlyn-jit_shared`. `-Doptimize` follows
 `CMAKE_BUILD_TYPE` (Release/MinSizeRel → ReleaseFast, RelWithDebInfo/none → ReleaseSafe,
-Debug → Debug); override with `-DPYRLYN_JIT_OPTIMIZE=...`, backends with `-DPYRLYN_JIT_TARGETS=x86_64`.
+Debug → Debug); override with `-DPYRLYN_JIT_OPTIMIZE=...`, backends with `-DPYRLYN_JIT_TARGETS=x86_64`, bytecode support with `-DPYRLYN_JIT_BC2JIT=OFF`.
 
 ```cmake
 # add_subdirectory

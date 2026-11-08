@@ -416,6 +416,11 @@ export fn pjit_func_free(f: ?*Func) void {
     gpa.destroy(p);
 }
 
+/// Releases idle executable pages retained by the runtime; never invalidates a live function.
+export fn pjit_jit_trim_cache() usize {
+    return rt.trimCache();
+}
+
 test "c api: a64 add + ret, labels, errors" {
     var b: ?*Buffer = null;
     try std.testing.expectEqual(OK, pjit_buffer_new(&b));

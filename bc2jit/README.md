@@ -10,6 +10,63 @@ zig-out/bin/bc2jit --arch riscv add.kxbc              # foreign target: prints t
 zig-out/bin/bc2jit -a x86-64 -o add.bin add.kxbc      # raw machine code to a file
 ```
 
+## Zig and C APIs
+
+The `bc2jit` module and C API are enabled by default. Disable bytecode support with
+`zig build -Dbc2jit=false` (`PYRLYN_JIT_BC2JIT=OFF` in CMake). The core assembler/JIT remains
+available; the CLI steps are omitted, the Zig `compile` returns `error.FeatureDisabled`, and
+C symbols stay linkable as stubs returning `PJIT_BC2JIT_DISABLED`.
+
+In a Zig build, import `dependency.module("bc2jit")` as `bc2jit`:
+
+```zig
+const bc2jit = @import("bc2jit");
+var diag: bc2jit.Diagnostic = .{};
+var compiled = try bc2jit.compile(gpa, .aarch64, kxbc_bytes, .{}, &diag);
+defer compiled.deinit();
+if (compiled.entry()) |f| {
+    const answer = f(40, 2, 0, 0);
+    _ = answer;
+}
+```
+
+`compile` validates the complete KXBC v0/v1 module and owns all resulting allocations.
+Input bytes may be freed after it returns. Simple v1 straight-line arithmetic uses the
+direct lowering when its stack fits five registers and the ABI matches; other v1 functions use IR. `code()` borrows the finalized machine code;
+`entry()` returns a C-ABI function pointer only for a compatible host target. Pass
+`.{ .executable = false }` to emit code without mapping executable memory. Release the result
+with `deinit()` after all calls have finished. `diag.offset` identifies decoder errors;
+`errorMessage(err)` describes decoder and compiler failures.
+
+C consumers include `<bc2jit.h>` and link the existing `libpyrlyn-jit`:
+
+```c
+pjit_bc2jit *compiled = NULL;
+pjit_bc2jit_diagnostic diagnostic;
+int status = pjit_bc2jit_compile(bytes, length, PJIT_BC2JIT_HOST, 0,
+                                &compiled, &diagnostic);
+if (status == PJIT_BC2JIT_OK) {
+    pjit_bc2jit_fn entry = pjit_bc2jit_entry(compiled);
+    if (entry) printf("%lld\n", (long long)entry(40, 2, 0, 0));
+    pjit_bc2jit_free(compiled);
+}
+```
+
+The `PJIT_BC2JIT_NO_JIT` flag emits code only; `pjit_bc2jit_code` exposes its bytes.
+The handle owns both code and the optional executable mapping. The entry and code pointers
+remain valid until `pjit_bc2jit_free`; input bytes are borrowed only during compilation.
+`pjit_bc2jit_enabled()` reports whether the library includes bytecode support.
+
+Releasing a function destroys its handle and code buffer. The shared runtime may retain its
+idle executable page for reuse (up to eight 16 KiB pages, 128 KiB total). This cache is identical
+for the assembler and bytecode APIs; live functions never share a page. `JitRuntime.trimCache()`
+or `pjit_jit_trim_cache()` from `<pyrlyn_jit.h>` releases idle pages without affecting live code.
+Calls after release are invalid even if the runtime has retained the underlying page.
+Trim the cache before unloading a dynamically loaded library to return its retained pages.
+
+Measure API paths and enabled/disabled library/binary sizes with
+`python3 scripts/bench_bc2jit_api.py`; see [the recorded results](../bench/BC2JIT_API_RESULTS.md).
+
 ## Why KXBC
 
 The KotlinX AoT pipeline (`newkotlinc`) has no bytecode of its own: it prints LLVM IR text
@@ -19,11 +76,13 @@ lives here, next to the assemblers it targets; the KotlinX emitter is a separate
 
 ## Command line
 
-`bc2jit -a ARCH [-o FILE] INPUT [ARG...]`, see `bc2jit --help`.
+`bc2jit -a ARCH [--no-jit] [-o FILE] INPUT [ARG...]`, see `bc2jit --help`.
 
 - `-a`, `--arch ARCH` (required; also `--arch=ARCH`): `x86-64`, `aarch64` or `riscv`, exact and
   case-sensitive. Missing, empty or unknown values print one line on stderr listing the allowed
   values and exit with status 2.
+- `--no-jit`: emit code without mapping or executing it, including for the host target;
+  requires `--backend=pyrlyn` (LLVM backends do not expose machine-code output).
 - `-o`, `--output FILE`: write the raw machine code to FILE.
 - `ARG...`: up to four integers (decimal, or `0x`/`0o`/`0b` prefixed, may be negative) passed to
   the function when it is executed; missing ones are 0.
@@ -158,7 +217,8 @@ may appear anywhere.
 
 ## Lowering
 
-v1 modules are lowered through the pyrlyn-jit IR (`lower_ir.zig`): every stack slot, local and
+v1 modules outside the direct emitter's compatible straight-line subset are lowered through
+the pyrlyn-jit IR (`lower_ir.zig`): every stack slot, local and
 argument becomes a mutable IR vreg, basic blocks start at jump targets and after branches, and
 the x86-64, AArch64 or RV64 Compiler does register allocation (linear scan with spilling, so
 all 64 stack slots work), the host C ABI and branch lowering. `div`/`rem` get guard blocks for

@@ -149,7 +149,11 @@ int pjit_ir_eval(const char *src, size_t len, const int64_t *args, size_t nargs,
 /* `b` must be finalized. */
 int pjit_jit_add(const pjit_buffer *b, pjit_func **out);
 const void *pjit_func_ptr(const pjit_func *f);
+/* Releases ownership; up to 128 KiB of idle executable pages may be cached by the runtime. */
 void pjit_func_free(pjit_func *f);
+/* Best-effort cache trim; returns bytes unmapped, or zero under contention. Live functions
+ * are unaffected. Shared by the assembler and bc2jit APIs. */
+size_t pjit_jit_trim_cache(void);
 
 #ifdef __cplusplus
 }

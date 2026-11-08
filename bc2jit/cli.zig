@@ -4,7 +4,7 @@ const lower = @import("lower.zig");
 
 /// Usage text printed by `-h`/`--help`.
 pub const usage =
-    \\usage: bc2jit -a ARCH [-o FILE] INPUT [ARG...]
+    \\usage: bc2jit -a ARCH [--no-jit] [-o FILE] INPUT [ARG...]
     \\
     \\Compile a KXBC (v0 or v1) bytecode function to machine code with pyrlyn-jit.
     \\
@@ -18,6 +18,7 @@ pub const usage =
     \\  --backend NAME     pyrlyn (default), llvm-jit or llvm-interpreter
     \\  --no-opt           disable LLVM optimization (LLVM backends only)
     \\                     LLVM requires --arch = host; -o is not supported
+    \\      --no-jit       emit code without mapping or executing it (pyrlyn only)
     \\  -h, --help          show this help and exit
     \\
     \\exit status: 0 success, 1 compile or I/O error, 2 usage error
@@ -35,6 +36,7 @@ pub const Options = struct {
     /// Integer arguments for execution (at most `bytecode.max_args`).
     args: [4]i64 = .{ 0, 0, 0, 0 },
     arg_count: u8 = 0,
+    executable: bool = true,
 };
 
 /// Result of parsing: run with options, show help, or fail with a message (exit status 2).
@@ -52,6 +54,7 @@ pub const exit_usage = 2;
 pub fn parse(arena: std.mem.Allocator, argv: []const []const u8) error{OutOfMemory}!Parsed {
     var target: ?lower.Target = null;
     var output: ?[]const u8 = null;
+    var executable = true;
     var backend: Options.Backend = .pyrlyn;
     var optimize = true;
     var positional: std.ArrayList([]const u8) = .empty;
@@ -78,6 +81,10 @@ pub fn parse(arena: std.mem.Allocator, argv: []const []const u8) error{OutOfMemo
             backend = if (std.mem.eql(u8, v, "pyrlyn")) .pyrlyn else if (std.mem.eql(u8, v, "llvm-jit")) .llvm_jit else if (std.mem.eql(u8, v, "llvm-interpreter")) .llvm_interpreter else return .{ .usage_error = "bc2jit: unknown --backend (allowed: pyrlyn, llvm-jit, llvm-interpreter)" };
             continue;
         }
+        if (std.mem.eql(u8, a, "--no-jit")) {
+            executable = false;
+            continue;
+        }
         const arch_val = optionValue(argv, &i, a, "-a", "--arch") catch
             return .{ .usage_error = "bc2jit: option --arch requires a value (allowed: " ++ lower.allowed_flags ++ ")" };
         if (arch_val) |v| {
@@ -97,13 +104,14 @@ pub fn parse(arena: std.mem.Allocator, argv: []const []const u8) error{OutOfMemo
         return .{ .usage_error = try std.fmt.allocPrint(arena, "bc2jit: unknown option '{s}' (see --help)", .{a}) };
     }
     const t = target orelse return .{ .usage_error = "bc2jit: missing required option --arch (allowed: " ++ lower.allowed_flags ++ ")" };
+    if (backend != .pyrlyn and !executable) return .{ .usage_error = "bc2jit: --no-jit requires the pyrlyn backend" };
     if (backend == .pyrlyn and !optimize) return .{ .usage_error = "bc2jit: --no-opt requires an LLVM backend" };
     if (backend != .pyrlyn and output != null) return .{ .usage_error = "bc2jit: -o is not supported by LLVM backends" };
     if (backend != .pyrlyn and lower.Target.host() != t) return .{ .usage_error = "bc2jit: LLVM backends require --arch to match the host" };
     if (positional.items.len == 0) return .{ .usage_error = "bc2jit: missing INPUT file (see --help)" };
     const rest = positional.items[1..];
     if (rest.len > 4) return .{ .usage_error = "bc2jit: at most 4 ARGs are allowed" };
-    var o: Options = .{ .target = t, .backend = backend, .optimize = optimize, .input = positional.items[0], .output = output, .arg_count = @intCast(rest.len) };
+    var o: Options = .{ .target = t, .backend = backend, .optimize = optimize, .input = positional.items[0], .output = output, .arg_count = @intCast(rest.len), .executable = executable };
     for (rest, 0..) |s, k| {
         o.args[k] = std.fmt.parseInt(i64, s, 0) catch return .{ .usage_error = try std.fmt.allocPrint(
             arena,

@@ -1,3 +1,4 @@
+# 2026-11-08: tightened JIT add/release, AArch64 e2e and bc2jit e2e for bounded mapping reuse (median of 3 run medians).
 # 2026-11-08 Apple M3 Max: refreshed x86_64_straight/calls/loops and bc2jit_lower_x86_64; other thresholds retained.
 # ns/iter median, zig build bench-update, 2026-11-03 arm64 load: 31.85 28.00 26.94 (bc2jit_* cases; other cases kept from previous baseline)
 x86_64_straight 4418.9
@@ -7,12 +8,12 @@ x86_64_mem 1899.7
 x86_64_avx 5419.6
 x86_64_avx512 6539.7
 aarch64_emit 3530.6
-jit_runtime_add_release 4935.1
-e2e_aarch64_compile_run 5019.4
+jit_runtime_add_release 173.3
+e2e_aarch64_compile_run 197.4
 bc2jit_decode_small 544.6
 bc2jit_decode_64k 151739.2
 bc2jit_lower_x86_64 176821.0
 bc2jit_lower_aarch64 254619.9
 bc2jit_lower_riscv64 121645.1
 bc2jit_stack_all_opcodes 4833.3
-bc2jit_e2e_aarch64 9012.5
+bc2jit_e2e_aarch64 1048.5

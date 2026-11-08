@@ -331,9 +331,11 @@ fn decodeCase(name: []const u8, units: usize) !void {
 }
 
 test "bench bc2jit_decode_small" {
+    if (!bo.bc2jit) return error.SkipZigTest;
     try decodeCase("bc2jit_decode_small", UNITS_SMALL);
 }
 test "bench bc2jit_decode_64k" {
+    if (!bo.bc2jit) return error.SkipZigTest;
     try decodeCase("bc2jit_decode_64k", UNITS_64K);
 }
 
@@ -354,21 +356,26 @@ fn lowerCase(name: []const u8, t: Target, units: usize) !void {
 
 // Opcode -> assembler translation of the ~64 KiB all-opcode module, per backend.
 test "bench bc2jit_lower_x86_64" {
+    if (!bo.bc2jit) return error.SkipZigTest;
     try lowerCase("bc2jit_lower_x86_64", .x86_64, UNITS_64K);
 }
 test "bench bc2jit_lower_aarch64" {
+    if (!bo.bc2jit) return error.SkipZigTest;
     try lowerCase("bc2jit_lower_aarch64", .aarch64, UNITS_64K);
 }
 test "bench bc2jit_lower_riscv64" {
+    if (!bo.bc2jit) return error.SkipZigTest;
     try lowerCase("bc2jit_lower_riscv64", .riscv64, UNITS_64K);
 }
 // Stack model on a small all-opcode program (depth 1..5 every unit), host backend.
 test "bench bc2jit_stack_all_opcodes" {
+    if (!bo.bc2jit) return error.SkipZigTest;
     const h = Target.host() orelse return error.SkipZigTest;
     try lowerCase("bc2jit_stack_all_opcodes", h, 64);
 }
 
 test "bench bc2jit_e2e_aarch64" {
+    if (!bo.bc2jit) return error.SkipZigTest;
     if (!Target.aarch64.isBuilt() or !Target.aarch64.canExecute()) return error.SkipZigTest;
     const p = try Prog.init(UNITS_SMALL);
     defer p.deinit();

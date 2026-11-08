@@ -55,13 +55,13 @@ const cases = [_]Case{
 };
 
 /// Registers the bc2jit steps; unit tests are also attached to `test_step`.
-pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, pyrlyn_jit: *std.Build.Module, test_step: *std.Build.Step, llvm_enabled: bool) void {
+pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, pyrlyn_jit: *std.Build.Module, bc2jit: *std.Build.Module, test_step: *std.Build.Step, llvm_enabled: bool) void {
     const mod = b.createModule(.{
         .root_source_file = b.path("bc2jit/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "pyrlyn_jit", .module = pyrlyn_jit }},
+        .imports = &.{ .{ .name = "pyrlyn_jit", .module = pyrlyn_jit }, .{ .name = "bc2jit", .module = bc2jit } },
     });
     const exe = b.addExecutable(.{ .name = "bc2jit", .root_module = mod });
     b.step("bc2jit", "Build the bc2jit CLI (KXBC bytecode -> pyrlyn-jit machine code)").dependOn(&b.addInstallArtifact(exe, .{}).step);
@@ -125,6 +125,8 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     }
     // CLI contract: usage errors go to stderr with exit status 2.
     const usage_cases = [_]struct { args: []const []const u8, stderr: []const u8 }{
+        .{ .args = &.{ "--arch", "aarch64", "--backend", "llvm-jit", "--no-jit", "x.kxbc" }, .stderr = "bc2jit: --no-jit requires the pyrlyn backend\n" },
+        .{ .args = &.{ "--arch", "aarch64", "--backend", "llvm-interpreter", "--no-jit", "x.kxbc" }, .stderr = "bc2jit: --no-jit requires the pyrlyn backend\n" },
         .{ .args = &.{"x.kxbc"}, .stderr = "bc2jit: missing required option --arch (allowed: x86-64, aarch64, riscv)\n" },
         .{ .args = &.{ "--arch", "mips", "x.kxbc" }, .stderr = "bc2jit: unknown --arch value 'mips' (allowed: x86-64, aarch64, riscv)\n" },
         .{ .args = &.{"--arch"}, .stderr = "bc2jit: option --arch requires a value (allowed: x86-64, aarch64, riscv)\n" },
@@ -158,6 +160,16 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         run.skip_foreign_checks = true;
         const check = b.addCheckFile(out, .{ .expected_exact = oc.bytes });
         e2e.dependOn(&check.step);
+    }
+    // Explicitly suppress JIT even for the host, and check the same golden code bytes.
+    for (out_cases) |oc| {
+        const run = b.addRunArtifact(exe);
+        run.addArgs(&.{ "--arch", oc.flag, "--no-jit" });
+        run.addFileArg(in_file);
+        run.expectExitCode(0);
+        run.expectStdOutEqual(b.fmt("{x}\n", .{oc.bytes}));
+        run.skip_foreign_checks = true;
+        e2e.dependOn(&run.step);
     }
     // Input errors: exit status 1 with the decoder's message and byte offset.
     const bad_cases = [_]struct { name: []const u8, module: []const u8, stderr: []const u8 }{
