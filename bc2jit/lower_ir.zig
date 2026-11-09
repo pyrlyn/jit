@@ -184,8 +184,23 @@ fn isTerminator(i: bc.Inst) bool {
 
 /// Lowers `f` through the IR Compiler for `t` into `cb` (finalized).
 pub fn lowerIr(gpa: std.mem.Allocator, t: lower.Target, f: bc.Function, cb: *jit.CodeBuffer) Error!void {
+    return lowerIrOpt(gpa, t, f, cb, .o0);
+}
+
+/// `lowerIr` with the IR optimizer (`jit.opt`) run at `level` before code generation; `.o2`
+/// also vectorizes loops for the target's vector unit (AArch64 NEON, x86-64 SSE).
+pub fn lowerIrOpt(gpa: std.mem.Allocator, t: lower.Target, f: bc.Function, cb: *jit.CodeBuffer, level: jit.opt.Level) Error!void {
     var g = try toIr(gpa, f);
     defer g.deinit();
+    if (level != .o0) {
+        const vector: jit.opt.VectorTarget = if (level != .o2) .none else switch (t) {
+            .x86_64 => .x86_64,
+            .aarch64 => .aarch64,
+            .riscv64 => .none,
+        };
+        _ = jit.opt.optimize(gpa, &g, .{ .level = level, .vector = vector }) catch |e|
+            return if (e == error.OutOfMemory) error.OutOfMemory else error.CompileFailed;
+    }
     switch (t) {
         .x86_64 => if (comptime opts.x86_64) {
             _ = jit.x86_64_compiler.compile(gpa, &g, cb, .{}) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.CompileFailed;

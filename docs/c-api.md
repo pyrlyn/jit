@@ -7,7 +7,7 @@ explicit padding.
 ## Versioning
 
 - Header: `PJIT_VERSION_MAJOR/MINOR/PATCH`, `PJIT_VERSION` (`PJIT_MAKE_VERSION(major, minor, patch)`
-  = `MAJOR << 16 | MINOR << 8 | PATCH`). Library: `pjit_version()`. Current: 0.2.0.
+  = `MAJOR << 16 | MINOR << 8 | PATCH`). Library: `pjit_version()`. Current: 0.3.0.
 - Within one major version the ABI only grows: functions and enum values are appended,
   existing ones never change value, meaning or struct layout (`tests/c/capi_test.c` pins the
   struct sizes and status values with `_Static_assert`).
@@ -19,6 +19,7 @@ explicit padding.
 |---|---|
 | 0.1.0 | buffers, labels, AArch64/x86-64 emitters, executable memory |
 | 0.2.0 | version macros, `pjit_last_error`/`pjit_clear_error`, IR compiler (`pjit_ir_compile`, `pjit_ir_eval`), statuses `PJIT_ERR_UNSUPPORTED`..`PJIT_ERR_STEP_LIMIT` |
+| 0.3.0 | IR optimizer: `pjit_ir_compile_opt` (levels 0-2) |
 
 ## Building
 
@@ -48,6 +49,9 @@ whose members are not 8-byte aligned. The build therefore also emits a plain obj
    and 32-bit arithmetic. The OS calling convention is selected at library build time.
    `pjit_ir_eval` uses 64-bit integer semantics, so it is not a reference for x86 overflow.
    Its step limit must fit `size_t`; zero selects the default limit.
+   `pjit_ir_compile_opt(b, src, len, arch, level)` optimizes the IR first (`docs/OPTIMIZER.md`):
+   level 1 runs the scalar SSA passes, level 2 adds loop optimizations and vectorization for
+   the target (NEON/SSE). Results never change; `PJIT_ARCH_X86` supports level 0 only.
 6. `pjit_jit_add` copies the code into W^X executable memory. `pjit_func_ptr` gives the entry
    point, and `pjit_func_free` releases it.
 

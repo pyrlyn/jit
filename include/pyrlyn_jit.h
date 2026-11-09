@@ -22,7 +22,7 @@ extern "C" {
 #endif
 
 #define PJIT_VERSION_MAJOR 0
-#define PJIT_VERSION_MINOR 2
+#define PJIT_VERSION_MINOR 3
 #define PJIT_VERSION_PATCH 0
 #define PJIT_MAKE_VERSION(major, minor, patch) ((uint32_t)(((major) << 16) | ((minor) << 8) | (patch)))
 #define PJIT_VERSION PJIT_MAKE_VERSION(PJIT_VERSION_MAJOR, PJIT_VERSION_MINOR, PJIT_VERSION_PATCH)
@@ -140,6 +140,12 @@ enum { PJIT_ARCH_HOST = 0, PJIT_ARCH_X86_64, PJIT_ARCH_AARCH64, PJIT_ARCH_X86, P
  * `int32_t f(int32_t...)` (cdecl, 32-bit arithmetic) for PJIT_ARCH_X86.
  * Run it with pjit_jit_add only when arch matches the host. */
 int pjit_ir_compile(pjit_buffer *b, const char *src, size_t len, int arch);
+/* pjit_ir_compile after the IR optimizer (since 0.3.0; docs/OPTIMIZER.md): level 0 = none (same as
+ * pjit_ir_compile), 1 = scalar SSA optimizations, 2 = also loop optimizations and vectorization
+ * for the target's vector unit. The result computes exactly what the unoptimized function does
+ * (pjit_ir_eval semantics). PJIT_ARCH_X86 (32-bit arithmetic) supports level 0 only
+ * (PJIT_ERR_UNSUPPORTED); other levels return PJIT_ERR_INVALID_ARGUMENT. */
+int pjit_ir_compile_opt(pjit_buffer *b, const char *src, size_t len, int arch, int level);
 /* Reference interpreter with 64-bit integer semantics: *out = f(args[0..nargs)).
  * max_steps 0 = default limit; values above SIZE_MAX return PJIT_ERR_INVALID_ARGUMENT.
  * IR memory accesses and calls use real addresses: callers must supply valid pointers. */

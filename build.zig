@@ -55,7 +55,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "pyrlyn_jit", .module = pyrlyn_jit }},
     });
 
-    const tests = b.addTest(.{ .root_module = pyrlyn_jit });
+    const test_filters = b.option([]const []const u8, "test-filter", "test, test-core: only run module tests whose name contains one of these strings") orelse &.{};
+    const tests = b.addTest(.{ .root_module = pyrlyn_jit, .filters = test_filters });
     // Standalone fuzz driver (seeded, replayable); `zig build test --fuzz` also works (see SECURITY.md).
     const fuzz_exe = b.addExecutable(.{ .name = "pyrlyn_jit_fuzz", .root_module = b.createModule(.{
         .root_source_file = b.path("src/fuzz_main.zig"),
@@ -125,7 +126,9 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
+    const run_tests = b.addRunArtifact(tests);
+    test_step.dependOn(&run_tests.step);
+    b.step("test-core", "Run only the pyrlyn_jit module tests (fast iteration; honours -Dtest-filter)").dependOn(&run_tests.step);
     if (want_bc2jit) @import("bc2jit/build_steps.zig").add(b, target, optimize, pyrlyn_jit, bc2jit, test_step, llvm_prefix != null);
 
     const runtime_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
@@ -170,7 +173,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib_shared);
     b.installDirectory(.{ .source_dir = b.path("include"), .install_dir = .header, .install_subdir = "" });
     // pkg-config file (zig-out/lib/pkgconfig/pyrlyn-jit.pc); prefix is relocatable via pcfiledir.
-    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.2.0";
+    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.3.0";
     const pc = b.addWriteFiles().add("pyrlyn-jit.pc", b.fmt(
         \\prefix=${{pcfiledir}}/../..
         \\libdir=${{prefix}}/lib
@@ -409,6 +412,27 @@ pub fn build(b: *std.Build) void {
         const cb_run = b.addRunArtifact(cbt);
         cb_run.has_side_effects = true;
         b.step("bench-compile", "Measure IR Compiler time and memory (x86-64, AArch64, RV64) on generated functions").dependOn(&cb_run.step);
+
+        // Execution speed of generated code (bench/exec_bench.zig), report only; host target.
+        const ebt = b.addExecutable(.{ .name = "exec_bench", .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/exec_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "pyrlyn_jit", .module = jit_fast },
+                .{ .name = "bc2jit", .module = b.createModule(.{
+                    .root_source_file = b.path("bc2jit/lib.zig"),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+                }) },
+            },
+        }) });
+        const eb_run = b.addRunArtifact(ebt);
+        eb_run.has_side_effects = true;
+        b.step("bench-exec", "Measure execution speed of generated code vs native Zig (host IR Compiler, optimizer variants)").dependOn(&eb_run.step);
     }
 
     // zig fmt: our sources only. AsmJit-derived and other generated files are excluded so they

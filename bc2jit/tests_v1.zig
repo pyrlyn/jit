@@ -97,15 +97,18 @@ fn checkHost(f: bc.Function, arg_sets: []const [4]i64) !void {
     }
     const host = Target.host() orelse return error.SkipZigTest;
     if (!host.isBuilt()) return error.SkipZigTest;
-    var c = try driver.compile(t.allocator, host, f);
-    defer c.deinit();
-    try t.expect(c.exec != null);
-    for (arg_sets) |a| {
-        const want = try bc.eval(f, a, 1 << 24);
-        const got = c.call(a);
-        if (got != want) {
-            std.debug.print("args {any}: got {d} want {d}\n", .{ a, got, want });
-            return error.TestUnexpectedResult;
+    // Also through the IR optimizer (`-O1`, `-O2`): the same results on every input.
+    for (std.enums.values(jit.opt.Level)) |level| {
+        var c = try driver.compileWithOptions(t.allocator, host, f, .{ .opt_level = level });
+        defer c.deinit();
+        try t.expect(c.exec != null);
+        for (arg_sets) |a| {
+            const want = try bc.eval(f, a, 1 << 24);
+            const got = c.call(a);
+            if (got != want) {
+                std.debug.print("{s}, args {any}: got {d} want {d}\n", .{ @tagName(level), a, got, want });
+                return error.TestUnexpectedResult;
+            }
         }
     }
 }

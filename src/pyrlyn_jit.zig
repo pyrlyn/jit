@@ -19,6 +19,10 @@ pub const regalloc = @import("core/regalloc.zig");
 pub const reg_classes = @import("core/reg_classes.zig");
 /// Compiler IR: text parser, verifier, printer, reference interpreter.
 pub const ir = @import("core/ir.zig");
+/// IR optimizer: SSA scalar passes, runtime inlining, profiling, loop vectorization.
+pub const opt = @import("core/opt/opt.zig");
+/// Tiered JIT engine: stable entry points, profiled tier-0 code, tier-up with runtime inlining.
+pub const engine = @import("core/engine.zig");
 /// Optional LLVM C API backend for integer IR (JIT and LLVM Interpreter).
 pub const llvm = @import("core/llvm.zig");
 pub const JitRuntime = @import("core/jit_runtime.zig");
@@ -56,6 +60,11 @@ test {
     _ = @import("core/reg_classes.zig");
     _ = @import("fp_tests.zig");
     _ = @import("core/ir.zig");
+    _ = @import("core/opt/opt.zig");
+    _ = @import("opt_tests.zig");
+    _ = @import("core/engine.zig");
+    if (opts.aarch64) _ = @import("a64_codegen_tests.zig");
+    if (opts.x86_64) _ = @import("x64_codegen_tests.zig");
     _ = @import("tests.zig");
     _ = @import("enc_tests.zig");
     _ = @import("gp_tests.zig");

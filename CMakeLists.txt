@@ -2,7 +2,7 @@
 # and exposes the result as IMPORTED targets pyrlyn-jit::pyrlyn-jit (static) and pyrlyn-jit::pyrlyn-jit_shared.
 # Works with add_subdirectory, FetchContent, CPM and (after install) find_package(pyrlyn-jit).
 cmake_minimum_required(VERSION 3.20)
-project(pyrlyn-jit VERSION 0.1.0 LANGUAGES C)
+project(pyrlyn-jit VERSION 0.3.0 LANGUAGES C)
 
 find_program(PYRLYN_JIT_ZIG_EXECUTABLE zig REQUIRED DOC "Zig compiler (0.17) used to build pyrlyn-jit")
 set(PYRLYN_JIT_OPTIMIZE "" CACHE STRING "zig -Doptimize (Debug, ReleaseSafe, ReleaseFast, ReleaseSmall); empty = from CMAKE_BUILD_TYPE")

@@ -81,6 +81,9 @@ pub const Val = u128;
 pub const VReg = u32;
 /// Maximum call arguments and function parameters (extra ones are passed on the stack).
 pub const max_args = 16;
+/// Maximum block parameters, i.e. arguments on one `bra` edge or on each `cbra` edge
+/// (SSA form keeps every value that is live across a join in a block parameter).
+pub const max_edge_args = 4096;
 /// `shl/shr/sar` mask the count to 6 bits; `sdiv/srem` truncate toward zero and are
 /// undefined (trap in generated code) for a zero divisor or `minInt(i64) / -1`.
 pub const Arith = enum { add, sub, mul, @"and", @"or", xor, shl, shr, sar, sdiv, srem };
@@ -121,8 +124,21 @@ pub const Op = union(enum) {
             else => null,
         };
     }
-    /// Writes used vregs into `buf`, returns the slice.
-    pub fn uses(o: Op, buf: *[max_args]VReg) []const VReg {
+    /// Number of vregs `uses` reports (at most `max_args` except for `bra`/`cbra`).
+    pub fn numUses(o: Op) usize {
+        return switch (o) {
+            .@"const", .br, .fconst => 0,
+            .copy, .load, .cvt, .splat, .extract, .ret => 1,
+            .arith, .typed, .fcmp, .store, .cbr => 2,
+            .call => |x| x.args.len,
+            .bra => |x| x.args.len,
+            .cbra => |x| 2 + x.then_args.len + x.else_args.len,
+        };
+    }
+    /// Writes used vregs into `buf` (at least `numUses()` long; `[max_args]VReg` suffices
+    /// except for `bra`/`cbra` with many arguments), returns the slice.
+    pub fn uses(o: Op, buf: []VReg) []const VReg {
+        std.debug.assert(buf.len >= o.numUses());
         return switch (o) {
             .@"const", .br, .fconst => buf[0..0],
             .typed => |x| blk: {
@@ -219,24 +235,33 @@ pub const Func = struct {
         return @intCast(f.blocks.items.len - 1);
     }
     pub fn emit(f: *Func, block: u32, op: Op) !void {
-        // `uses` fills a `max_args` buffer, and `num_vregs = v + 1` must not overflow.
+        // Argument limits as in `verify`; `num_vregs = v + 1` must not overflow.
         switch (op) {
             .call => |c| if (c.args.len > max_args) return error.TooManyArgs,
-            .bra => |c| if (c.args.len > max_args) return error.TooManyArgs,
-            .cbra => |c| if (2 + c.then_args.len + c.else_args.len > max_args) return error.TooManyArgs,
+            .bra => |c| if (c.args.len > max_edge_args) return error.TooManyArgs,
+            .cbra => |c| if (c.then_args.len > max_edge_args or c.else_args.len > max_edge_args) return error.TooManyArgs,
             else => {},
         }
         var buf: [max_args]VReg = undefined;
-        for (op.uses(&buf)) |u| if (u == std.math.maxInt(VReg)) return error.BadVReg;
+        const used: [3][]const VReg = switch (op) {
+            .bra => |x| .{ x.args, &.{}, &.{} },
+            .cbra => |x| .{ &.{ x.a, x.b }, x.then_args, x.else_args },
+            else => .{ op.uses(&buf), &.{}, &.{} },
+        };
+        var hi: VReg = 0;
+        for (used) |us| for (us) |u| {
+            if (u == std.math.maxInt(VReg)) return error.BadVReg;
+            hi = @max(hi, u + 1);
+        };
         if (op.def()) |d| if (d == std.math.maxInt(VReg)) return error.BadVReg;
         try f.blocks.items[block].ops.append(f.alloc(), op);
         if (op.def()) |d| f.num_vregs = @max(f.num_vregs, d + 1);
-        for (op.uses(&buf)) |u| f.num_vregs = @max(f.num_vregs, u + 1);
+        f.num_vregs = @max(f.num_vregs, hi);
     }
 
     pub const VerifyError = error{ EmptyFunction, MissingTerminator, TerminatorNotLast, BadBlock, BadVReg, TooManyArgs, ArgCountMismatch, MultipleDefs };
     /// Structural checks: every block ends with exactly one terminator, branch targets exist,
-    /// vregs are in range, calls and edges carry at most `max_args` arguments.
+    /// vregs are in range, calls carry at most `max_args` and edges `max_edge_args` arguments.
     pub fn verify(f: *const Func) VerifyError!void {
         if (f.blocks.items.len == 0) return error.EmptyFunction;
         const nb = f.blocks.items.len;
@@ -276,14 +301,14 @@ pub const Func = struct {
                 .bra => |c| {
                     if (i != last) return error.TerminatorNotLast;
                     if (c.target >= nb) return error.BadBlock;
-                    if (c.args.len > max_args) return error.TooManyArgs;
+                    if (c.args.len > max_edge_args) return error.TooManyArgs;
                     if (c.args.len != f.blocks.items[c.target].params.len) return error.ArgCountMismatch;
                     if (!C.all(c.args, n)) return error.BadVReg;
                 },
                 .cbra => |c| {
                     if (i != last) return error.TerminatorNotLast;
                     if (c.then >= nb or c.@"else" >= nb) return error.BadBlock;
-                    if (2 + c.then_args.len + c.else_args.len > max_args) return error.TooManyArgs;
+                    if (c.then_args.len > max_edge_args or c.else_args.len > max_edge_args) return error.TooManyArgs;
                     if (c.then_args.len != f.blocks.items[c.then].params.len or
                         c.else_args.len != f.blocks.items[c.@"else"].params.len) return error.ArgCountMismatch;
                     if (c.a >= n or c.b >= n or !C.all(c.then_args, n) or !C.all(c.else_args, n)) return error.BadVReg;
@@ -520,7 +545,9 @@ pub const Func = struct {
             }
             fn split(h: *Func, src: *const Func, target: u32, args: []const VReg) !u32 {
                 if (args.len == 0) return target;
-                const e = try h.addBlock("edge");
+                // Unique name (`edge.<index>`) so the printed function parses again.
+                var name_buf: [32]u8 = undefined;
+                const e = try h.addBlock(std.fmt.bufPrint(&name_buf, "edge.{d}", .{h.blocks.items.len}) catch unreachable);
                 try copies(h, e, src.blocks.items[target].params, args);
                 try h.emit(e, .{ .br = target });
                 return e;
@@ -784,6 +811,11 @@ pub fn interpretWithAllocator(gpa: std.mem.Allocator, f: *const Func, args: []co
     const regs = try gpa.alloc(Val, @max(f.num_vregs, 1));
     defer gpa.free(regs);
     @memset(regs, 0);
+    // Parallel assignment of edge arguments goes through `tmp` (one slot per block param).
+    var max_params: usize = 1;
+    for (f.blocks.items) |blk| max_params = @max(max_params, blk.params.len);
+    const tmp = try gpa.alloc(Val, max_params);
+    defer gpa.free(tmp);
     for (args, 0..) |a, i| regs[i] = fromI(a);
     var b: u32 = 0;
     var steps: usize = 0;
@@ -834,14 +866,14 @@ pub fn interpretWithAllocator(gpa: std.mem.Allocator, f: *const Func, args: []co
                     break;
                 },
                 .bra => |x| {
-                    assignParams(regs, f.blocks.items[x.target].params, x.args);
+                    assignParams(regs, tmp, f.blocks.items[x.target].params, x.args);
                     b = x.target;
                     break;
                 },
                 .cbra => |x| {
                     const taken = cond(x.cond, toI(regs[x.a]), toI(regs[x.b]));
                     b = if (taken) x.then else x.@"else";
-                    assignParams(regs, f.blocks.items[b].params, if (taken) x.then_args else x.else_args);
+                    assignParams(regs, tmp, f.blocks.items[b].params, if (taken) x.then_args else x.else_args);
                     break;
                 },
                 .ret => |v| return toI(regs[v]),
@@ -850,10 +882,12 @@ pub fn interpretWithAllocator(gpa: std.mem.Allocator, f: *const Func, args: []co
     }
 }
 
-fn fromI(v: i64) Val {
+/// Interpreter value helpers (also used by the optimizer to fold constants exactly as
+/// `interpret` evaluates them).
+pub fn fromI(v: i64) Val {
     return @as(u64, @bitCast(v));
 }
-fn toI(v: Val) i64 {
+pub fn toI(v: Val) i64 {
     return @bitCast(@as(u64, @truncate(v)));
 }
 pub fn getF32(v: Val) f32 {
@@ -868,7 +902,8 @@ pub fn fromF32(x: f32) Val {
 pub fn fromF64(x: f64) Val {
     return @as(u64, @bitCast(x));
 }
-fn fcond(c: FCond, a: anytype, b: @TypeOf(a)) bool {
+/// Ordered float comparison (`fcmp`): false on NaN except `ne`.
+pub fn fcond(c: FCond, a: anytype, b: @TypeOf(a)) bool {
     return switch (c) {
         .eq => a == b,
         .ne => a != b,
@@ -887,7 +922,8 @@ pub fn getLane(tp: Type, v: Val, l: u8) Val {
         else => v,
     };
 }
-fn setLane(tp: Type, v: Val, l: u8, x: Val) Val {
+/// Replaces lane `l` of vector `v` with the scalar `x` (integer lanes truncate).
+pub fn setLane(tp: Type, v: Val, l: u8, x: Val) Val {
     const w: u7 = if (tp == .v4i32 or tp == .v4f32) 32 else 64;
     const sh: u7 = w * @as(u7, @intCast(l));
     const mask: Val = (@as(Val, 1) << w) - 1;
@@ -933,7 +969,8 @@ pub fn typedArith(op: TArith, tp: Type, a: Val, b: Val) Val {
     for (0..tp.lanes()) |l| r = setLane(tp, r, @intCast(l), scalarArith(op, tp.lane(), getLane(tp, a, @intCast(l)), getLane(tp, b, @intCast(l))));
     return r;
 }
-fn convert(to: Type, from: Type, v: Val) Val {
+/// `cvt.<to>.<from>` on an interpreter value.
+pub fn convert(to: Type, from: Type, v: Val) Val {
     return switch (to) {
         .i64 => fromI(if (from == .f32) floatToI(getF32(v)) else floatToI(getF64(v))),
         .f32 => if (from == .i64) fromF32(@floatFromInt(toI(v))) else fromF32(@floatCast(getF64(v))),
@@ -942,13 +979,12 @@ fn convert(to: Type, from: Type, v: Val) Val {
     };
 }
 /// Truncating float -> i64 (x86 `cvttsd2si`: NaN / out of range give minInt(i64)).
-fn floatToI(x: anytype) i64 {
+pub fn floatToI(x: anytype) i64 {
     if (std.math.isNan(x) or x >= 9.223372036854775807e18 or x < -9.223372036854775808e18) return std.math.minInt(i64);
     return @intFromFloat(x);
 }
 
-fn assignParams(regs: []Val, params: []const VReg, args: []const VReg) void {
-    var tmp: [max_args]Val = undefined;
+fn assignParams(regs: []Val, tmp: []Val, params: []const VReg, args: []const VReg) void {
     for (args, 0..) |a, i| tmp[i] = regs[a];
     for (params, 0..) |p, i| regs[p] = tmp[i];
 }
@@ -1215,11 +1251,12 @@ test "ir: malformed input is an error, not a panic" {
         "func f 1\na:\n  v1 = call 0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0\n  ret v1\n",
         "func f 1\na:\n  br a v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0 v0\n",
     };
+    // Rejected by `parse` or, for edge-argument counts, by `verify`.
     for (bad) |src| {
         if (parse(std.testing.allocator, src)) |f_| {
             var f = f_;
-            f.deinit();
-            return error.TestUnexpectedResult;
+            defer f.deinit();
+            if (f.verify()) |_| return error.TestUnexpectedResult else |_| {}
         } else |_| {}
     }
 }
@@ -1272,4 +1309,55 @@ test "interpreter uses the supplied allocator" {
     try std.testing.expectEqual(@as(i64, 42), try interpretWithAllocator(std.testing.allocator, &f, &.{42}, 10));
     try std.testing.expectError(error.StepLimit, interpretWithAllocator(std.testing.allocator, &f, &.{42}, 0));
     try std.testing.expectError(error.OutOfMemory, interpretWithAllocator(std.testing.failing_allocator, &f, &.{42}, 10));
+}
+
+test "ir: block parameters beyond max_args (SSA joins with many live values)" {
+    // 40 values rotate through a loop header's parameters: every iteration v[i] <- v[i+1].
+    var f = Func.init(t.allocator);
+    defer f.deinit();
+    f.name = "rot";
+    f.params = 1;
+    _ = f.newVReg(); // v0 = n
+    const n_vals = 40;
+    const entry = try f.addBlock("entry");
+    const loop = try f.addBlock("loop");
+    const done = try f.addBlock("done");
+    var init_args: [n_vals + 1]VReg = undefined;
+    for (0..n_vals) |i| {
+        init_args[i] = f.newVReg();
+        try f.emit(entry, .{ .@"const" = .{ .dst = init_args[i], .imm = @intCast(i) } });
+    }
+    init_args[n_vals] = f.newVReg(); // counter
+    try f.emit(entry, .{ .@"const" = .{ .dst = init_args[n_vals], .imm = 0 } });
+    try f.emit(entry, .{ .bra = .{ .target = loop, .args = try f.alloc().dupe(VReg, &init_args) } });
+    var params: [n_vals + 1]VReg = undefined;
+    for (&params) |*p| p.* = f.newVReg();
+    f.blocks.items[loop].params = try f.alloc().dupe(VReg, &params);
+    const one = f.newVReg();
+    try f.emit(loop, .{ .@"const" = .{ .dst = one, .imm = 1 } });
+    const next = f.newVReg();
+    try f.emit(loop, .{ .arith = .{ .op = .add, .dst = next, .a = params[n_vals], .b = one } });
+    var back: [n_vals + 1]VReg = undefined;
+    for (0..n_vals) |i| back[i] = params[(i + 1) % n_vals];
+    back[n_vals] = next;
+    try f.emit(loop, .{ .cbra = .{ .cond = .lt, .a = next, .b = 0, .then = loop, .@"else" = done, .then_args = try f.alloc().dupe(VReg, &back), .else_args = &.{} } });
+    try f.emit(done, .{ .ret = params[0] });
+    try f.verifySsa(t.allocator);
+    // After n iterations (n >= 1) the header saw n-1 rotations when it last ran.
+    for ([_]i64{ 1, 2, 5, 41, 100 }) |n| {
+        const want: i64 = @mod(n - 1, n_vals);
+        try t.expectEqual(want, try interpret(&f, &.{n}, 100_000));
+        var g = try f.lowerBlockParams(t.allocator);
+        defer g.deinit();
+        try t.expectEqual(want, try interpret(&g, &.{n}, 100_000));
+    }
+    // The printed form (unique edge block names) parses back to the same behavior.
+    var lowered = try f.lowerBlockParams(t.allocator);
+    defer lowered.deinit();
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(t.allocator);
+    try lowered.print(t.allocator, &text);
+    var reparsed = try parse(t.allocator, text.items);
+    defer reparsed.deinit();
+    try t.expectEqual(@as(i64, 4), try interpret(&reparsed, &.{5}, 100_000));
 }

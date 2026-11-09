@@ -48,12 +48,16 @@ pub fn compile(gpa: std.mem.Allocator, target: lower.Target, f: bc.Function) Err
 pub const Options = struct {
     /// False emits code without allocating executable memory, even on the host.
     executable: bool = true,
+    /// IR optimizer level (`pyrlyn_jit.opt`) for functions compiled through the IR Compilers
+    /// (KXBC v1, and v0 when it needs the IR path); `.o0` compiles the IR as lowered. Functions
+    /// that take the direct v0 lowering are not affected.
+    opt_level: jit.opt.Level = .o0,
 };
 
 pub fn compileWithOptions(gpa: std.mem.Allocator, target: lower.Target, f: bc.Function, options: Options) Error!Compiled {
     var cb = jit.CodeBuffer.init(gpa);
     errdefer cb.deinit();
-    if (canLowerDirect(target, f)) try lower.lower(target, f, &cb) else try lower_ir.lowerIr(gpa, target, f, &cb);
+    if (canLowerDirect(target, f)) try lower.lower(target, f, &cb) else try lower_ir.lowerIrOpt(gpa, target, f, &cb, options.opt_level);
     const runnable = if (f.version == bc.version) target.canExecute() else lower.Target.host() == target;
     const exec: ?jit.JitRuntime.Function = if (options.executable and runnable) try jit.JitRuntime.add(&cb) else null;
     return .{ .cb = cb, .exec = exec };

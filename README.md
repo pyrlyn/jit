@@ -53,6 +53,7 @@ Full build options, install, pkg-config, CMake and CPM: [docs/BUILDING.md](docs/
 
 - [docs/API.md](docs/API.md): core, x86-64, AArch64 and C/C++/Rust API.
 - [docs/c-api.md](docs/c-api.md): C ABI reference.
+- [docs/OPTIMIZER.md](docs/OPTIMIZER.md): IR optimizer (inlining, scalar passes, vectorizer, layout) and the tiered engine.
 - [docs/SAFETY.md](docs/SAFETY.md): validation, hooks, enabling and disabling.
 - [docs/BUILDING.md](docs/BUILDING.md): building and using from C/C++.
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): benchmark vs AsmJit.

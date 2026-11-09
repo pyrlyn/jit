@@ -3,6 +3,8 @@ const std = @import("std");
 pub const bytecode = @import("bytecode.zig");
 pub const lower = @import("lower.zig");
 pub const driver = @import("driver.zig");
+/// KXBC -> IR (`toIr`), used by the optimizer and benchmarks.
+pub const lower_ir = @import("lower_ir.zig");
 pub const cli = @import("cli.zig");
 pub const c_api = @import("c_api.zig");
 pub const enabled = @import("pyrlyn_jit").build_options.bc2jit;

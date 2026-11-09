@@ -34,7 +34,8 @@ if (compiled.entry()) |f| {
 Input bytes may be freed after it returns. Simple v1 straight-line arithmetic uses the
 direct lowering when its stack fits five registers and the ABI matches; other v1 functions use IR. `code()` borrows the finalized machine code;
 `entry()` returns a C-ABI function pointer only for a compatible host target. Pass
-`.{ .executable = false }` to emit code without mapping executable memory. Release the result
+`.{ .executable = false }` to emit code without mapping executable memory. `.{ .opt_level = .o2 }` runs the IR
+optimizer on v1 functions lowered through IR. Release the result
 with `deinit()` after all calls have finished. `diag.offset` identifies decoder errors;
 `errorMessage(err)` describes decoder and compiler failures.
 
@@ -86,6 +87,9 @@ lives here, next to the assemblers it targets; the KotlinX emitter is a separate
 - `-o`, `--output FILE`: write the raw machine code to FILE.
 - `ARG...`: up to four integers (decimal, or `0x`/`0o`/`0b` prefixed, may be negative) passed to
   the function when it is executed; missing ones are 0.
+- `-O0`, `-O1`, `-O2`: pyrlyn IR optimizer level for KXBC v1 functions lowered through IR
+  (default `-O0`; `-O2` adds loop optimizations and vectorization, see
+  [docs/OPTIMIZER.md](../docs/OPTIMIZER.md)). LLVM backends reject `-O1`/`-O2` (use `--no-opt`).
 - `--` ends option parsing; `-h`/`--help` prints the usage.
 
 The arch is chosen per run. All backends are compiled in by default and dispatched on the flag;

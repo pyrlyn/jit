@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.allocPrint(arena, "{d}\n", .{program.call(o.args)}));
         return;
     }
-    var c = api.compile(arena, o.target, bytes, .{ .executable = o.executable }, &diag) catch |e|
+    var c = api.compile(arena, o.target, bytes, .{ .executable = o.executable, .opt_level = o.opt_level }, &diag) catch |e|
         fail("{s}: offset {d}: {s}", .{ o.input, diag.offset, api.errorMessage(e) });
     defer c.deinit();
     if (o.output) |path| std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = c.code() }) catch |e|

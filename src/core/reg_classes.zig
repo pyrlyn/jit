@@ -1,5 +1,5 @@
 //! Register classes for the compilers: integer (`i64`) values live in GP registers, scalar
-//! float (`f32`/`f64`) values in FP/vector registers. Each class is allocated by its own
+//! float (`f32`/`f64`) and 128-bit vector values in FP/vector registers. Each class is allocated by its own
 //! `regalloc` run over the same instruction positions (the entry block's parameter-def
 //! instruction first, then one instruction per IR op), so positions, call sites and segments
 //! line up between the two results. Vregs of the other class are simply absent from a run.
@@ -12,43 +12,50 @@ const ra = @import("regalloc.zig");
 
 pub const Class = enum { gp, fp };
 
+/// `i64` is GP; scalar floats and 128-bit vectors share the FP/vector registers.
 pub fn classOf(tp: ir.Type) Class {
-    return if (tp == .f32 or tp == .f64) .fp else .gp;
+    return if (tp == .i64) .gp else .fp;
 }
 
 /// Float IR features the register-allocating compilers lower (x86-64 and AArch64).
-/// Vector types, `splat` and `extract` are still rejected (`error.UnsupportedType`).
+/// Vector types, `splat` and `extract` are rejected (`error.UnsupportedType`) unless
+/// `vectors` is set by a compiler that lowers them.
 pub const Support = struct {
     f32: bool = true,
     f64: bool = true,
     /// `cvt` (i64 <-> f32/f64, f32 <-> f64).
     cvt: bool = true,
+    /// v4i32/v2i64/v4f32/v2f64 values, `splat` and `extract` (FP class, 16-byte values).
+    vectors: bool = false,
 };
 pub const support: Support = .{};
 
 /// Checks that `f` only uses float features in `support`; returns vreg types (owned by `gpa`).
 pub fn check(gpa: std.mem.Allocator, f: *const ir.Func) ![]ir.Type {
+    return checkWith(gpa, f, support);
+}
+
+/// `check` against a compiler's own feature set.
+pub fn checkWith(gpa: std.mem.Allocator, f: *const ir.Func, sup: Support) ![]ir.Type {
     const ty = f.typeCheck(gpa) catch |e| return switch (e) {
         error.TypeMismatch => error.TypeMismatch,
         error.OutOfMemory => error.OutOfMemory,
     };
     errdefer gpa.free(ty);
-    const okType = struct {
-        fn f_(tp: ir.Type) bool {
-            return switch (tp) {
-                .i64 => true,
-                .f32 => support.f32,
-                .f64 => support.f64,
-                else => false,
-            };
-        }
-    }.f_;
-    for (ty) |tp| if (!okType(tp)) return error.UnsupportedType;
+    for (ty) |tp| {
+        const ok = switch (tp) {
+            .i64 => true,
+            .f32 => sup.f32,
+            .f64 => sup.f64,
+            .v4i32, .v2i64, .v4f32, .v2f64 => sup.vectors,
+        };
+        if (!ok) return error.UnsupportedType;
+    }
     // `typeCheck` ties every op's type to a vreg type checked above: `splat` defines and
     // `extract` reads a vector vreg, `fconst`/`typed`/`load` define one of `ty`, `fcmp`/
     // `store` read one, `cvt` defines `to` and reads `from`. Only a disabled `cvt` needs a
     // pass over the ops.
-    if (!support.cvt) for (f.blocks.items) |b| for (b.ops.items) |*o| if (o.* == .cvt) return error.UnsupportedType;
+    if (!sup.cvt) for (f.blocks.items) |b| for (b.ops.items) |*o| if (o.* == .cvt) return error.UnsupportedType;
     return ty;
 }
 
