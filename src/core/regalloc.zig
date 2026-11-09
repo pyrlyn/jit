@@ -496,7 +496,7 @@ fn pickReg(cfg: Config, locs: []const Loc, v: VReg, mask: RegMask) u8 {
     if (cfg.hints.len > v) {
         const h = cfg.hints[v];
         if (h.reg != no_reg and mask & (@as(RegMask, 1) << @intCast(h.reg)) != 0) return h.reg;
-        if (h.vreg < locs.len and locs[h.vreg] == .reg and mask & (@as(RegMask, 1) << @intCast(locs[h.vreg].reg)) != 0) return locs[h.vreg].reg;
+        if (h.vreg != v and h.vreg < locs.len and locs[h.vreg] == .reg and mask & (@as(RegMask, 1) << @intCast(locs[h.vreg].reg)) != 0) return locs[h.vreg].reg;
     }
     return @intCast(@ctz(mask));
 }
@@ -890,7 +890,8 @@ fn allocateGraphInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Res
         };
         if (crosses[v] and m & cfg.callee_saved != 0) m &= cfg.callee_saved;
         if (m != 0) {
-            locs[v] = .{ .reg = pickReg(cfg, locs, v, m) };
+            const r = pickReg(cfg, locs, v, m); // not inline: pickReg reads `locs`
+            locs[v] = .{ .reg = r };
         } else try spilled.append(gpa, v);
     }
     // Coalesced nodes take their representative's register (or are spilled with it).
@@ -1009,7 +1010,10 @@ fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Re
 
         if (crosses and (mask & cfg.callee_saved != 0 or !cfg.split_at_calls)) mask &= cfg.callee_saved;
         if (mask != 0) {
-            locs[cur.vreg] = .{ .reg = pickReg(cfg, locs, cur.vreg, mask) };
+            // Not inline: pickReg reads `locs`, and the result location may already carry the
+            // `.reg` tag (Zig's x86_64 backend writes it first).
+            const r = pickReg(cfg, locs, cur.vreg, mask);
+            locs[cur.vreg] = .{ .reg = r };
             try insertByEnd(gpa, &active, cur);
             continue;
         }
