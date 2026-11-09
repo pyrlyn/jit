@@ -68,6 +68,14 @@ test "cli: help, output, ARGs, other errors" {
     try t.expectEqualStrings("bc2jit: unknown option '--bogus' (see --help)", (try parse(&arena, &.{ "-a", "riscv", "--bogus" })).usage_error);
     try t.expectEqualStrings("bc2jit: ARG 'x' is not a 64-bit integer", (try parse(&arena, &.{ "-a", "riscv", "f", "x" })).usage_error);
     try t.expectEqualStrings("bc2jit: at most 4 ARGs are allowed", (try parse(&arena, &.{ "-a", "riscv", "f", "1", "2", "3", "4", "5" })).usage_error);
+    try t.expectEqual(.o0, p.opt_level);
+    try t.expectEqual(.o2, (try parse(&arena, &.{ "-a", "riscv", "-O2", "f" })).run.opt_level);
+    try t.expectEqual(.o1, (try parse(&arena, &.{ "-O1", "-a", "riscv", "f" })).run.opt_level);
+    try t.expectEqualStrings("bc2jit: unknown option '-O3' (see --help)", (try parse(&arena, &.{ "-a", "riscv", "-O3", "f" })).usage_error);
+    try t.expectEqualStrings(
+        "bc2jit: -O1/-O2 require the pyrlyn backend (LLVM backends: --no-opt)",
+        (try parse(&arena, &.{ "-a", @import("lower.zig").Target.host().?.flagName(), "--backend", "llvm-jit", "-O2", "f" })).usage_error,
+    );
 }
 
 // ---- decoder ---------------------------------------------------------------------------

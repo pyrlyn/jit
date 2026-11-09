@@ -12,9 +12,10 @@ const x64c = @import("x86_64/compiler.zig");
 const x86c = @import("x86/compiler.zig");
 const a64c = @import("aarch64/compiler.zig");
 const rvc = @import("riscv/compiler.zig");
+const opt = @import("core/opt/opt.zig");
 
 pub const version_major: u32 = 0;
-pub const version_minor: u32 = 2;
+pub const version_minor: u32 = 3;
 pub const version_patch: u32 = 0;
 /// MAJOR<<16 | MINOR<<8 | PATCH; must match PJIT_VERSION in include/pyrlyn_jit.h (checked by a test).
 pub const version: u32 = version_major << 16 | version_minor << 8 | version_patch;
@@ -353,11 +354,33 @@ fn parseIr(src: ?[*]const u8, len: usize) !ir.Func {
 /// Parses IR text (`docs/ROADMAP.md` §2, `src/core/ir.zig`) and compiles it for `arch`
 /// (`PJIT_ARCH_*`) into `b`, which must be empty or reset; the buffer is finalized.
 export fn pjit_ir_compile(b: ?*Buffer, src: ?[*]const u8, len: usize, arch: c_int) c_int {
+    return pjit_ir_compile_opt(b, src, len, arch, 0);
+}
+
+/// `pjit_ir_compile` after running the IR optimizer (`pyrlyn_jit.opt`) at `level` (0 none,
+/// 1 scalar SSA passes, 2 also loop optimizations and vectorization for the target's vector
+/// unit). `PJIT_ARCH_X86` computes in 32 bits, which the optimizer does not model: level 0 only.
+export fn pjit_ir_compile_opt(b: ?*Buffer, src: ?[*]const u8, len: usize, arch: c_int, level: c_int) c_int {
     const p = b orelse return status(error.InvalidArgument);
     const a0 = std.enums.fromInt(Arch, arch) orelse return status(error.InvalidArgument);
     const a = if (a0 == .host) hostArch() orelse return status(error.UnsupportedArch) else a0;
+    const lvl: opt.Level = switch (level) {
+        0 => .o0,
+        1 => .o1,
+        2 => .o2,
+        else => return status(error.InvalidArgument),
+    };
+    if (lvl != .o0 and a == .x86) return status(error.Unsupported);
     var f = parseIr(src, len) catch |e| return status(e);
     defer f.deinit();
+    if (lvl != .o0) {
+        const vector: opt.VectorTarget = if (lvl != .o2) .none else switch (a) {
+            .x86_64 => .x86_64,
+            .aarch64 => .aarch64,
+            else => .none,
+        };
+        _ = opt.optimize(gpa, &f, .{ .level = lvl, .vector = vector, .verify_each = false }) catch |e| return status(e);
+    }
     switch (a) {
         .host => unreachable,
         .x86_64 => _ = x64c.compile(gpa, &f, &p.cb, .{}) catch |e| return status(e),
@@ -450,7 +473,7 @@ test "c api: a64 add + ret, labels, errors" {
 }
 
 test "c api: version, errors, IR compile + eval" {
-    try std.testing.expectEqual(@as(u32, 0x000200), pjit_version());
+    try std.testing.expectEqual(@as(u32, 0x000300), pjit_version());
     const src = "func f 2\ne:\n  v2 = add v0 v1\n  ret v2\n";
     var r: i64 = 0;
     try std.testing.expectEqual(OK, pjit_ir_eval(src, src.len, &[_]i64{ 40, 2 }, 2, 0, &r));

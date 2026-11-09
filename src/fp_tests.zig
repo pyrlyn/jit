@@ -312,8 +312,7 @@ test "fp: conversions (fpext, fptrunc, i64 <-> float) on special values" {
     }
 }
 
-test "fp: unsupported float IR is rejected, not miscompiled" {
-    if (!can_run) return error.SkipZigTest;
+test "fp: typed IR is rejected by the integer-only Compilers, not miscompiled" {
     var f = try ir.parse(t.allocator,
         \\func v 1
         \\e:
@@ -326,7 +325,12 @@ test "fp: unsupported float IR is rejected, not miscompiled" {
     defer f.deinit();
     var cb = CodeBuffer.init(t.allocator);
     defer cb.deinit();
-    try t.expectError(error.UnsupportedType, host_compiler.compile(t.allocator, &f, &cb, .{}));
+    try t.expectError(error.UnsupportedType, @import("riscv/compiler.zig").compile(t.allocator, &f, &cb, .{}));
+    if (opts.x86_64) {
+        var cb32 = CodeBuffer.init(t.allocator);
+        defer cb32.deinit();
+        try t.expectError(error.UnsupportedType, @import("x86/compiler.zig").compile(t.allocator, &f, &cb32, .{}));
+    }
 }
 
 /// Random straight-line + branch programs over floats: loads from memory, typed ops, fcmp

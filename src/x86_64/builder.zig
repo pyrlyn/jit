@@ -20,10 +20,79 @@ const Cond = x.Cond;
 const gp = @import("gp.zig");
 const vec = x.vec;
 
-/// Scalar SSE register-register ops used by the Compiler (`op xmm, xmm`).
-pub const SseOp = enum { addss, addsd, subss, subsd, mulss, mulsd, divss, divsd, minss, minsd, maxss, maxsd, movaps, xorps, ucomiss, ucomisd, cvtss2sd, cvtsd2ss };
-/// Scalar SSE load/store (`movss/movsd xmm, m` and `m, xmm`).
-pub const SseMov = enum { movss, movsd };
+/// SSE/SSE2 ops used by the Compiler (`op xmm, xmm`, `sseRR`; `op xmm, m`, `sseRMop`):
+/// scalar float ops, then packed 128-bit float/integer ops and shuffles (SSE2 baseline only).
+pub const SseOp = enum {
+    addss,
+    addsd,
+    subss,
+    subsd,
+    mulss,
+    mulsd,
+    divss,
+    divsd,
+    minss,
+    minsd,
+    maxss,
+    maxsd,
+    movaps,
+    xorps,
+    ucomiss,
+    ucomisd,
+    cvtss2sd,
+    cvtsd2ss,
+    addps,
+    addpd,
+    subps,
+    subpd,
+    mulps,
+    mulpd,
+    divps,
+    divpd,
+    minps,
+    minpd,
+    maxps,
+    maxpd,
+    paddd,
+    paddq,
+    psubd,
+    psubq,
+    pand,
+    por,
+    pxor,
+    pmuludq,
+    punpckldq,
+    punpcklqdq,
+    unpcklpd,
+
+    /// Memory operand size of `op xmm, m` (packed forms need a 16-byte aligned m128).
+    pub fn memSize(op: SseOp) u16 {
+        return switch (op) {
+            .addss, .subss, .mulss, .divss, .minss, .maxss, .ucomiss, .cvtss2sd => 4,
+            .addsd, .subsd, .mulsd, .divsd, .minsd, .maxsd, .ucomisd, .cvtsd2ss => 8,
+            else => 16,
+        };
+    }
+};
+/// SSE load/store (`mov* xmm, m` and `m, xmm`): scalar movss/movsd, unaligned movups/movdqu,
+/// aligned movaps.
+pub const SseMov = enum {
+    movss,
+    movsd,
+    movups,
+    movdqu,
+    movaps,
+
+    pub fn size(op: SseMov) u16 {
+        return switch (op) {
+            .movss => 4,
+            .movsd => 8,
+            else => 16,
+        };
+    }
+};
+/// `pshufd/shufps xmm, xmm, imm8`.
+pub const SseImm = enum { pshufd, shufps };
 /// `cvtsi2ss/sd xmm, r64`.
 pub const SseFromInt = enum { cvtsi2ss, cvtsi2sd };
 /// `cvttss2si/cvttsd2si r64, xmm` (truncating; NaN/out of range give minInt(i64)).
@@ -107,9 +176,29 @@ pub const Instr = union(enum) {
     setcc: struct { Cond, Gp } align(1),
     /// `movzx r32, r8` (zero-extends into the full register).
     movzxB: struct { Gp, Gp } align(1),
+    /// `op xmm, m` (`SseOp.memSize`; packed forms need a 16-byte aligned operand).
+    sseRMop: struct { SseOp, Xmm, Mem } align(1),
+    /// `pshufd/shufps xmm, xmm, imm8`.
+    sseRRI: struct { SseImm, Xmm, Xmm, u8 } align(1),
+    /// `pshufd/shufps xmm, m128, imm8` (16-byte aligned operand).
+    sseRMI: struct { SseImm, Xmm, Mem, u8 } align(1),
+    /// `movd xmm, r32` / `movd r32, xmm`.
+    movdXR: struct { Xmm, Gp } align(1),
+    movdRX: struct { Gp, Xmm } align(1),
+    /// `movsxd r64, r32`.
+    movsxd: struct { Gp, Gp } align(1),
+    /// `shl/shr/sar r64, imm8`.
+    shiftRI: struct { Shift, Gp, u8 } align(1),
+    /// `neg r64`.
+    neg: struct { Gp } align(1),
+    /// `xor r32, r32`: zeroes the 64-bit register (clobbers flags).
+    zero32: struct { Gp } align(1),
+    /// `pmulld xmm, xmm` (SSE4.1). Only for callers that checked the CPU; a build gated
+    /// without SSE4.1 (`-Dx86-features`) rejects it with `error.InvalidOperand`.
+    pmulld: struct { Xmm, Xmm } align(1),
 
     pub const comment_prefix: []const u8 = ";";
-    pub const special: []const []const u8 = &.{ "aluRR", "aluRM", "aluMR", "aluRI", "shiftRCl", "idivR", "cqo", "jcc", "jmp8", "jmp32", "jcc8", "jcc32", "sseRR", "sseRM", "sseMR", "movqXR", "movqRX", "cvtFromInt", "cvtToInt", "setcc", "movzxB" };
+    pub const special: []const []const u8 = &.{ "aluRR", "aluRM", "aluMR", "aluRI", "shiftRCl", "idivR", "cqo", "jcc", "jmp8", "jmp32", "jcc8", "jcc32", "sseRR", "sseRM", "sseMR", "movqXR", "movqRX", "cvtFromInt", "cvtToInt", "setcc", "movzxB", "sseRMop", "sseRRI", "sseRMI", "movdXR", "movdRX", "movsxd", "shiftRI", "neg", "zero32", "pmulld" };
     pub fn emitSpecial(a: anytype, i: Instr, labels: []const core.Label) !void {
         switch (i) {
             inline else => |o, tag| try emitSpecialTyped(a, tag, o, labels),
@@ -142,11 +231,32 @@ pub const Instr = union(enum) {
                 inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.xmm(o[2]) }, .{}),
             },
             .sseRM => switch (o[0]) {
-                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.mem(o[2], if (op == .movss) 4 else 8) }, .{}),
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.mem(o[2], comptime op.size()) }, .{}),
             },
             .sseMR => switch (o[0]) {
-                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.mem(o[1], if (op == .movss) 4 else 8), vec.xmm(o[2]) }, .{}),
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.mem(o[1], comptime op.size()), vec.xmm(o[2]) }, .{}),
             },
+            .sseRMop => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.mem(o[2], comptime op.memSize()) }, .{}),
+            },
+            .sseRRI => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.xmm(o[2]), o[3] }, .{}),
+            },
+            .sseRMI => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.mem(o[2], 16), o[3] }, .{}),
+            },
+            .movdXR => try a.vinst(.movd, .{ vec.xmm(o[0]), gp.r32(o[1]) }, .{}),
+            .movdRX => try a.vinst(.movd, .{ gp.r32(o[0]), vec.xmm(o[1]) }, .{}),
+            .movsxd => a.movsx(.dword, o[0], o[1]) catch |e| return mapGp(e),
+            .shiftRI => switch (o[0]) {
+                inline else => |op| a.inst(@field(gp.Mnemonic, @tagName(op)), .{ gp.r64(o[1]), o[2] }) catch |e| return mapGp(e),
+            },
+            .neg => a.inst(.neg, .{gp.r64(o[0])}) catch |e| return mapGp(e),
+            .zero32 => a.inst(.xor, .{ gp.r32(o[0]), gp.r32(o[0]) }) catch |e| return mapGp(e),
+            .pmulld => if (comptime x.build_gate == null or x.build_gate.?.contains(.SSE4_1))
+                try a.vinst(.pmulld, .{ vec.xmm(o[0]), vec.xmm(o[1]) }, .{})
+            else
+                return error.InvalidOperand,
             .movqXR => try a.vinst(.movq, .{ vec.xmm(o[0]), gp.r64(o[1]) }, .{}),
             .movqRX => try a.vinst(.movq, .{ gp.r64(o[0]), vec.xmm(o[1]) }, .{}),
             .cvtFromInt => switch (o[0]) {
@@ -292,6 +402,23 @@ fn formatInstImpl(gpa: std.mem.Allocator, out: *std.ArrayList(u8), i: Instr) !vo
         .cvtToInt => |o| try out.print(gpa, "{s} {s}, xmm{d}", .{ @tagName(o[0]), @tagName(o[1]), o[2] }),
         .setcc => |o| try out.print(gpa, "set{s} {s}", .{ @tagName(o[0]), @tagName(o[1]) }),
         .movzxB => |o| try out.print(gpa, "movzx {s}, {s}.b", .{ @tagName(o[0]), @tagName(o[1]) }),
+        .sseRMop => |o| {
+            try out.print(gpa, "{s} xmm{d}, ", .{ @tagName(o[0]), o[1] });
+            try fmtMem(gpa, out, o[2]);
+        },
+        .sseRRI => |o| try out.print(gpa, "{s} xmm{d}, xmm{d}, {d}", .{ @tagName(o[0]), o[1], o[2], o[3] }),
+        .sseRMI => |o| {
+            try out.print(gpa, "{s} xmm{d}, ", .{ @tagName(o[0]), o[1] });
+            try fmtMem(gpa, out, o[2]);
+            try out.print(gpa, ", {d}", .{o[3]});
+        },
+        .movdXR => |o| try out.print(gpa, "movd xmm{d}, {s}.d", .{ o[0], @tagName(o[1]) }),
+        .movdRX => |o| try out.print(gpa, "movd {s}.d, xmm{d}", .{ @tagName(o[0]), o[1] }),
+        .movsxd => |o| try out.print(gpa, "movsxd {s}, {s}.d", .{ @tagName(o[0]), @tagName(o[1]) }),
+        .shiftRI => |o| try out.print(gpa, "{s} {s}, {d}", .{ @tagName(o[0]), @tagName(o[1]), o[2] }),
+        .neg => |o| try out.print(gpa, "neg {s}", .{@tagName(o[0])}),
+        .zero32 => |o| try out.print(gpa, "xor {s}.d, {s}.d", .{ @tagName(o[0]), @tagName(o[0]) }),
+        .pmulld => |o| try out.print(gpa, "pmulld xmm{d}, xmm{d}", .{ o[0], o[1] }),
     }
 }
 
@@ -772,6 +899,69 @@ test "builder: scalar SSE nodes encode like LLVM" {
     defer txt.deinit(std.testing.allocator);
     try formatInstImpl(std.testing.allocator, &txt, .{ .sseRR = .{ .addsd, 1, 2 } });
     try std.testing.expectEqualStrings("addsd xmm1, xmm2", txt.items);
+}
+
+test "builder: vector SSE and extra GP nodes encode like LLVM" {
+    var b = Builder.init(std.testing.allocator);
+    defer b.deinit();
+    try b.emit(.sseRR, .{ .addps, 1, 2 }); // 0f 58 ca
+    try b.emit(.sseRR, .{ .mulpd, 1, 10 }); // 66 41 0f 59 ca
+    try b.emit(.sseRR, .{ .maxpd, 9, 2 }); // 66 44 0f 5f ca
+    try b.emit(.sseRR, .{ .paddd, 1, 2 }); // 66 0f fe ca
+    try b.emit(.sseRR, .{ .psubq, 1, 2 }); // 66 0f fb ca
+    try b.emit(.sseRR, .{ .pxor, 14, 15 }); // 66 45 0f ef f7
+    try b.emit(.sseRR, .{ .pmuludq, 1, 9 }); // 66 41 0f f4 c9
+    try b.emit(.sseRR, .{ .punpckldq, 1, 2 }); // 66 0f 62 ca
+    try b.emit(.sseRR, .{ .punpcklqdq, 1, 2 }); // 66 0f 6c ca
+    try b.emit(.sseRR, .{ .unpcklpd, 1, 2 }); // 66 0f 14 ca
+    try b.emit(.sseRMop, .{ .addpd, 3, x.ptr(.rbp, -32) }); // 66 0f 58 5d e0
+    try b.emit(.sseRMop, .{ .addsd, 10, x.ptr(.rax, 8) }); // f2 44 0f 58 50 08
+    try b.emit(.sseRMop, .{ .paddd, 1, x.ptr(.r12, 0) }); // 66 41 0f fe 0c 24
+    try b.emit(.sseRM, .{ .movups, 1, x.ptr(.rdi, 0) }); // 0f 10 0f
+    try b.emit(.sseMR, .{ .movdqu, x.ptr(.rsi, 16), 9 }); // f3 44 0f 7f 4e 10
+    try b.emit(.sseRM, .{ .movaps, 2, x.ptr(.rbp, -48) }); // 0f 28 55 d0
+    try b.emit(.sseRRI, .{ .pshufd, 1, 9, 0xF5 }); // 66 41 0f 70 c9 f5
+    try b.emit(.sseRRI, .{ .shufps, 2, 2, 0 }); // 0f c6 d2 00
+    try b.emit(.sseRMI, .{ .pshufd, 3, x.ptr(.rbp, -32), 0xF5 }); // 66 0f 70 5d e0 f5
+    try b.emit(.movdXR, .{ 1, .rax }); // 66 0f 6e c8
+    try b.emit(.movdRX, .{ .r10, 9 }); // 66 45 0f 7e ca
+    try b.emit(.movsxd, .{ .rax, .r10 }); // 49 63 c2
+    try b.emit(.shiftRI, .{ .shl, .r10, 3 }); // 49 c1 e2 03
+    try b.emit(.shiftRI, .{ .sar, .rax, 63 }); // 48 c1 f8 3f
+    try b.emit(.neg, .{.r9}); // 49 f7 d9
+    try b.emit(.zero32, .{.r8}); // 45 31 c0
+    try b.emit(.zero32, .{.rax}); // 31 c0
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    try b.serialize(x.AssemblerT(.{ .validate = true }).init(&cb));
+    try std.testing.expectEqualSlices(u8, &.{
+        0x0f, 0x58, 0xca, 0x66, 0x41, 0x0f, 0x59, 0xca, 0x66, 0x44, 0x0f, 0x5f,
+        0xca, 0x66, 0x0f, 0xfe, 0xca, 0x66, 0x0f, 0xfb, 0xca, 0x66, 0x45, 0x0f,
+        0xef, 0xf7, 0x66, 0x41, 0x0f, 0xf4, 0xc9, 0x66, 0x0f, 0x62, 0xca, 0x66,
+        0x0f, 0x6c, 0xca, 0x66, 0x0f, 0x14, 0xca, 0x66, 0x0f, 0x58, 0x5d, 0xe0,
+        0xf2, 0x44, 0x0f, 0x58, 0x50, 0x08, 0x66, 0x41, 0x0f, 0xfe, 0x0c, 0x24,
+        0x0f, 0x10, 0x0f, 0xf3, 0x44, 0x0f, 0x7f, 0x4e, 0x10, 0x0f, 0x28, 0x55,
+        0xd0, 0x66, 0x41, 0x0f, 0x70, 0xc9, 0xf5, 0x0f, 0xc6, 0xd2, 0x00, 0x66,
+        0x0f, 0x70, 0x5d, 0xe0, 0xf5, 0x66, 0x0f, 0x6e, 0xc8, 0x66, 0x45, 0x0f,
+        0x7e, 0xca, 0x49, 0x63, 0xc2, 0x49, 0xc1, 0xe2, 0x03, 0x48, 0xc1, 0xf8,
+        0x3f, 0x49, 0xf7, 0xd9, 0x45, 0x31, 0xc0, 0x31, 0xc0,
+    }, cb.code());
+    // pmulld (SSE4.1) unless the build gate excludes it.
+    var b2 = Builder.init(std.testing.allocator);
+    defer b2.deinit();
+    try b2.emit(.pmulld, .{ 1, 2 }); // 66 0f 38 40 ca
+    var cb2 = CodeBuffer.init(std.testing.allocator);
+    defer cb2.deinit();
+    if (b2.serialize(x.AssemblerT(.{ .validate = true }).init(&cb2))) {
+        try std.testing.expectEqualSlices(u8, &.{ 0x66, 0x0f, 0x38, 0x40, 0xca }, cb2.code());
+    } else |e| {
+        try std.testing.expect(x.build_gate != null and !x.build_gate.?.contains(.SSE4_1));
+        try std.testing.expectEqual(error.InvalidOperand, e);
+    }
+    var txt: std.ArrayList(u8) = .empty;
+    defer txt.deinit(std.testing.allocator);
+    try formatInstImpl(std.testing.allocator, &txt, .{ .sseRRI = .{ .pshufd, 1, 9, 0xF5 } });
+    try std.testing.expectEqualStrings("pshufd xmm1, xmm9, 245", txt.items);
 }
 
 test "x64 builder: serializeShortened matches shortenBranches + serialize" {

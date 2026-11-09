@@ -8,7 +8,7 @@ static int failures = 0;
 #define EXPECT(c) do { if (!(c)) { fprintf(stderr, "%s:%d: EXPECT(%s) failed (last error: %s)\n", __FILE__, __LINE__, #c, pjit_last_error()); failures++; } } while (0)
 #define EQ(a, b) EXPECT((a) == (b))
 
-_Static_assert(PJIT_VERSION == 0x000200u, "header version");
+_Static_assert(PJIT_VERSION == 0x000300u, "header version");
 _Static_assert(sizeof(pjit_x64_op) == 24, "pjit_x64_op layout");
 _Static_assert(sizeof(pjit_a64_op) == 32, "pjit_a64_op layout");
 _Static_assert(PJIT_ERR_OTHER == 13 && PJIT_ERR_STEP_LIMIT == 18, "status values are ABI");
@@ -131,6 +131,31 @@ int main(void) {
         EQ(fib(k), want);
     }
     pjit_func_free(f);
+
+    /* IR optimizer levels (0.3.0): same results; x86 (32-bit arithmetic) level 0 only */
+    EQ(pjit_ir_compile_opt(b, fib_ir, sizeof fib_ir - 1, PJIT_ARCH_HOST, 3), PJIT_ERR_INVALID_ARGUMENT);
+    EQ(pjit_ir_compile_opt(b, fib_ir, sizeof fib_ir - 1, PJIT_ARCH_X86, 2), PJIT_ERR_UNSUPPORTED);
+    for (int a = PJIT_ARCH_X86_64; a <= PJIT_ARCH_RISCV64; a++) {
+        if (a == PJIT_ARCH_X86) continue;
+        pjit_buffer_reset(b);
+        EQ(pjit_ir_compile_opt(b, fib_ir, sizeof fib_ir - 1, a, 2), PJIT_OK);
+        pjit_buffer_code(b, &n);
+        EXPECT(n > 0);
+    }
+#if !defined(__i386__) && !defined(_M_IX86)
+    for (int level = 0; level <= 2; level++) {
+        pjit_buffer_reset(b);
+        EQ(pjit_ir_compile_opt(b, fib_ir, sizeof fib_ir - 1, PJIT_ARCH_HOST, level), PJIT_OK);
+        EQ(pjit_jit_add(b, &f), PJIT_OK);
+        int64_t (*fib_opt)(int64_t) = (int64_t (*)(int64_t))pjit_func_ptr(f);
+        for (int64_t k = 0; k <= 90; k += 15) {
+            int64_t want;
+            EQ(pjit_ir_eval(fib_ir, sizeof fib_ir - 1, &k, 1, 0, &want), PJIT_OK);
+            EQ(fib_opt(k), want);
+        }
+        pjit_func_free(f);
+    }
+#endif
     pjit_buffer_free(b);
 
     if (failures) { fprintf(stderr, "capi_test: %d failure(s)\n", failures); return 1; }
