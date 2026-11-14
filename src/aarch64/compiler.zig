@@ -580,6 +580,7 @@ inline fn analyze(o: *const ir.Op, an: *Analysis, ctx: anytype) ra.Error!u16 {
             return 3;
         },
         .call => |x| {
+            try ctx.call();
             var m: u16 = 0;
             for (x.args, 0..) |v, i| if (c.cheap(v) == null) {
                 try U.gp(needs, ctx, v);
@@ -651,6 +652,8 @@ const Analysis = struct {
     params: u32,
     /// A vector min/max (it needs a third FP scratch register).
     vminmax: bool = false,
+    /// `v` is defined by an op that reads an FP operand from a register (`Source(null)`).
+    fdef: []bool = &.{},
 };
 
 const Block = struct {
@@ -660,11 +663,15 @@ const Block = struct {
     first: u32,
 };
 
-/// Register-allocation input for one class: like `reg_classes.Source`, but uses folded into
-/// immediates are not reported. The GP walk runs `analyze` (it completes `Analysis`); the FP
-/// walk, after it, also skips definitions of unneeded vregs (emitted as nothing).
-fn Source(comptime class: rc.Class) type {
+/// Register-allocation input: like `reg_classes.Source`, but uses folded into immediates are
+/// not reported. `Source(null)` is the analysis walk (it completes `Analysis`) and reports
+/// the vregs of both classes and the calls, for one liveness run (`ra.Live`). `Source(.fp)`
+/// is the FP class alone, after the analysis: it also skips definitions of unneeded vregs
+/// and the operands of ops that define one (both emitted as nothing).
+fn Source(comptime class: ?rc.Class) type {
+    comptime std.debug.assert(class == null or class.? == .fp);
     return struct {
+        pub const reports_calls = class == null;
         blocks: []const Block,
         num_vregs: u32,
         fixed: []const ?u8 = &.{},
@@ -676,50 +683,64 @@ fn Source(comptime class: rc.Class) type {
         }
         pub inline fn collectBlock(s: @This(), b: Block, collector: anytype) ra.Error!void {
             const an = s.an;
-            const C = struct {
-                types: []const ir.Type,
-                out: @TypeOf(collector),
-                inline fn use(c: @This(), v: ir.VReg) ra.Error!void {
-                    if (rc.classOf(c.types[v]) == class) try c.out.use(v);
-                }
-                inline fn def(c: @This(), v: ir.VReg) ra.Error!void {
-                    if (rc.classOf(c.types[v]) == class) try c.out.def(v);
-                }
-                /// `use`/`def` of a vreg whose class the op fixes (`fp`: FP class).
-                inline fn useAs(c: @This(), v: ir.VReg, fp: bool) ra.Error!void {
-                    if (fp == (class == .fp)) try c.out.use(v);
-                }
-                inline fn defAs(c: @This(), v: ir.VReg, fp: bool) ra.Error!void {
-                    if (fp == (class == .fp)) try c.out.def(v);
-                }
-            };
-            const c: C = .{ .types = an.types, .out = collector };
-            if (b.insts.params) {
-                if (class == .gp) for (0..@min(an.params, s.num_vregs)) |p| try collector.def(@intCast(p));
-                collector.next();
-            }
             const masks = an.masks[b.first..][0..b.insts.ops.len];
-            if (class == .gp) {
-                // The analysis pass runs here: `needs` and `masks` are complete for the FP
-                // class and the emitter. Every block is a fresh constant state, so the order
-                // and a repeated walk (`ra.verifySource`) give the same result.
+            if (class == null) {
+                const C = struct {
+                    types: []const ir.Type,
+                    fdef: []bool,
+                    /// The current op has read an FP operand.
+                    fp_use: *bool,
+                    out: @TypeOf(collector),
+                    inline fn use(c: @This(), v: ir.VReg) ra.Error!void {
+                        if (rc.classOf(c.types[v]) == .fp) c.fp_use.* = true;
+                        try c.out.use(v);
+                    }
+                    inline fn def(c: @This(), v: ir.VReg) ra.Error!void {
+                        if (c.fp_use.*) c.fdef[v] = true;
+                        try c.out.def(v);
+                    }
+                    /// `use`/`def` of a vreg whose class the op fixes (`fp`: FP class).
+                    inline fn useAs(c: @This(), v: ir.VReg, fp: bool) ra.Error!void {
+                        if (fp) c.fp_use.* = true;
+                        try c.out.use(v);
+                    }
+                    inline fn defAs(c: @This(), v: ir.VReg, _: bool) ra.Error!void {
+                        return c.def(v);
+                    }
+                    inline fn call(c: @This()) ra.Error!void {
+                        try c.out.call();
+                    }
+                };
+                var fp_use = false;
+                const c: C = .{ .types = an.types, .fdef = an.fdef, .fp_use = &fp_use, .out = collector };
+                if (b.insts.params) {
+                    for (0..@min(an.params, s.num_vregs)) |p| try collector.def(@intCast(p));
+                    collector.next();
+                }
+                // The analysis pass runs here: `needs` and `masks` are complete for the
+                // emitter. Every block is a fresh constant state, so the order of the blocks
+                // does not change the result.
                 an.cs.begin();
                 for (b.insts.ops, masks) |*o, *m| {
+                    fp_use = false;
                     m.* = try analyze(o, an, c);
                     collector.next();
                 }
                 return;
             }
+            if (b.insts.params) collector.next();
             const needs = an.needs;
+            const types = an.types;
             for (b.insts.ops, masks) |*o, m| {
                 // Uses selected by `m`, then the definition; pure definitions of unneeded
                 // vregs (emitted as nothing) report neither.
                 switch (o.*) {
                     .br, .@"const", .arith, .call, .cbr, .ret => {},
                     .fconst => |x| if (needs[x.dst]) try collector.def(x.dst),
+                    // (A copy of a never-defined vreg may cross the classes.)
                     .copy => |x| if (needs[x.dst]) {
-                        if (m & 1 != 0) try c.use(x.src);
-                        try c.def(x.dst);
+                        if (m & 1 != 0 and rc.classOf(types[x.src]) == .fp) try collector.use(x.src);
+                        if (rc.classOf(types[x.dst]) == .fp) try collector.def(x.dst);
                     },
                     inline .cvt, .splat, .extract => |x, tag| if (needs[x.dst]) {
                         const src: ir.Type, const dst: ir.Type = switch (tag) {
@@ -727,8 +748,8 @@ fn Source(comptime class: rc.Class) type {
                             .splat => .{ x.ty.lane(), x.ty },
                             else => .{ x.ty, x.ty.lane() },
                         };
-                        if (m & 1 != 0) try c.useAs(x.src, src != .i64);
-                        try c.defAs(x.dst, dst != .i64);
+                        if (m & 1 != 0 and src != .i64) try collector.use(x.src);
+                        if (dst != .i64) try collector.def(x.dst);
                     },
                     .typed => |x| if (needs[x.dst]) {
                         try collector.use(x.a);
@@ -748,6 +769,16 @@ fn Source(comptime class: rc.Class) type {
         }
     };
 }
+
+/// Vregs of one class for `ra.allocateLive`; the FP run leaves out the unneeded ones (their
+/// definitions are emitted as nothing).
+const Members = struct {
+    types: []const ir.Type,
+    needs: ?[]const bool,
+    pub inline fn member(m: Members, v: ra.VReg) bool {
+        return if (m.needs) |n| rc.classOf(m.types[v]) == .fp and n[v] else rc.classOf(m.types[v]) == .gp;
+    }
+};
 
 fn buildBlocks(A: std.mem.Allocator, f: *const ir.Func) ![]Block {
     var entry_target = false;
@@ -1011,16 +1042,19 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
     var scratch_bytes: [2048]u8 = undefined;
     var temp_alloc = @import("../core/scratch.zig").Scratch.init(&scratch_bytes, backing);
     const gpa = temp_alloc.allocator();
-    try f0.verify();
-    var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
+    // Without block parameters, `verify`, the parameter limit and the type check share one
+    // walk over the ops (`rc.verifyCheckWith`, below).
+    const edges = f0.hasBlockParams();
+    if (edges) try f0.verify();
+    var lowered: ?ir.Func = if (edges) try f0.lowerBlockParams(gpa) else null;
     defer if (lowered) |*g| g.deinit();
     const f: *const ir.Func = if (lowered) |*g| g else f0;
-    if (f.params > ir.max_args) return error.TooManyParams;
+    if (edges and f.params > ir.max_args) return error.TooManyParams;
 
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    var arena = @import("../core/scratch.zig").Arena.init(gpa);
     defer arena.deinit();
     const A = arena.allocator();
-    const types = try rc.checkWith(A, f, .{ .vectors = true });
+    const types = if (edges) try rc.checkWith(A, f, .{ .vectors = true }) else try rc.verifyCheckWith(A, f, .{ .vectors = true }, ir.max_args);
     const nv: u32 = @max(f.num_vregs, 1);
     const nb = f.blocks.items.len;
 
@@ -1110,25 +1144,48 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
         for (fx, 0..) |*x, i| x.* = if (gmask & (@as(ra.RegMask, 1) << @intCast(i)) != 0) @intCast(i) else null;
         fixed = fx;
     }
-    const GS = Source(.gp);
     const blocks = try buildBlocks(A, f);
-    const gsrc: GS = .{ .blocks = blocks, .num_vregs = nv, .fixed = fixed, .an = &an };
-    const gcfg: ra.Config = .{ .allocatable = gmask, .callee_saved = callee_saved & gmask };
-    var res = try ra.allocateLinearSource(gpa, gsrc, gcfg);
-    defer res.deinit(gpa);
-    if (std.debug.runtime_safety) std.debug.assert(ra.verifySource(gsrc, gcfg, res));
+    if (has_fp) {
+        an.fdef = try A.alloc(bool, nv);
+        @memset(an.fdef, false);
+    }
+    var res: ra.Result = undefined;
     var fres: ?ra.Result = null;
+    {
+        // One liveness walk (it runs the analysis) for both classes.
+        const src: Source(null) = .{ .blocks = blocks, .num_vregs = nv, .fixed = fixed, .an = &an };
+        var live = try ra.Live.init(gpa, src);
+        defer live.deinit(gpa);
+        const gcfg: ra.Config = .{ .allocatable = gmask, .callee_saved = callee_saved & gmask };
+        res = try ra.allocateLive(gpa, src, &live, gcfg, Members{ .types = types, .needs = null });
+        errdefer res.deinit(gpa);
+        if (std.debug.runtime_safety) std.debug.assert(ra.verifySource(src, gcfg, res));
+        if (has_fp) {
+            var fmask = opts.fp_allocatable & fp_allocatable;
+            if (an.vminmax) fmask &= ~(@as(ra.RegMask, 1) << fs2);
+            const fcfg: ra.Config = .{ .allocatable = fmask };
+            // The walk reported the FP operands of every op. An op that defines an unneeded
+            // vreg is emitted as nothing and must not extend the lifetime of its operands:
+            // such a function (dead code) gets a walk of its own for the FP class.
+            const dead_reads = for (an.fdef, an.needs) |d, n| {
+                if (d and !n) break true;
+            } else false;
+            if (dead_reads) {
+                const fsrc: Source(.fp) = .{ .blocks = blocks, .num_vregs = nv, .an = &an };
+                fres = try ra.allocateLinearSource(gpa, fsrc, fcfg);
+                if (std.debug.runtime_safety) std.debug.assert(ra.verifySource(fsrc, fcfg, fres.?));
+            } else {
+                const fsrc: Source(null) = .{ .blocks = blocks, .num_vregs = nv, .an = &an };
+                fres = try ra.allocateLive(gpa, fsrc, &live, fcfg, Members{ .types = types, .needs = an.needs });
+                if (std.debug.runtime_safety) std.debug.assert(ra.verifySource(fsrc, fcfg, fres.?));
+            }
+        }
+    }
+    defer res.deinit(gpa);
     defer if (fres) |*r| r.deinit(gpa);
     var flocs: []const ra.Loc = undefined;
-    if (has_fp) {
-        var fmask = opts.fp_allocatable & fp_allocatable;
-        if (an.vminmax) fmask &= ~(@as(ra.RegMask, 1) << fs2);
-        const FS = Source(.fp);
-        const fsrc: FS = .{ .blocks = blocks, .num_vregs = nv, .an = &an };
-        const fcfg: ra.Config = .{ .allocatable = fmask };
-        fres = try ra.allocateLinearSource(gpa, fsrc, fcfg);
-        if (std.debug.runtime_safety) std.debug.assert(ra.verifySource(fsrc, fcfg, fres.?));
-        flocs = fres.?.locs;
+    if (fres) |r| {
+        flocs = r.locs;
     } else {
         const l = try A.alloc(ra.Loc, nv);
         @memset(l, .none);
@@ -1234,7 +1291,14 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
     // ---- body ----
     var epilog_used = false;
     var oi: usize = 0; // function-wide op index (`an.masks`)
+    // The output buffer grows to about its final size, estimated from the ops done so far.
+    const tracks = comptime @hasField(@TypeOf(a), "buf");
+    const code0: usize = if (tracks) a.buf.len else 0;
+    defer if (tracks) {
+        a.buf.size_hint = 0;
+    };
     for (f.blocks.items, 0..) |blk, bi| {
+        if (tracks) a.buf.expect(code0, oi, nops);
         try a.bind(labels[bi]);
         e.cur = bi;
         an.cs.begin();

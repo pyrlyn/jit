@@ -256,7 +256,9 @@ const Analysis = struct {
     calls: []const u32,
 };
 
-fn analyze(A: std.mem.Allocator, f: *const ir.Func, types: []const ir.Type) !Analysis {
+/// `clobbers` (owned by the caller, not the arena `A`: a growing list would leave its old
+/// buffers in the arena until the end of the compile) backs `Analysis.clobbers`.
+fn analyze(A: std.mem.Allocator, gpa: std.mem.Allocator, clobbers: *std.ArrayList(ra.Clobber), f: *const ir.Func, types: []const ir.Type) !Analysis {
     const n = types.len;
     var k = try Known.init(A, n);
     // Function-wide constants: one definition, a `const` in block 0 before any block-0 use.
@@ -299,7 +301,6 @@ fn analyze(A: std.mem.Allocator, f: *const ir.Func, types: []const ir.Type) !Ana
     @memset(hints, .{});
     const fhints = try A.alloc(ra.Hint, n);
     @memset(fhints, .{});
-    var clobbers: std.ArrayList(ra.Clobber) = .empty;
     var calls: std.ArrayList(u32) = .empty;
     var has_vectors = false;
     for (types) |tp| has_vectors = has_vectors or tp.isVector();
@@ -337,12 +338,12 @@ fn analyze(A: std.mem.Allocator, f: *const ir.Func, types: []const ir.Type) !Ana
                     if (p.b == null) needs[c.b] = true;
                     switch (c.op) {
                         .sdiv, .srem => {
-                            try clobbers.append(A, .{ .pos = pos, .mask = rax_rdx });
+                            try clobbers.append(gpa, .{ .pos = pos, .mask = rax_rdx });
                             H.reg(hints, c.a, .rax);
                             H.reg(hints, c.dst, if (c.op == .sdiv) .rax else .rdx);
                         },
                         .shl, .shr, .sar => if (p.b == null) {
-                            try clobbers.append(A, .{ .pos = pos, .mask = rcx_m });
+                            try clobbers.append(gpa, .{ .pos = pos, .mask = rcx_m });
                             H.reg(hints, c.b, .rcx);
                         },
                         else => {},
@@ -412,18 +413,23 @@ fn lowerInto(backing: std.mem.Allocator, f0: *const ir.Func, b: anytype, opts: O
     var scratch_bytes: [2048]u8 = undefined;
     var temp_alloc = @import("../core/scratch.zig").Scratch.init(&scratch_bytes, backing);
     const gpa = temp_alloc.allocator();
-    try f0.verify();
-    var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
+    // Without block parameters, `verify`, the parameter limit and the type check share one
+    // walk over the ops (`rc.verifyCheckWith`, below).
+    const edges = f0.hasBlockParams();
+    if (edges) try f0.verify();
+    var lowered: ?ir.Func = if (edges) try f0.lowerBlockParams(gpa) else null;
     defer if (lowered) |*g| g.deinit();
     const f: *const ir.Func = if (lowered) |*g| g else f0;
-    if (f.params > ir.max_args) return error.TooManyParams;
+    if (edges and f.params > ir.max_args) return error.TooManyParams;
 
     // ---- analysis and register allocation (one run per register class) ----
-    var arena = std.heap.ArenaAllocator.init(gpa);
+    var arena = @import("../core/scratch.zig").Arena.init(gpa);
     defer arena.deinit();
     const A = arena.allocator();
-    const types = try rc.checkWith(A, f, .{ .vectors = true });
-    const an = try analyze(A, f, types);
+    const types = if (edges) try rc.checkWith(A, f, .{ .vectors = true }) else try rc.verifyCheckWith(A, f, .{ .vectors = true }, ir.max_args);
+    var clobbers: std.ArrayList(ra.Clobber) = .empty;
+    defer clobbers.deinit(gpa);
+    const an = try analyze(A, gpa, &clobbers, f, types);
     const gmask = toAbs(opts.allocatable);
     const rcfg: ra.Config = .{
         .allocatable = gmask,
@@ -434,11 +440,20 @@ fn lowerInto(backing: std.mem.Allocator, f0: *const ir.Func, b: anytype, opts: O
         .hints = an.hints,
         .clobbers = an.clobbers,
     };
-    var res = try rc.allocateClass(gpa, f, an.gtypes, .gp, true, rcfg);
-    defer res.deinit(gpa);
     const fmask = opts.fp_allocatable & ~((@as(ra.RegMask, 1) << fs0) | (@as(ra.RegMask, 1) << fs1)) & 0xFFFF;
-    var fres = try rc.allocateClass(gpa, f, types, .fp, false, .{ .allocatable = fmask, .hints = an.fhints });
+    const fcfg: ra.Config = .{ .allocatable = fmask, .hints = an.fhints };
+    // Linear scan: both classes share one liveness walk over the IR.
+    var res, var fres = if (opts.algo == .linear) both: {
+        const r = try rc.allocateBoth(gpa, f, an.gtypes, types, rcfg, fcfg);
+        break :both .{ r.gp, r.fp };
+    } else both: {
+        var g = try rc.allocateClass(gpa, f, an.gtypes, .gp, true, rcfg);
+        errdefer g.deinit(gpa);
+        break :both .{ g, try rc.allocateClass(gpa, f, types, .fp, false, fcfg) };
+    };
+    defer res.deinit(gpa);
     defer fres.deinit(gpa);
+    clobbers.clearAndFree(gpa); // only the allocator reads them
     // Call positions, and per call the vregs saved/restored around it (split ranges, ascending;
     // `call_saves[call_start[i]..call_start[i + 1]]`). Each save vreg visits only the calls its
     // interval crosses (a contiguous range of `call_pos`).
@@ -537,7 +552,13 @@ fn lowerInto(backing: std.mem.Allocator, f0: *const ir.Func, b: anytype, opts: O
         .none => {},
     };
 
+    const tracks = comptime @hasDecl(std.meta.Child(@TypeOf(b)), "progress");
+    var total_ops: usize = 0;
+    if (tracks) for (f.blocks.items) |blk| {
+        total_ops += blk.ops.items.len;
+    };
     for (f.blocks.items, 0..) |blk, bi| {
+        if (tracks) b.progress(s.pos, total_ops);
         try b.bind(labels[bi]);
         s.k.block();
         s.next = @intCast(bi + 1);

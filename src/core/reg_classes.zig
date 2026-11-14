@@ -42,6 +42,25 @@ pub fn checkWith(gpa: std.mem.Allocator, f: *const ir.Func, sup: Support) ![]ir.
         error.OutOfMemory => error.OutOfMemory,
     };
     errdefer gpa.free(ty);
+    try supported(f, ty, sup);
+    return ty;
+}
+
+/// A compiler's entry checks for a function without block parameters: `f.verify()`, the
+/// parameter limit (`error.TooManyParams`), then `checkWith` — the same result and error as
+/// that sequence, from one walk over the ops (`ir.Func.verifyTypeCheck`).
+pub fn verifyCheckWith(gpa: std.mem.Allocator, f: *const ir.Func, sup: Support, max_params: u32) ![]ir.Type {
+    const ty = f.verifyTypeCheck(gpa) catch |e| switch (e) {
+        error.TypeMismatch, error.OutOfMemory => return if (f.params > max_params) error.TooManyParams else e,
+        else => return e,
+    };
+    errdefer gpa.free(ty);
+    if (f.params > max_params) return error.TooManyParams;
+    try supported(f, ty, sup);
+    return ty;
+}
+
+fn supported(f: *const ir.Func, ty: []const ir.Type, sup: Support) error{UnsupportedType}!void {
     for (ty) |tp| {
         const ok = switch (tp) {
             .i64 => true,
@@ -56,7 +75,6 @@ pub fn checkWith(gpa: std.mem.Allocator, f: *const ir.Func, sup: Support) ![]ir.
     // `store` read one, `cvt` defines `to` and reads `from`. Only a disabled `cvt` needs a
     // pass over the ops.
     if (!sup.cvt) for (f.blocks.items) |b| for (b.ops.items) |*o| if (o.* == .cvt) return error.UnsupportedType;
-    return ty;
 }
 
 /// Allocation input for one class (`A` should be an arena; nothing is freed individually).
@@ -221,10 +239,12 @@ const Push = struct {
 };
 
 // Linear allocation visits IR operands directly while collecting liveness and
-// local interval endpoints. Only the CFG is materialized; graph/splitting passes
-// retain compact inputs for their repeated instruction walks.
-fn Source(comptime class: Class, comptime typed: bool) type {
+// local interval endpoints. Only the CFG is materialized; the graph allocator
+// retains compact inputs for its repeated instruction walks. `class = null`
+// reports every vreg (one walk for both classes, see `allocateBoth`).
+fn Source(comptime class: ?Class, comptime typed: bool) type {
     return struct {
+        pub const reports_calls = true;
         const Block = struct {
             insts: struct { ops: []const ir.Op, params: bool, len: usize },
             succs: []const u32,
@@ -278,7 +298,8 @@ fn Source(comptime class: Class, comptime typed: bool) type {
             gpa.free(s.edges);
         }
         inline fn member(s: @This(), v: ir.VReg) bool {
-            return if (typed) classOf(s.types[v]) == class else class == .gp;
+            const cl = class orelse return true;
+            return if (typed) classOf(s.types[v]) == cl else cl == .gp;
         }
         pub inline fn isCall(_: @This(), b: Block, i: usize) bool {
             if (b.insts.params and i == 0) return false;
@@ -295,7 +316,7 @@ fn Source(comptime class: Class, comptime typed: bool) type {
             };
             const c: C = .{ .s = s, .out = collector };
             if (b.insts.params) {
-                if (class == .gp) for (0..s.params) |v| {
+                if (class == null or class.? == .gp) for (0..s.params) |v| {
                     try collector.def(@intCast(v));
                 };
                 collector.next();
@@ -332,6 +353,7 @@ fn Source(comptime class: Class, comptime typed: bool) type {
                         def = x.dst;
                     },
                     .call => |x| {
+                        try collector.call();
                         for (x.args) |v| try c.use(v);
                         def = x.dst;
                     },
@@ -381,6 +403,36 @@ fn allocateDirect(comptime S: type, gpa: std.mem.Allocator, f: *const ir.Func, t
     const res = try ra.allocateLinearSource(gpa, source, cfg);
     if (std.debug.runtime_safety) std.debug.assert(ra.verifySource(source, cfg, res));
     return res;
+}
+
+/// Vregs of one class (`ra.allocateLive`).
+const Members = struct {
+    types: []const ir.Type,
+    class: Class,
+    pub inline fn member(m: Members, v: ra.VReg) bool {
+        return classOf(m.types[v]) == m.class;
+    }
+};
+
+pub const Both = struct { gp: ra.Result, fp: ra.Result };
+
+/// Linear-scan allocation of both classes from one liveness walk over the IR: the GP run
+/// takes the GP-class vregs of `gtypes`, the FP run the FP-class vregs of `types` (a vreg
+/// may be in neither). Equal to two `allocateClass` runs; `gcfg.split` segments walk the IR
+/// directly, without a materialized input.
+pub fn allocateBoth(gpa: std.mem.Allocator, f: *const ir.Func, gtypes: []const ir.Type, types: []const ir.Type, gcfg: ra.Config, fcfg: ra.Config) !Both {
+    const S = Source(null, false);
+    const source = try S.init(gpa, f, null);
+    defer source.deinit(gpa);
+    var live = try ra.Live.init(gpa, source);
+    defer live.deinit(gpa);
+    var gp = try ra.allocateLive(gpa, source, &live, gcfg, Members{ .types = gtypes, .class = .gp });
+    errdefer gp.deinit(gpa);
+    if (std.debug.runtime_safety) std.debug.assert(ra.verifySource(source, gcfg, gp));
+    if (!hasFp(types)) return .{ .gp = gp, .fp = try emptyResult(gpa, source.num_vregs) };
+    const fp = try ra.allocateLive(gpa, source, &live, fcfg, Members{ .types = types, .class = .fp });
+    if (std.debug.runtime_safety) std.debug.assert(ra.verifySource(source, fcfg, fp));
+    return .{ .gp = gp, .fp = fp };
 }
 
 fn emptyResult(gpa: std.mem.Allocator, n: u32) !ra.Result {

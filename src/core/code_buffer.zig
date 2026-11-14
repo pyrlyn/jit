@@ -61,6 +61,9 @@ pub const CodeBuffer = struct {
     sticky: ?anyerror = null,
     /// Optional error handler, called by `keep` for every recorded error with the code offset.
     error_handler: ?ErrorHandler = null,
+    /// Expected final code size in bytes (0: unknown, see `expect`). Growth then stops near
+    /// it instead of at the next 1.5x step.
+    size_hint: usize = 0,
 
     inline fn limit(self: *const CodeBuffer) usize {
         return @min(self.max_size, max_code_size);
@@ -80,6 +83,7 @@ pub const CodeBuffer = struct {
     /// Drops code, labels and fixups but keeps allocated capacity (cheap reuse).
     pub fn reset(self: *CodeBuffer) void {
         self.len = 0;
+        self.size_hint = 0;
         self.sticky = null;
         self.labels.clearRetainingCapacity();
         self.fixups.clearRetainingCapacity();
@@ -91,6 +95,15 @@ pub const CodeBuffer = struct {
 
     pub inline fn offset(self: *const CodeBuffer) u32 {
         return @intCast(self.len);
+    }
+
+    /// Estimates the final size for a producer that has emitted the code from offset `start`
+    /// for `done` of `total` equal work units (e.g. IR ops), once a share of them is done.
+    pub fn expect(self: *CodeBuffer, start: usize, done: usize, total: usize) void {
+        if (done < 32 or done < total / 8 or done > total or self.len < start) return;
+        const body = @as(u64, self.len - start) * total / done;
+        const est = @as(u64, start) + body + body / 32 + 64;
+        self.size_hint = std.math.cast(usize, est) orelse 0;
     }
 
     /// Makes sure `n` more bytes can be written without reallocation.
@@ -105,6 +118,11 @@ pub const CodeBuffer = struct {
         // allocation alive at the end of a compile); `remap` keeps growth steps cheap.
         var cap = @max(self.data.len + self.data.len / 2, 1024);
         while (cap - self.len < n) cap += cap / 2;
+        if (self.size_hint != 0) {
+            // Not past the expected size; a low estimate still grows geometrically.
+            const need = self.len + n;
+            cap = @min(cap, @max(self.size_hint, need + need / 8));
+        }
         cap = @min(cap, self.limit() + 16); // +16: room for the 16-byte instruction store
         // remap: in place or moved by the allocator (e.g. realloc), without the old and the
         // new buffer both being live in this function.
@@ -336,6 +354,24 @@ test "labels and rel32 fixup" {
     try cb.bind(l);
     try cb.finalize();
     try std.testing.expectEqualSlices(u8, &.{ 0xE9, 0, 0, 0, 0 }, cb.code());
+}
+
+test "size hint bounds the capacity" {
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    const chunk: [100]u8 = @splat(0x90);
+    for (0..40) |_| try cb.emitBytes(&chunk);
+    cb.expect(0, 10, 100); // too early: fewer than 32 units done
+    try std.testing.expectEqual(@as(usize, 0), cb.size_hint);
+    cb.expect(0, 40, 100); // 4000 bytes for 40 of 100 units: about 10000 in all
+    try std.testing.expect(cb.size_hint >= 10000 and cb.size_hint < 10500);
+    for (0..60) |_| try cb.emitBytes(&chunk);
+    try std.testing.expect(cb.data.len < 10500);
+    // A low estimate does not limit the code size.
+    for (0..100) |_| try cb.emitBytes(&chunk);
+    try std.testing.expectEqual(@as(usize, 20000), cb.code().len);
+    cb.reset();
+    try std.testing.expectEqual(@as(usize, 0), cb.size_hint);
 }
 
 test "fixup bounds and label validation" {

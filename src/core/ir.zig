@@ -263,64 +263,7 @@ pub const Func = struct {
     /// Structural checks: every block ends with exactly one terminator, branch targets exist,
     /// vregs are in range, calls carry at most `max_args` and edges `max_edge_args` arguments.
     pub fn verify(f: *const Func) VerifyError!void {
-        if (f.blocks.items.len == 0) return error.EmptyFunction;
-        const nb = f.blocks.items.len;
-        for (f.blocks.items) |b| {
-            if (b.ops.items.len == 0 or !b.ops.items[b.ops.items.len - 1].isTerminator()) return error.MissingTerminator;
-            // One switch per op (terminator position, branch targets and argument counts, vreg
-            // range), checked in that order as before.
-            const n = f.num_vregs;
-            const last = b.ops.items.len - 1;
-            const C = struct {
-                inline fn all(vs: []const VReg, n_: u32) bool {
-                    for (vs) |v| if (v >= n_) return false;
-                    return true;
-                }
-            };
-            for (b.ops.items, 0..) |*o, i| switch (o.*) {
-                inline .@"const", .fconst => |x| if (x.dst >= n) return error.BadVReg,
-                inline .copy, .cvt, .splat, .extract => |x| if (x.src >= n or x.dst >= n) return error.BadVReg,
-                inline .arith, .typed, .fcmp => |x| if (x.a >= n or x.b >= n or x.dst >= n) return error.BadVReg,
-                .load => |x| if (x.base >= n or x.dst >= n) return error.BadVReg,
-                .store => |x| if (x.base >= n or x.src >= n) return error.BadVReg,
-                .call => |c| {
-                    if (c.args.len > max_args) return error.TooManyArgs;
-                    if (!C.all(c.args, n) or c.dst >= n) return error.BadVReg;
-                },
-                .br => |tg| {
-                    if (i != last) return error.TerminatorNotLast;
-                    if (tg >= nb) return error.BadBlock;
-                    if (f.blocks.items[tg].params.len != 0) return error.ArgCountMismatch;
-                },
-                .cbr => |c| {
-                    if (i != last) return error.TerminatorNotLast;
-                    if (c.then >= nb or c.@"else" >= nb) return error.BadBlock;
-                    if (f.blocks.items[c.then].params.len != 0 or f.blocks.items[c.@"else"].params.len != 0) return error.ArgCountMismatch;
-                    if (c.a >= n or c.b >= n) return error.BadVReg;
-                },
-                .bra => |c| {
-                    if (i != last) return error.TerminatorNotLast;
-                    if (c.target >= nb) return error.BadBlock;
-                    if (c.args.len > max_edge_args) return error.TooManyArgs;
-                    if (c.args.len != f.blocks.items[c.target].params.len) return error.ArgCountMismatch;
-                    if (!C.all(c.args, n)) return error.BadVReg;
-                },
-                .cbra => |c| {
-                    if (i != last) return error.TerminatorNotLast;
-                    if (c.then >= nb or c.@"else" >= nb) return error.BadBlock;
-                    if (c.then_args.len > max_edge_args or c.else_args.len > max_edge_args) return error.TooManyArgs;
-                    if (c.then_args.len != f.blocks.items[c.then].params.len or
-                        c.else_args.len != f.blocks.items[c.@"else"].params.len) return error.ArgCountMismatch;
-                    if (c.a >= n or c.b >= n or !C.all(c.then_args, n) or !C.all(c.else_args, n)) return error.BadVReg;
-                },
-                .ret => |v| {
-                    if (i != last) return error.TerminatorNotLast;
-                    if (v >= n) return error.BadVReg;
-                },
-            };
-        }
-        for (f.blocks.items) |b| for (b.params) |p| if (p >= f.num_vregs) return error.BadVReg;
-        if (f.params > f.num_vregs and f.params > 0) return error.BadVReg;
+        return f.checkWalk(undefined, true, false);
     }
 
     /// `verify` plus SSA form: every vreg is defined once (function parameters, block
@@ -358,10 +301,44 @@ pub const Func = struct {
     /// Infers the type of every vreg (parameters i64, `copy`/block parameters from their
     /// sources) and checks operand types. Returns `types[v]` (caller frees with `gpa`).
     pub fn typeCheck(f: *const Func, gpa: std.mem.Allocator) TypeError![]Type {
-        const ty = try gpa.alloc(?Type, @max(f.num_vregs, 1));
-        defer gpa.free(ty);
-        @memset(ty, null);
-        for (0..f.params) |i| ty[i] = .i64;
+        return f.checkWalk(gpa, false, true);
+    }
+
+    /// `verify` followed by `typeCheck`, with the same result and the same error. A function
+    /// without block parameters is checked in a single walk over its ops.
+    pub fn verifyTypeCheck(f: *const Func, gpa: std.mem.Allocator) (VerifyError || TypeError)![]Type {
+        // The walk types parameters and edge arguments before `verify`'s trailing range checks.
+        if (f.params <= f.num_vregs and !f.hasBlockParams()) {
+            if (f.checkWalk(gpa, true, true)) |types| return types else |e| switch (e) {
+                // A structural error later in the function takes precedence.
+                error.TypeMismatch, error.OutOfMemory => {
+                    try f.verify();
+                    return e;
+                },
+                else => return e,
+            }
+        }
+        try f.verify();
+        return f.typeCheck(gpa);
+    }
+
+    /// One walk over the ops for `verify` (`V`), `typeCheck` (`T`) or both. Per op, the
+    /// structural checks come first: the type rules index by vreg and block.
+    fn checkWalk(f: *const Func, gpa: std.mem.Allocator, comptime V: bool, comptime T: bool) !if (T) []Type else void {
+        const nb = f.blocks.items.len;
+        if (V and nb == 0) return error.EmptyFunction;
+        const n = f.num_vregs;
+        const ty: []?Type = if (T) try gpa.alloc(?Type, @max(n, 1)) else &.{};
+        defer if (T) gpa.free(ty);
+        // Validate known operands during inference. For forward references retain one
+        // type constraint per vreg, then check it after the copy/edge fixpoint.
+        const required: []?Type = if (T) try gpa.alloc(?Type, ty.len) else &.{};
+        defer if (T) gpa.free(required);
+        if (T) {
+            @memset(ty, null);
+            @memset(required, null);
+            for (0..f.params) |i| ty[i] = .i64;
+        }
         const set = struct {
             fn f_(t_: []?Type, v: VReg, want: Type) error{TypeMismatch}!bool {
                 if (t_[v]) |have| {
@@ -378,7 +355,7 @@ pub const Func = struct {
         // change the result or whether there is a mismatch).
         const Pending = struct { b: u32, i: u32 };
         var work: std.ArrayList(Pending) = .empty;
-        defer work.deinit(gpa);
+        defer if (T) work.deinit(gpa);
         const flow = struct {
             /// Propagates what it can; true if some source is still untyped.
             fn edge(t_: []?Type, fb: []const Block, args: []const VReg, target: u32, ch: *bool) error{TypeMismatch}!bool {
@@ -406,12 +383,11 @@ pub const Func = struct {
                 };
             }
         };
-        // Validate known operands during inference. For forward references retain one
-        // type constraint per vreg, then check it after the copy/edge fixpoint.
-        const required = try gpa.alloc(?Type, ty.len);
-        defer gpa.free(required);
-        @memset(required, null);
-        const T = struct {
+        const C = struct {
+            inline fn all(vs: []const VReg, n_: u32) bool {
+                for (vs) |v| if (v >= n_) return false;
+                return true;
+            }
             inline fn is(types: []const ?Type, need: []?Type, v: VReg, want: Type) error{TypeMismatch}!void {
                 if (types[v]) |have| {
                     if (have != want) return error.TypeMismatch;
@@ -421,86 +397,167 @@ pub const Func = struct {
             }
         };
         var ch = false;
-        for (f.blocks.items, 0..) |b, bi| for (b.ops.items, 0..) |*o, oi| switch (o.*) {
-            .@"const" => |x| {
-                _ = try set(ty, x.dst, .i64);
-            },
-            .copy, .bra => {
-                if (try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
-            },
-
-            .arith => |x| {
-                _ = try set(ty, x.dst, .i64);
-                try T.is(ty, required, x.a, .i64);
-                try T.is(ty, required, x.b, .i64);
-            },
-            .cbr => |x| {
-                try T.is(ty, required, x.a, .i64);
-                try T.is(ty, required, x.b, .i64);
-            },
-            .cbra => |x| {
-                if (try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
-                try T.is(ty, required, x.a, .i64);
-                try T.is(ty, required, x.b, .i64);
-            },
-            .ret => |v| try T.is(ty, required, v, .i64),
-            .call => |x| {
-                _ = try set(ty, x.dst, .i64);
-                for (x.args) |arg| try T.is(ty, required, arg, .i64);
-            },
-            .load => |x| {
-                _ = try set(ty, x.dst, x.ty);
-                try T.is(ty, required, x.base, .i64);
-            },
-            .store => |x| {
-                try T.is(ty, required, x.base, .i64);
-                try T.is(ty, required, x.src, x.ty);
-            },
-            .fconst => |x| {
-                _ = try set(ty, x.dst, x.ty);
-                if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
-            },
-            .typed => |x| {
-                _ = try set(ty, x.dst, x.ty);
-                if (x.ty == .i64) return error.TypeMismatch;
-                const fl = x.ty.isFloat();
-                switch (x.op) {
-                    .div, .min, .max => if (!fl) return error.TypeMismatch,
-                    .@"and", .@"or", .xor => if (fl) return error.TypeMismatch,
-                    else => {},
-                }
-                try T.is(ty, required, x.a, x.ty);
-                try T.is(ty, required, x.b, x.ty);
-            },
-            .fcmp => |x| {
-                _ = try set(ty, x.dst, .i64);
-                if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
-                try T.is(ty, required, x.a, x.ty);
-                try T.is(ty, required, x.b, x.ty);
-            },
-            .cvt => |x| {
-                _ = try set(ty, x.dst, x.to);
-                const ok = switch (x.to) {
-                    .i64 => x.from == .f32 or x.from == .f64,
-                    .f32 => x.from == .i64 or x.from == .f64,
-                    .f64 => x.from == .i64 or x.from == .f32,
-                    else => false,
-                };
-                if (!ok) return error.TypeMismatch;
-                try T.is(ty, required, x.src, x.from);
-            },
-            .splat => |x| {
-                _ = try set(ty, x.dst, x.ty);
-                if (!x.ty.isVector()) return error.TypeMismatch;
-                try T.is(ty, required, x.src, x.ty.lane());
-            },
-            .extract => |x| {
-                _ = try set(ty, x.dst, x.ty.lane());
-                if (!x.ty.isVector() or x.lane >= x.ty.lanes()) return error.TypeMismatch;
-                try T.is(ty, required, x.src, x.ty);
-            },
-            else => {},
-        };
+        for (f.blocks.items, 0..) |b, bi| {
+            if (V and (b.ops.items.len == 0 or !b.ops.items[b.ops.items.len - 1].isTerminator())) return error.MissingTerminator;
+            const last = b.ops.items.len -% 1;
+            for (b.ops.items, 0..) |*o, oi| switch (o.*) {
+                .@"const" => |x| {
+                    if (V and x.dst >= n) return error.BadVReg;
+                    if (T) _ = try set(ty, x.dst, .i64);
+                },
+                .copy => |x| {
+                    if (V and (x.src >= n or x.dst >= n)) return error.BadVReg;
+                    if (T and try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
+                },
+                .arith => |x| {
+                    if (V and (x.a >= n or x.b >= n or x.dst >= n)) return error.BadVReg;
+                    if (T) {
+                        _ = try set(ty, x.dst, .i64);
+                        try C.is(ty, required, x.a, .i64);
+                        try C.is(ty, required, x.b, .i64);
+                    }
+                },
+                .load => |x| {
+                    if (V and (x.base >= n or x.dst >= n)) return error.BadVReg;
+                    if (T) {
+                        _ = try set(ty, x.dst, x.ty);
+                        try C.is(ty, required, x.base, .i64);
+                    }
+                },
+                .store => |x| {
+                    if (V and (x.base >= n or x.src >= n)) return error.BadVReg;
+                    if (T) {
+                        try C.is(ty, required, x.base, .i64);
+                        try C.is(ty, required, x.src, x.ty);
+                    }
+                },
+                .fconst => |x| {
+                    if (V and x.dst >= n) return error.BadVReg;
+                    if (T) {
+                        _ = try set(ty, x.dst, x.ty);
+                        if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
+                    }
+                },
+                .typed => |x| {
+                    if (V and (x.a >= n or x.b >= n or x.dst >= n)) return error.BadVReg;
+                    if (T) {
+                        _ = try set(ty, x.dst, x.ty);
+                        if (x.ty == .i64) return error.TypeMismatch;
+                        const fl = x.ty.isFloat();
+                        switch (x.op) {
+                            .div, .min, .max => if (!fl) return error.TypeMismatch,
+                            .@"and", .@"or", .xor => if (fl) return error.TypeMismatch,
+                            else => {},
+                        }
+                        try C.is(ty, required, x.a, x.ty);
+                        try C.is(ty, required, x.b, x.ty);
+                    }
+                },
+                .fcmp => |x| {
+                    if (V and (x.a >= n or x.b >= n or x.dst >= n)) return error.BadVReg;
+                    if (T) {
+                        _ = try set(ty, x.dst, .i64);
+                        if (x.ty != .f32 and x.ty != .f64) return error.TypeMismatch;
+                        try C.is(ty, required, x.a, x.ty);
+                        try C.is(ty, required, x.b, x.ty);
+                    }
+                },
+                .cvt => |x| {
+                    if (V and (x.src >= n or x.dst >= n)) return error.BadVReg;
+                    if (T) {
+                        _ = try set(ty, x.dst, x.to);
+                        const ok = switch (x.to) {
+                            .i64 => x.from == .f32 or x.from == .f64,
+                            .f32 => x.from == .i64 or x.from == .f64,
+                            .f64 => x.from == .i64 or x.from == .f32,
+                            else => false,
+                        };
+                        if (!ok) return error.TypeMismatch;
+                        try C.is(ty, required, x.src, x.from);
+                    }
+                },
+                .splat => |x| {
+                    if (V and (x.src >= n or x.dst >= n)) return error.BadVReg;
+                    if (T) {
+                        _ = try set(ty, x.dst, x.ty);
+                        if (!x.ty.isVector()) return error.TypeMismatch;
+                        try C.is(ty, required, x.src, x.ty.lane());
+                    }
+                },
+                .extract => |x| {
+                    if (V and (x.src >= n or x.dst >= n)) return error.BadVReg;
+                    if (T) {
+                        _ = try set(ty, x.dst, x.ty.lane());
+                        if (!x.ty.isVector() or x.lane >= x.ty.lanes()) return error.TypeMismatch;
+                        try C.is(ty, required, x.src, x.ty);
+                    }
+                },
+                .call => |x| {
+                    if (V) {
+                        if (x.args.len > max_args) return error.TooManyArgs;
+                        if (!C.all(x.args, n) or x.dst >= n) return error.BadVReg;
+                    }
+                    if (T) {
+                        _ = try set(ty, x.dst, .i64);
+                        for (x.args) |arg| try C.is(ty, required, arg, .i64);
+                    }
+                },
+                .br => |tg| if (V) {
+                    if (oi != last) return error.TerminatorNotLast;
+                    if (tg >= nb) return error.BadBlock;
+                    if (f.blocks.items[tg].params.len != 0) return error.ArgCountMismatch;
+                },
+                .cbr => |x| {
+                    if (V) {
+                        if (oi != last) return error.TerminatorNotLast;
+                        if (x.then >= nb or x.@"else" >= nb) return error.BadBlock;
+                        if (f.blocks.items[x.then].params.len != 0 or f.blocks.items[x.@"else"].params.len != 0) return error.ArgCountMismatch;
+                        if (x.a >= n or x.b >= n) return error.BadVReg;
+                    }
+                    if (T) {
+                        try C.is(ty, required, x.a, .i64);
+                        try C.is(ty, required, x.b, .i64);
+                    }
+                },
+                .bra => |x| {
+                    if (V) {
+                        if (oi != last) return error.TerminatorNotLast;
+                        if (x.target >= nb) return error.BadBlock;
+                        if (x.args.len > max_edge_args) return error.TooManyArgs;
+                        if (x.args.len != f.blocks.items[x.target].params.len) return error.ArgCountMismatch;
+                        if (!C.all(x.args, n)) return error.BadVReg;
+                    }
+                    if (T and try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
+                },
+                .cbra => |x| {
+                    if (V) {
+                        if (oi != last) return error.TerminatorNotLast;
+                        if (x.then >= nb or x.@"else" >= nb) return error.BadBlock;
+                        if (x.then_args.len > max_edge_args or x.else_args.len > max_edge_args) return error.TooManyArgs;
+                        if (x.then_args.len != f.blocks.items[x.then].params.len or
+                            x.else_args.len != f.blocks.items[x.@"else"].params.len) return error.ArgCountMismatch;
+                        if (x.a >= n or x.b >= n or !C.all(x.then_args, n) or !C.all(x.else_args, n)) return error.BadVReg;
+                    }
+                    if (T) {
+                        if (try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
+                        try C.is(ty, required, x.a, .i64);
+                        try C.is(ty, required, x.b, .i64);
+                    }
+                },
+                .ret => |v| {
+                    if (V) {
+                        if (oi != last) return error.TerminatorNotLast;
+                        if (v >= n) return error.BadVReg;
+                    }
+                    if (T) try C.is(ty, required, v, .i64);
+                },
+            };
+        }
+        if (V) {
+            for (f.blocks.items) |b| for (b.params) |p| if (p >= n) return error.BadVReg;
+            if (f.params > n and f.params > 0) return error.BadVReg;
+        }
+        if (!T) return;
         // Another round only if the previous one typed some vreg.
         ch = true;
         while (ch and work.items.len != 0) {
@@ -512,7 +569,7 @@ pub const Func = struct {
             };
             work.items.len = keep;
         }
-        const out = try gpa.alloc(Type, @max(f.num_vregs, 1));
+        const out = try gpa.alloc(Type, @max(n, 1));
         errdefer gpa.free(out);
         for (ty, required, 0..) |t_, need, i| {
             out[i] = t_ orelse .i64; // never defined: reads as i64 0

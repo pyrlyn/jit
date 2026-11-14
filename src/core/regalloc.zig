@@ -267,12 +267,13 @@ fn liveWords(f: anytype) usize {
 /// Live-out sets as one flat word array: block `bi` is `out[bi * liveWords(f) ..][0..liveWords(f)]`,
 /// followed by the entry block's live-in set (`liveWords(f)` more words).
 fn liveOut(gpa: std.mem.Allocator, f: anytype) Error![]LiveWord {
-    return liveOutIntervals(gpa, f, false, &.{});
+    return liveOutIntervals(gpa, f, false, &.{}, null);
 }
 
 // Build local interval endpoints while collecting gen/kill: both need the same
-// forward uses/defs walk. `liveness` callers can omit intervals.
-fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals: bool, iv: []Interval) Error![]LiveWord {
+// forward uses/defs walk. `liveness` callers can omit intervals. With `calls`, the walk
+// also records the call positions (ascending).
+fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals: bool, iv: []Interval, calls: ?*std.ArrayList(u32)) Error![]LiveWord {
     const nb = f.blocks.len;
     for (f.blocks) |b| for (b.succs) |succ| if (succ >= nb) return error.InvalidFunc;
     // Per block: gen (upward-exposed uses), kill (defs) and live-in, as flat word arrays, so
@@ -297,6 +298,12 @@ fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals:
         n: u32,
         first: u32,
         pos: u32,
+        gpa: std.mem.Allocator,
+        calls: ?*std.ArrayList(u32),
+        /// The current instruction is a call (sources with `reports_calls`).
+        pub inline fn call(c: *@This()) Error!void {
+            if (c.calls) |l| try l.append(c.gpa, c.pos);
+        }
         pub inline fn use(c: *@This(), u: VReg) Error!void {
             if (u >= c.n) return error.InvalidFunc;
             const bit = @as(W, 1) << @intCast(u % bits);
@@ -319,9 +326,10 @@ fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals:
             c.pos += 1;
         }
     };
+    const walk_calls = comptime @hasDecl(@TypeOf(f), "collectBlock") and @hasDecl(@TypeOf(f), "reports_calls") and @TypeOf(f).reports_calls;
     var pos: u32 = 0;
     for (f.blocks, 0..) |b, bi| {
-        var c: Collector = .{ .g = gen[bi * nw ..][0..nw], .k = kill[bi * nw ..][0..nw], .iv = iv, .n = f.num_vregs, .first = pos, .pos = pos };
+        var c: Collector = .{ .g = gen[bi * nw ..][0..nw], .k = kill[bi * nw ..][0..nw], .iv = iv, .n = f.num_vregs, .first = pos, .pos = pos, .gpa = gpa, .calls = if (walk_calls) calls else null };
         if (@hasDecl(@TypeOf(f), "collectBlock")) {
             try f.collectBlock(b, &c);
         } else {
@@ -333,6 +341,7 @@ fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals:
         }
         pos = c.pos;
     }
+    if (!walk_calls) if (calls) |l| try callPositionsInto(gpa, f, l);
     var changed = true;
     while (changed) {
         changed = false;
@@ -359,16 +368,16 @@ fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals:
 }
 
 pub fn buildIntervals(gpa: std.mem.Allocator, f: Func) Error![]Interval {
-    return buildIntervalsUndef(gpa, f, null);
+    return buildIntervalsUndef(gpa, f, null, null);
 }
 
 /// `buildIntervals`, plus the entry block's live-in vregs in `undef` (owned by `gpa` when
-/// non-empty; see `Result.entry_undef`).
-fn buildIntervalsUndef(gpa: std.mem.Allocator, f: anytype, undef: ?*[]VReg) Error![]Interval {
+/// non-empty; see `Result.entry_undef`) and the call positions in `calls`.
+fn buildIntervalsUndef(gpa: std.mem.Allocator, f: anytype, undef: ?*[]VReg, calls: ?*std.ArrayList(u32)) Error![]Interval {
     const iv = try gpa.alloc(Interval, f.num_vregs);
     errdefer gpa.free(iv);
     for (iv, 0..) |*x, v| x.* = .{ .vreg = @intCast(v), .start = none, .end = none };
-    const live_out = try liveOutIntervals(gpa, f, true, iv);
+    const live_out = try liveOutIntervals(gpa, f, true, iv, calls);
     defer gpa.free(live_out);
     const nw = liveWords(f);
     var pos: u32 = 0;
@@ -506,30 +515,90 @@ pub fn allocate(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result {
 }
 
 fn allocateInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Result {
+    var calls: std.ArrayList(u32) = .empty;
+    defer calls.deinit(gpa);
     var r = switch (cfg.algo) {
-        .linear => try allocateLinearInput(gpa, f, cfg),
+        .linear => blk: {
+            var undef: []VReg = &.{};
+            const iv = try buildIntervalsUndef(gpa, f, &undef, &calls);
+            break :blk try linearScan(gpa, f.num_vregs, f.fixed, cfg, iv, undef, calls.items);
+        },
         .graph => try allocateGraphInput(gpa, f, cfg),
     };
     if (cfg.split) {
         errdefer r.deinit(gpa);
-        try splitSpilled(gpa, f, cfg, &r);
+        if (cfg.algo == .graph) try callPositionsInto(gpa, f, &calls);
+        try splitSpilled(gpa, f, cfg, &r, calls.items);
     }
     return r;
 }
 
-/// Step 7: per-block register segments for spilled vregs (see header).
-fn splitSpilled(gpa: std.mem.Allocator, f: anytype, cfg: Config, r: *Result) Error!void {
+/// Liveness of every vreg of a compiler source from one walk: intervals, the entry block's
+/// live-in vregs and the call positions. Each register class then runs `allocateLive` on its
+/// own vregs; the result equals a separate walk per class (liveness is per vreg).
+pub const Live = struct {
+    intervals: []Interval,
+    entry_undef: []VReg = &.{},
+    calls: std.ArrayList(u32) = .empty,
+
+    pub fn init(gpa: std.mem.Allocator, f: anytype) Error!Live {
+        var l: Live = .{ .intervals = &.{} };
+        errdefer l.calls.deinit(gpa);
+        l.intervals = try buildIntervalsUndef(gpa, f, &l.entry_undef, &l.calls);
+        return l;
+    }
+    pub fn deinit(l: *Live, gpa: std.mem.Allocator) void {
+        if (l.entry_undef.len != 0) gpa.free(l.entry_undef);
+        gpa.free(l.intervals);
+        l.calls.deinit(gpa);
+    }
+};
+
+/// Linear scan (and `cfg.split` segments) for the vregs `v` with `class.member(v)`; every
+/// other vreg gets no location, as if `f` had reported only the members.
+pub fn allocateLive(gpa: std.mem.Allocator, f: anytype, live: *const Live, cfg: Config, class: anytype) Error!Result {
+    std.debug.assert(cfg.algo == .linear);
     const n = f.num_vregs;
-    var calls = try callPositions(gpa, f);
-    defer calls.deinit(gpa);
+    const iv = try gpa.alloc(Interval, n);
+    for (iv, live.intervals, 0..) |*x, src, v| {
+        x.* = if (class.member(@intCast(v))) src else .{ .vreg = @intCast(v), .start = none, .end = none };
+    }
+    var cnt: usize = 0;
+    for (live.entry_undef) |v| cnt += @intFromBool(class.member(v));
+    var undef: []VReg = &.{};
+    if (cnt != 0) {
+        undef = gpa.alloc(VReg, cnt) catch |e| {
+            gpa.free(iv);
+            return e;
+        };
+        cnt = 0;
+        for (live.entry_undef) |v| if (class.member(v)) {
+            undef[cnt] = v;
+            cnt += 1;
+        };
+    }
+    var r = try linearScan(gpa, n, f.fixed, cfg, iv, undef, live.calls.items);
+    if (cfg.split) {
+        errdefer r.deinit(gpa);
+        try splitSpilled(gpa, f, cfg, &r, live.calls.items);
+    }
+    return r;
+}
+
+/// Step 7: per-block register segments for spilled vregs (see header). `calls`: ascending
+/// call positions.
+fn splitSpilled(gpa: std.mem.Allocator, f: anytype, cfg: Config, r: *Result, calls: []const u32) Error!void {
+    const n = f.num_vregs;
     // Clobbers by position: a segment only meets the few of its own block.
-    const clob = try gpa.dupe(Clobber, cfg.clobbers);
-    defer gpa.free(clob);
-    std.sort.pdq(Clobber, clob, {}, struct {
+    const by_pos = struct {
         fn lt(_: void, a: Clobber, b: Clobber) bool {
             return a.pos < b.pos;
         }
-    }.lt);
+    }.lt;
+    const sorted_clob: ?[]Clobber = if (std.sort.isSorted(Clobber, cfg.clobbers, {}, by_pos)) null else try gpa.dupe(Clobber, cfg.clobbers);
+    defer if (sorted_clob) |c| gpa.free(c);
+    if (sorted_clob) |c| std.sort.pdq(Clobber, c, {}, by_pos);
+    const clob: []const Clobber = sorted_clob orelse cfg.clobbers;
     var cpi: usize = 0; // first clobber at or after `base`
     var segs: std.ArrayList(Seg) = .empty;
     defer segs.deinit(gpa);
@@ -567,30 +636,35 @@ fn splitSpilled(gpa: std.mem.Allocator, f: anytype, cfg: Config, r: *Result) Err
     var next_reg: usize = 0;
     var base: u32 = 0;
     var ci: usize = 0; // first call at or after `base`
+    const Noter = struct {
+        gpa: std.mem.Allocator,
+        locs: []const Loc,
+        first: []u32,
+        last: []u32,
+        cnt: []u32,
+        first_is_use: []bool,
+        touched: *std.ArrayList(VReg),
+        p: u32,
+        inline fn add(c: *@This(), v: VReg, is_use: bool) Error!void {
+            if (c.locs[v] != .stack) return;
+            if (c.cnt[v] == 0) try c.touched.append(c.gpa, v);
+            note(c.first, c.last, c.cnt, c.first_is_use, v, c.p, is_use);
+        }
+        pub inline fn use(c: *@This(), u: VReg) Error!void {
+            return c.add(u, true);
+        }
+        pub inline fn def(c: *@This(), d: VReg) Error!void {
+            return c.add(d, false);
+        }
+        pub inline fn call(_: *@This()) Error!void {}
+        pub inline fn next(c: *@This()) void {
+            c.p += 1;
+        }
+    };
     for (f.blocks) |b| {
         const len: u32 = @intCast(b.insts.len);
         defer base += len;
         if (len == 0) continue;
-        touched.clearRetainingCapacity();
-        for (b.insts, 0..) |in, k| {
-            const p = base + @as(u32, @intCast(k));
-            for (uses(f, in)) |u| if (r.locs[u] == .stack) {
-                if (cnt[u] == 0) try touched.append(gpa, u);
-                note(first, last, cnt, first_is_use, u, p, true);
-            };
-            for (defs(f, in)) |d| if (r.locs[d] == .stack) {
-                if (cnt[d] == 0) try touched.append(gpa, d);
-                note(first, last, cnt, first_is_use, d, p, false);
-            };
-        }
-        while (ci < calls.items.len and calls.items[ci] < base) ci += 1;
-        var ce = ci;
-        while (ce < calls.items.len and calls.items[ce] < base + len) ce += 1;
-        const block_calls = calls.items[ci..ce];
-        while (cpi < clob.len and clob[cpi].pos < base) cpi += 1;
-        var cpe = cpi;
-        while (cpe < clob.len and clob[cpe].pos < base + len) cpe += 1;
-        const block_clobbers = clob[cpi..cpe];
         const block_span: Interval = .{ .vreg = 0, .start = 2 * base, .end = 2 * (base + len - 1) + 1 };
         while (next_reg < reg_all.items.len and r.intervals[reg_all.items[next_reg]].start <= block_span.end) : (next_reg += 1)
             try active.append(gpa, reg_all.items[next_reg]);
@@ -609,6 +683,25 @@ fn splitSpilled(gpa: std.mem.Allocator, f: anytype, cfg: Config, r: *Result) Err
                 try reg_ivs.append(gpa, wi);
         };
         active.shrinkRetainingCapacity(keep);
+        // Every register is held across the whole block: no segment fits, skip its walk.
+        if (cfg.allocatable & ~through == 0) continue;
+        touched.clearRetainingCapacity();
+        var noter: Noter = .{ .gpa = gpa, .locs = r.locs, .first = first, .last = last, .cnt = cnt, .first_is_use = first_is_use, .touched = &touched, .p = base };
+        if (@hasDecl(@TypeOf(f), "collectBlock")) {
+            try f.collectBlock(b, &noter);
+        } else for (b.insts) |in| {
+            for (uses(f, in)) |u| try noter.use(u);
+            for (defs(f, in)) |d| try noter.def(d);
+            noter.next();
+        }
+        while (ci < calls.len and calls[ci] < base) ci += 1;
+        var ce = ci;
+        while (ce < calls.len and calls[ce] < base + len) ce += 1;
+        const block_calls = calls[ci..ce];
+        while (cpi < clob.len and clob[cpi].pos < base) cpi += 1;
+        var cpe = cpi;
+        while (cpe < clob.len and clob[cpe].pos < base + len) cpe += 1;
+        const block_clobbers = clob[cpi..cpe];
         const block_segs = segs.items.len;
         // Vreg order: a bitset scan (O(n / 64)) when the block touches many vregs, else a sort.
         if (touched.items.len * 64 >= n / 64) {
@@ -694,15 +787,12 @@ fn note(first: []u32, last: []u32, cnt: []u32, first_is_use: []bool, v: VReg, p:
     cnt[v] += 1;
 }
 
-fn callPositions(gpa: std.mem.Allocator, f: anytype) Error!std.ArrayList(u32) {
-    var calls: std.ArrayList(u32) = .empty;
-    errdefer calls.deinit(gpa);
+fn callPositionsInto(gpa: std.mem.Allocator, f: anytype, calls: *std.ArrayList(u32)) Error!void {
     var pos: u32 = 0;
     for (f.blocks) |b| for (0..b.insts.len) |ii| {
         if (isCall(f, b, ii)) try calls.append(gpa, pos);
         pos += 1;
     };
-    return calls;
 }
 
 /// Caller-saved registers holding call-crossing values get a save slot (split ranges).
@@ -727,14 +817,14 @@ pub fn allocateGraph(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result 
 fn allocateGraphInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Result {
     const n = f.num_vregs;
     var undef: []VReg = &.{};
-    const iv = try buildIntervalsUndef(gpa, f, &undef);
+    var calls: std.ArrayList(u32) = .empty;
+    defer calls.deinit(gpa);
+    const iv = try buildIntervalsUndef(gpa, f, &undef, &calls);
     errdefer gpa.free(iv);
     errdefer if (undef.len != 0) gpa.free(undef);
     const locs = try gpa.alloc(Loc, n);
     errdefer gpa.free(locs);
     @memset(locs, .none);
-    var calls = try callPositions(gpa, f);
-    defer calls.deinit(gpa);
     const clob = try ClobberIndex.init(gpa, cfg.clobbers);
     defer clob.deinit(gpa);
 
@@ -923,16 +1013,22 @@ pub fn allocateLinear(gpa: std.mem.Allocator, f: Func, cfg: Config) Error!Result
 }
 
 fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Result {
+    var calls: std.ArrayList(u32) = .empty;
+    defer calls.deinit(gpa);
     var undef: []VReg = &.{};
-    const iv = try buildIntervalsUndef(gpa, f, &undef);
+    const iv = try buildIntervalsUndef(gpa, f, &undef, &calls);
+    return linearScan(gpa, f.num_vregs, f.fixed, cfg, iv, undef, calls.items);
+}
+
+/// Linear scan over `iv` (one interval per vreg; owned by the result, as is `undef`).
+/// `calls`: ascending call positions.
+fn linearScan(gpa: std.mem.Allocator, n: u32, fixed: []const ?u8, cfg: Config, iv: []Interval, undef: []VReg, calls: []const u32) Error!Result {
     errdefer gpa.free(iv);
     errdefer if (undef.len != 0) gpa.free(undef);
-    const locs = try gpa.alloc(Loc, f.num_vregs);
+    const locs = try gpa.alloc(Loc, n);
     errdefer gpa.free(locs);
     @memset(locs, .none);
 
-    var calls = try callPositions(gpa, f);
-    defer calls.deinit(gpa);
     const clob = try ClobberIndex.init(gpa, cfg.clobbers);
     defer clob.deinit(gpa);
 
@@ -941,7 +1037,7 @@ fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Re
     defer fixed_iv.deinit(gpa);
     var fixed_reg: std.ArrayList(u8) = .empty;
     defer fixed_reg.deinit(gpa);
-    for (f.fixed, 0..) |fx, v| if (fx) |r| {
+    for (fixed, 0..) |fx, v| if (fx) |r| {
         if (iv[v].start == none) continue;
         try fixed_iv.append(gpa, iv[v]);
         try fixed_reg.append(gpa, r);
@@ -953,11 +1049,11 @@ fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Re
     };
 
     // Unhandled intervals sorted by start.
-    var order = try std.ArrayList(Interval).initCapacity(gpa, f.num_vregs);
+    var order = try std.ArrayList(Interval).initCapacity(gpa, n);
     defer order.deinit(gpa);
     for (iv, 0..) |x, v| {
         if (x.start == none) continue;
-        if (f.fixed.len > v and f.fixed[v] != null) continue;
+        if (fixed.len > v and fixed[v] != null) continue;
         order.appendAssumeCapacity(x);
     }
     std.mem.sort(Interval, order.items, {}, struct {
@@ -1000,7 +1096,7 @@ fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Re
 
         const clobbered = clob.ofInterval(cur);
         var mask = cfg.allocatable & ~clobbered;
-        const crosses = crossesCall(calls.items, cur);
+        const crosses = crossesCall(calls, cur);
         for (active.items) |a| if (locs[a.vreg] == .reg) {
             mask &= ~(@as(RegMask, 1) << @intCast(locs[a.vreg].reg));
         };
@@ -1058,12 +1154,12 @@ fn allocateLinearInput(gpa: std.mem.Allocator, f: anytype, cfg: Config) Error!Re
         spills += 1;
     }
     // Split ranges: caller-saved registers holding call-crossing values get a save slot.
-    const save = try gpa.alloc(?u32, f.num_vregs);
+    const save = try gpa.alloc(?u32, n);
     @memset(save, null);
     for (iv, 0..) |x, v| {
-        if (locs[v] != .reg or !crossesCall(calls.items, x)) continue;
+        if (locs[v] != .reg or !crossesCall(calls, x)) continue;
         if (cfg.callee_saved & (@as(RegMask, 1) << @intCast(locs[v].reg)) != 0) continue;
-        if (f.fixed.len > v and f.fixed[v] != null) continue;
+        if (fixed.len > v and fixed[v] != null) continue;
         save[v] = num_slots;
         num_slots += 1;
     }
