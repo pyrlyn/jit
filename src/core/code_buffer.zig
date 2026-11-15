@@ -113,7 +113,7 @@ pub const CodeBuffer = struct {
 
     noinline fn grow(self: *CodeBuffer, n: usize) Error!void {
         @branchHint(.cold);
-        if (self.len + n > self.limit()) return error.CodeTooLarge;
+        if (n > self.limit() -| self.len) return error.CodeTooLarge; // (`len + n` could wrap)
         // 1.5x: less unused capacity than doubling (the buffer is usually the largest
         // allocation alive at the end of a compile); `remap` keeps growth steps cheap.
         var cap = @max(self.data.len + self.data.len / 2, 1024);
@@ -249,7 +249,8 @@ pub const CodeBuffer = struct {
                 .rv_pcrel_pair => 8,
                 .rv_cb9, .rv_cj12 => 2,
             };
-            if (@as(usize, f.at) + width > self.len or f.base > self.len) return error.InvalidFixup;
+            // (`at + width` could wrap where usize is 32 bits.)
+            if (f.at > self.len or self.len - f.at < width or f.base > self.len) return error.InvalidFixup;
             const target = self.labels.items[f.label];
             if (target == unbound) return error.UnboundLabel;
             const disp: i64 = @as(i64, target) - @as(i64, f.base);
@@ -385,4 +386,12 @@ test "fixup bounds and label validation" {
     try cb.bind(l);
     try std.testing.expectError(error.InvalidFixup, cb.finalize());
     try std.testing.expectEqualSlices(u8, &.{ 0xE9, 0, 0 }, cb.code());
+    // Sizes and offsets near the integer limits are errors, not wraparounds.
+    try std.testing.expectError(error.CodeTooLarge, cb.ensure(std.math.maxInt(usize)));
+    cb.reset();
+    const m = try cb.newLabel();
+    try cb.emitBytes(&.{ 0xE9, 0, 0, 0, 0 });
+    try cb.bind(m);
+    try cb.addFixup(.{ .at = std.math.maxInt(u32) - 2, .base = 0, .label = m.id, .kind = .rel32 });
+    try std.testing.expectError(error.InvalidFixup, cb.finalize());
 }

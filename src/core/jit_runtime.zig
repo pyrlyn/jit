@@ -165,10 +165,14 @@ fn makeExecutable(mem: []align(4096) u8) Error!void {
     } else if (mprotect(mem.ptr, mem.len, PROT_READ | PROT_EXEC) != 0) return error.ProtectFailed;
 }
 
-/// Fills unused executable memory with traps: `int3` (0xCC) on x86-64, `udf #0` (zero words) on AArch64.
+/// Fills unused executable memory with traps: `int3` (0xCC) on x86, `udf #0` (zero words) on AArch64.
 pub fn fillTrap(mem: []u8) void {
-    @memset(mem, if (builtin.cpu.arch == .x86_64) 0xCC else 0x00);
+    @memset(mem, trap_byte);
 }
+const trap_byte: u8 = switch (builtin.cpu.arch) {
+    .x86, .x86_64 => 0xCC, // (zeros would run as `add [eax], al`)
+    else => 0x00,
+};
 
 // ---- Dual mapping (AsmJit: VirtMem::allocDualMapping) -------------------------------------
 // One physical region, two views: `rw` is never executable, `rx` is never writable. Code can be
@@ -230,6 +234,7 @@ fn asSlice(p: *anyopaque, size: usize) []align(4096) u8 {
 /// Allocates a dual mapping of at least `min_size` bytes, trap-filled.
 pub fn allocDual(min_size: usize) Error!DualFunction {
     if (!dual_mapping_supported) @compileError("dual mapping: unsupported OS");
+    if (min_size > std.math.maxInt(isize) - page) return error.MapFailed; // rounding up would overflow
     const size = std.mem.alignForward(usize, @max(min_size, 1), page);
     var rw: []align(4096) u8 = undefined;
     var rx: []align(4096) u8 = undefined;
@@ -302,12 +307,18 @@ test "runtime cache: bound, exclusive ownership, trap tail and trim" {
     defer short.release();
     try t.expectEqual(last_cached, short.mem.ptr);
     try t.expectEqual(@as(u8, 0x37), short.mem[0]);
-    const trap: u8 = if (builtin.cpu.arch == .x86_64) 0xCC else 0;
-    for (short.mem[1..]) |byte| try t.expectEqual(trap, byte);
+    for (short.mem[1..]) |byte| try t.expectEqual(trap_byte, byte);
     try t.expectEqual((cache_capacity - 1) * page, trimCache());
     // Trimming the idle cache must not release the live mapping.
     try t.expectEqual(@as(u8, 0x37), short.mem[0]);
     try t.expectEqual(@as(usize, 0), trimCache());
+}
+
+test "trap fill byte and dual mapping size limit" {
+    comptime std.debug.assert(trap_byte == 0xCC or (builtin.cpu.arch != .x86 and builtin.cpu.arch != .x86_64));
+    if (!dual_mapping_supported) return error.SkipZigTest;
+    try std.testing.expectError(error.MapFailed, allocDual(std.math.maxInt(usize)));
+    try std.testing.expectError(error.MapFailed, allocDual(std.math.maxInt(isize)));
 }
 
 test "runtime cache: external handles, large mappings and contention bypass retention" {

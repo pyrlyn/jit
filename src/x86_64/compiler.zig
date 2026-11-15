@@ -415,7 +415,7 @@ fn lowerInto(backing: std.mem.Allocator, f0: *const ir.Func, b: anytype, opts: O
     const gpa = temp_alloc.allocator();
     // Without block parameters, `verify`, the parameter limit and the type check share one
     // walk over the ops (`rc.verifyCheckWith`, below).
-    const edges = f0.hasBlockParams();
+    const edges = f0.hasBlockEdges();
     if (edges) try f0.verify();
     var lowered: ?ir.Func = if (edges) try f0.lowerBlockParams(gpa) else null;
     defer if (lowered) |*g| g.deinit();
@@ -1803,4 +1803,32 @@ test "compiler: splitting and coalescing are exercised and execute correctly" {
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.rax) | bit(.rbx), .algo = .graph }, &args));
         try t.expectEqual(want, try run(&f, .{ .algo = .graph }, &args));
     }
+}
+
+test "x64 compiler: bra/cbra without block parameters compile like br/cbr" {
+    const gpa = std.testing.allocator;
+    var f = try ir.parse(gpa,
+        \\func f 1
+        \\b0:
+        \\  v1 = const 1
+        \\  cbr lt v0 v1 b1 b2
+        \\b1:
+        \\  v1 = add v0 v1
+        \\  br b2
+        \\b2:
+        \\  ret v1
+        \\
+    );
+    defer f.deinit();
+    var plain = CodeBuffer.init(gpa);
+    defer plain.deinit();
+    _ = try compile(gpa, &f, &plain, .{});
+    const c = f.blocks.items[0].ops.items[1].cbr;
+    f.blocks.items[0].ops.items[1] = .{ .cbra = .{ .cond = c.cond, .a = c.a, .b = c.b, .then = c.then, .@"else" = c.@"else", .then_args = &.{}, .else_args = &.{} } };
+    f.blocks.items[1].ops.items[1] = .{ .bra = .{ .target = 2, .args = &.{} } };
+    try std.testing.expect(!f.hasBlockParams() and f.hasBlockEdges());
+    var edges = CodeBuffer.init(gpa);
+    defer edges.deinit();
+    _ = try compile(gpa, &f, &edges, .{});
+    try std.testing.expectEqualSlices(u8, plain.code(), edges.code());
 }
