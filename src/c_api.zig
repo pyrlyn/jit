@@ -267,8 +267,9 @@ export fn pjit_a64_branch(b: ?*Buffer, cond: c_int, label: u32) c_int {
     if (cond > 15) return status(error.InvalidArgument);
     const at = p.cb.offset();
     const word: u32 = if (cond < 0) 0x1400_0000 else 0x5400_0000 | @as(u32, @intCast(cond));
-    p.cb.addFixup(.{ .at = at, .base = at, .label = label, .kind = if (cond < 0) .a64_imm26 else .a64_imm19 }) catch |e| return status(e);
+    // Room first: a fixup without its instruction would fail every later `pjit_finalize`.
     p.cb.ensure(4) catch |e| return status(e);
+    p.cb.addFixup(.{ .at = at, .base = at, .label = label, .kind = if (cond < 0) .a64_imm26 else .a64_imm19 }) catch |e| return status(e);
     p.cb.put32(word);
     return OK;
 }
@@ -373,6 +374,8 @@ export fn pjit_ir_compile_opt(b: ?*Buffer, src: ?[*]const u8, len: usize, arch: 
     if (lvl != .o0 and a == .x86) return status(error.Unsupported);
     var f = parseIr(src, len) catch |e| return status(e);
     defer f.deinit();
+    // What every compiler answers, before the optimizer allocates per parameter.
+    if (f.params > ir.max_args) return status(error.TooManyParams);
     if (lvl != .o0) {
         const vector: opt.VectorTarget = if (lvl != .o2) .none else switch (a) {
             .x86_64 => .x86_64,
@@ -493,6 +496,15 @@ test "c api: version, errors, IR compile + eval" {
         var n: usize = 0;
         _ = pjit_buffer_code(b, &n);
         try std.testing.expect(n > 0);
+        // Too many parameters and sparse vreg numbers: errors for every target and level.
+        const wide = "func f 300\ne:\n  ret v0\n";
+        const sparse = "func f 0\ne:\n  v4000000000 = const 1\n  ret v0\n";
+        for ([_]c_int{ 0, 1 }) |level| {
+            if (level != 0 and a == .x86) continue;
+            try std.testing.expectEqual(@backingInt(Status.unsupported), pjit_ir_compile_opt(b, wide, wide.len, @backingInt(a), level));
+            try std.testing.expectEqualStrings("TooManyParams", std.mem.span(pjit_last_error()));
+            try std.testing.expectEqual(@backingInt(Status.ir_parse), pjit_ir_compile_opt(b, sparse, sparse.len, @backingInt(a), level));
+        }
     }
     try std.testing.expectEqual(EINVAL, pjit_ir_compile(null, src, src.len, 0));
     try std.testing.expectEqual(EINVAL, pjit_ir_compile(null, src, src.len, 99));

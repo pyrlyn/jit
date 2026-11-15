@@ -27,13 +27,22 @@ pub const Buffer = struct {
     nodes: usize = 0,
     dead: bool = false,
     fix0: usize,
+    /// Offset of the first byte of this function.
+    start: usize,
 
     pub fn init(gpa: std.mem.Allocator, cb: *core.CodeBuffer) Buffer {
-        return .{ .gpa = gpa, .cb = cb, .fix0 = cb.fixups.items.len };
+        return .{ .gpa = gpa, .cb = cb, .fix0 = cb.fixups.items.len, .start = cb.len };
     }
     pub fn deinit(b: *Buffer) void {
+        b.cb.size_hint = 0;
         b.events.deinit(b.gpa);
         b.labels.deinit(b.gpa);
+    }
+    /// `done` of `total` IR ops are lowered: the output buffer grows to about its final size
+    /// (4 more bytes per branch for `finish`).
+    pub fn progress(b: *Buffer, done: usize, total: usize) void {
+        b.cb.expect(b.start, done, total);
+        if (b.cb.size_hint != 0) b.cb.size_hint += 4 * b.events.items.len * total / @max(done, 1);
     }
     pub fn count(b: *const Buffer) usize {
         return b.nodes;

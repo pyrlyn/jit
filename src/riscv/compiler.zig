@@ -55,15 +55,19 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
     var temp_alloc = @import("../core/scratch.zig").Scratch.init(&scratch_bytes, backing);
     const gpa = temp_alloc.allocator();
     try f0.verify();
-    var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
+    var lowered: ?ir.Func = if (f0.hasBlockEdges()) try f0.lowerBlockParams(gpa) else null;
     defer if (lowered) |*g| g.deinit();
     const f: *const ir.Func = if (lowered) |*g| g else f0;
     if (f.params > ir.max_args) return error.TooManyParams;
     // Outgoing stack-argument area: the largest number of stack-passed call arguments.
     var out_args: u32 = 0;
-    for (f.blocks.items) |blk| for (blk.ops.items) |o| if (o == .call) {
-        out_args = @max(out_args, @as(u32, @intCast(o.call.args.len -| CC.args.len)));
-    };
+    var nops: usize = 0;
+    for (f.blocks.items) |blk| {
+        nops += blk.ops.items.len;
+        for (blk.ops.items) |o| if (o == .call) {
+            out_args = @max(out_args, @as(u32, @intCast(o.call.args.len -| CC.args.len)));
+        };
+    }
     const out: u32 = std.mem.alignForward(u32, 8 * out_args, 16);
 
     // ---- register allocation input ----
@@ -165,7 +169,16 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
     for (labels) |*l| l.* = try a.newLabel();
     const epilog = try a.newLabel();
 
+    // The output buffer grows to about its final size, estimated from the ops done so far.
+    const tracks = comptime @hasField(@TypeOf(a), "buf");
+    const code0: usize = if (tracks) a.buf.len else 0;
+    defer if (tracks) {
+        a.buf.size_hint = 0;
+    };
+    var done: usize = 0;
     for (f.blocks.items, 0..) |blk, bi| {
+        if (tracks) a.buf.expect(code0, done, nops);
+        done += blk.ops.items.len;
         try a.bind(labels[bi]);
         for (blk.ops.items) |o| switch (o) {
             .@"const" => |c| switch (res.locs[c.dst]) {
@@ -476,4 +489,32 @@ test "riscv64 compiler: differential vs interpreter on random programs" {
         try t.expectEqual(want, try run(&f, .{}, &args));
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.t3) | bit(.s1) }, &args));
     }
+}
+
+test "riscv64 compiler: bra/cbra without block parameters compile like br/cbr" {
+    const gpa = std.testing.allocator;
+    var f = try ir.parse(gpa,
+        \\func f 1
+        \\b0:
+        \\  v1 = const 1
+        \\  cbr lt v0 v1 b1 b2
+        \\b1:
+        \\  v1 = add v0 v1
+        \\  br b2
+        \\b2:
+        \\  ret v1
+        \\
+    );
+    defer f.deinit();
+    var plain = CodeBuffer.init(gpa);
+    defer plain.deinit();
+    _ = try compile(gpa, &f, &plain, .{});
+    const c = f.blocks.items[0].ops.items[1].cbr;
+    f.blocks.items[0].ops.items[1] = .{ .cbra = .{ .cond = c.cond, .a = c.a, .b = c.b, .then = c.then, .@"else" = c.@"else", .then_args = &.{}, .else_args = &.{} } };
+    f.blocks.items[1].ops.items[1] = .{ .bra = .{ .target = 2, .args = &.{} } };
+    try std.testing.expect(!f.hasBlockParams() and f.hasBlockEdges());
+    var edges = CodeBuffer.init(gpa);
+    defer edges.deinit();
+    _ = try compile(gpa, &f, &edges, .{});
+    try std.testing.expectEqualSlices(u8, plain.code(), edges.code());
 }

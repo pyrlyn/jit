@@ -62,7 +62,8 @@ fn imm32(v: i64) i32 {
 /// Compiles `f` into `b` (an x86 Builder). Run passes and serialize separately, or use `compile`.
 pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: Options) !Stats {
     try f0.verify();
-    var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
+    if (f0.params > ir.max_args) return error.TooManyParams;
+    var lowered: ?ir.Func = if (f0.hasBlockEdges()) try f0.lowerBlockParams(gpa) else null;
     defer if (lowered) |*g| g.deinit();
     const f: *const ir.Func = if (lowered) |*g| g else f0;
     const cc = x.CallConv.cdecl;
@@ -517,4 +518,43 @@ test "x86 compiler: random programs match interpret32 (x86 host)" {
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.eax) | bit(.ebx) }, &args));
         try t.expectEqual(want, try run(&f, .{ .algo = .graph }, &args));
     }
+}
+
+test "x86 compiler: more parameters than ir.max_args is an error" {
+    const gpa = std.testing.allocator;
+    var f = try ir.parse(gpa, "func f 300\ne:\n  ret v0\n");
+    defer f.deinit();
+    var cb = CodeBuffer.init(gpa);
+    defer cb.deinit();
+    try std.testing.expectError(error.TooManyParams, compile(gpa, &f, &cb, .{}));
+    f.params = ir.max_args;
+    _ = try compile(gpa, &f, &cb, .{});
+}
+
+test "x86 compiler: bra/cbra without block parameters compile like br/cbr" {
+    const gpa = std.testing.allocator;
+    var f = try ir.parse(gpa,
+        \\func f 1
+        \\b0:
+        \\  v1 = const 1
+        \\  cbr lt v0 v1 b1 b2
+        \\b1:
+        \\  v1 = add v0 v1
+        \\  br b2
+        \\b2:
+        \\  ret v1
+        \\
+    );
+    defer f.deinit();
+    var plain = CodeBuffer.init(gpa);
+    defer plain.deinit();
+    _ = try compile(gpa, &f, &plain, .{});
+    const c = f.blocks.items[0].ops.items[1].cbr;
+    f.blocks.items[0].ops.items[1] = .{ .cbra = .{ .cond = c.cond, .a = c.a, .b = c.b, .then = c.then, .@"else" = c.@"else", .then_args = &.{}, .else_args = &.{} } };
+    f.blocks.items[1].ops.items[1] = .{ .bra = .{ .target = 2, .args = &.{} } };
+    try std.testing.expect(!f.hasBlockParams() and f.hasBlockEdges());
+    var edges = CodeBuffer.init(gpa);
+    defer edges.deinit();
+    _ = try compile(gpa, &f, &edges, .{});
+    try std.testing.expectEqualSlices(u8, plain.code(), edges.code());
 }

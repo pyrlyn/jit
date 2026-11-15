@@ -63,7 +63,8 @@ of the last failure on the calling thread ("" when none; `pjit_clear_error` rese
 calls preserve the last error. Bad registers, unknown enum values, NULL pointers, unknown mnemonics, operand sets
 that no form accepts, foreign labels and out-of-range branches all return errors. IR is native
 code input, not a sandbox: memory operations and calls in the interpreter or generated code
-require valid addresses supplied by the caller. The
+require valid addresses supplied by the caller. IR text is bounded: vreg numbers stay below
+2^20 (`Overflow`) and a function takes at most 16 parameters (`TooManyParams`). The
 library is fuzzed (`src/fuzz.zig`); the C API has Zig unit tests (`src/c_api.zig`) and C tests
 that call every exported function, including error paths (`tests/c/capi_test.c`,
 `zig build test-capi`, part of `zig build test`).
