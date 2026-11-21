@@ -485,11 +485,11 @@ fn movLen(v: u64) u32 {
 }
 
 /// Extra `analyze` mask bits of an `arith`: the `APlan` kind (`reg` when neither is set).
-const plan_konst: u16 = 1 << 4;
-const plan_imm: u16 = 1 << 5;
+const plan_konst: u8 = 1 << 4;
+const plan_imm: u8 = 1 << 5;
 
 /// The `aplan` that `analyze` recorded in `m` (constant operands are read from `c`).
-inline fn planOf(m: u16, c: *const Consts, x: ArithOp) APlan {
+inline fn planOf(m: u8, c: *const Consts, x: ArithOp) APlan {
     if (m & plan_konst != 0) return .{ .konst = ir.arith(x.op, c.get(x.a).?, c.get(x.b).?) };
     if (m & plan_imm != 0) {
         const swap = m & 2 != 0;
@@ -500,10 +500,11 @@ inline fn planOf(m: u16, c: *const Consts, x: ArithOp) APlan {
 
 /// The analysis of `o` at the constant state `an.cs`, in one dispatch: returns the operand
 /// slots read from registers (uses not folded into immediates, xzr or constant results; bit
-/// 0/1 = first/second operand (`a`/`b`, `src`, `base` then `src` for stores), bit i = argument
-/// i of a call; plus `plan_*` bits for `arith`), marks them in `an.needs` and reports them to
-/// `ctx.use`, then reports the definition to `ctx.def` and steps `an.cs` past `o`.
-inline fn analyze(o: *const ir.Op, an: *Analysis, ctx: anytype) ra.Error!u16 {
+/// 0/1 = first/second operand (`a`/`b`, `src`, `base` then `src` for stores); plus `plan_*`
+/// bits for `arith`; 0 for a call, whose arguments nobody reads back), marks them in
+/// `an.needs` and reports them to `ctx.use`, then reports the definition to `ctx.def` and
+/// steps `an.cs` past `o`.
+inline fn analyze(o: *const ir.Op, an: *Analysis, ctx: anytype) ra.Error!u8 {
     const c = &an.cs;
     const needs = an.needs;
     const U = struct {
@@ -542,14 +543,14 @@ inline fn analyze(o: *const ir.Op, an: *Analysis, ctx: anytype) ra.Error!u16 {
             return @intFromBool(reg);
         },
         .arith => |x| {
-            const m: u16 = switch (aplan(c, x)) {
+            const m: u8 = switch (aplan(c, x)) {
                 .konst => |k| {
                     try ctx.defAs(x.dst, false);
                     c.set(x.dst, k);
                     return plan_konst;
                 },
-                .imm => |p| plan_imm | @as(u16, if (p.swap) 2 else 1),
-                .reg => |p| @as(u16, @intFromBool(!p.za)) | @as(u16, @intFromBool(!p.zb)) << 1,
+                .imm => |p| plan_imm | @as(u8, if (p.swap) 2 else 1),
+                .reg => |p| @as(u8, @intFromBool(!p.za)) | @as(u8, @intFromBool(!p.zb)) << 1,
             };
             if (m & 1 != 0) try U.gp(needs, ctx, x.a);
             if (m & 2 != 0) try U.gp(needs, ctx, x.b);
@@ -558,7 +559,7 @@ inline fn analyze(o: *const ir.Op, an: *Analysis, ctx: anytype) ra.Error!u16 {
             return m;
         },
         .cbr => |x| {
-            const m: u16 = switch (cplan(c, x)) {
+            const m: u8 = switch (cplan(c, x)) {
                 .static => 0,
                 .reg => 3,
                 inline .imm, .zero => |p| if (p.v == x.a) 1 else 2,
@@ -581,14 +582,10 @@ inline fn analyze(o: *const ir.Op, an: *Analysis, ctx: anytype) ra.Error!u16 {
         },
         .call => |x| {
             try ctx.call();
-            var m: u16 = 0;
-            for (x.args, 0..) |v, i| if (c.cheap(v) == null) {
-                try U.gp(needs, ctx, v);
-                m |= @as(u16, 1) << @intCast(i);
-            };
+            // (No mask: the emitter decides per argument, from the same constant state.)
+            for (x.args) |v| if (c.cheap(v) == null) try U.gp(needs, ctx, v);
             try ctx.defAs(x.dst, false);
             c.set(x.dst, null);
-            return m;
         },
         .ret => |v| if (c.get(v) == null) {
             try U.gp(needs, ctx, v);
@@ -647,7 +644,7 @@ const Analysis = struct {
     needs: []bool,
     /// `analyze` mask of every op (function-wide op index): folding in the register
     /// allocation input and in the emitter agree.
-    masks: []u16,
+    masks: []u8,
     types: []const ir.Type,
     params: u32,
     /// A vector min/max (it needs a third FP scratch register).
@@ -1087,7 +1084,7 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
     var an: Analysis = .{
         .cs = .{ .val = try A.alloc(i64, nv), .gen = try A.alloc(u32, nv) },
         .needs = try A.alloc(bool, nv),
-        .masks = try A.alloc(u16, nops),
+        .masks = try A.alloc(u8, nops),
         .types = types,
         .params = f.params,
     };
@@ -1214,6 +1211,7 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
     const big = frame > 4080;
 
     const labels = try A.alloc(a64.Label, nb + 1);
+    if (comptime @hasField(@TypeOf(a), "buf")) try a.buf.reserve(labels.len, 0);
     for (labels) |*l| l.* = try a.newLabel();
     const E = Emitter(@TypeOf(a));
     var e: E = .{

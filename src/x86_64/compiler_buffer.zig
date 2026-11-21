@@ -50,6 +50,11 @@ pub const Buffer = struct {
     pub fn comment(b: *Buffer, _: []const u8) !void {
         b.nodes += 1;
     }
+    /// Room for `n` more labels without regrowing the label lists (a compiler: one per block).
+    pub fn reserveLabels(b: *Buffer, n: usize) !void {
+        try b.cb.reserve(n, 0);
+        try b.labels.ensureTotalCapacityPrecise(b.gpa, std.math.add(usize, b.labels.items.len, n) catch return error.OutOfMemory);
+    }
     pub fn newLabel(b: *Buffer) !bld.Label {
         const code = try b.cb.newLabel();
         try b.labels.append(b.gpa, .{ .code = code });
@@ -141,6 +146,10 @@ pub const Buffer = struct {
                 }
             }
         }
+        // One fixup per jump, exactly.
+        var jumps: usize = 0;
+        for (b.events.items) |e| jumps += @intFromBool(e.kind != .label);
+        try b.cb.reserve(0, jumps);
         try b.cb.ensure(end - compact_end);
         var compact = compact_end;
         var final = end;
