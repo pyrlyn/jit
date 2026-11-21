@@ -174,6 +174,16 @@ pub const CodeBuffer = struct {
     }
 
     // ---- labels -------------------------------------------------------------
+    /// Room for `labels` more labels and `fixups` more fixups, exactly: a producer that knows
+    /// how many it creates (a compiler: from the blocks and branches of its input) keeps both
+    /// lists as small as their contents and never regrows them. More than reserved still works.
+    pub fn reserve(self: *CodeBuffer, labels: usize, fixups: usize) Error!void {
+        const nl = std.math.add(usize, self.labels.items.len, labels) catch return error.OutOfMemory;
+        const nf = std.math.add(usize, self.fixups.items.len, fixups) catch return error.OutOfMemory;
+        try self.labels.ensureTotalCapacityPrecise(self.gpa, nl);
+        try self.fixups.ensureTotalCapacityPrecise(self.gpa, nf);
+    }
+
     /// Fast path inlined into the caller; growth is a cold out-of-line call.
     pub inline fn newLabel(self: *CodeBuffer) Error!Label {
         const id: u32 = @intCast(self.labels.items.len);

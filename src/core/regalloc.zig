@@ -282,7 +282,9 @@ fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals:
     const bits = @bitSizeOf(W);
     const nw = liveWords(f);
     // gen | kill | in, then `out` (returned) in its own allocation.
-    const flat = try gpa.alloc(W, 3 * nb * nw);
+    // The words after those are the fixpoint's visit stamps (two u32 per block).
+    const stamp_words = std.math.divCeil(usize, 2 * nb * @sizeOf(u32), @sizeOf(W)) catch unreachable;
+    const flat = try gpa.alloc(W, 3 * nb * nw + stamp_words);
     defer gpa.free(flat);
     @memset(flat, 0);
     const gen = flat[0 .. nb * nw];
@@ -342,24 +344,43 @@ fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals:
         pos = c.pos;
     }
     if (!walk_calls) if (calls) |l| try callPositionsInto(gpa, f, l);
+    // Fixpoint in reverse block order. A block is recomputed only when the live-in set of a
+    // successor changed after its last visit (`stamps`: last visit, then last change, per
+    // block, as visit counts): the sets only grow, so the result is the same least fixpoint.
+    const stamps: []u32 = @ptrCast(flat[3 * nb * nw ..]);
+    const visited = stamps[0..nb];
+    const changed_at = stamps[nb..][0..nb];
+    var tick: u32 = 0;
     var changed = true;
     while (changed) {
         changed = false;
         var bi = nb;
         while (bi > 0) {
             bi -= 1;
+            const seen = visited[bi];
+            if (seen != 0) {
+                const stale = for (f.blocks[bi].succs) |s| {
+                    if (changed_at[s] >= seen) break true;
+                } else false;
+                if (!stale) continue;
+            }
+            tick += 1;
+            visited[bi] = tick;
             const o = out[bi * nw ..][0..nw];
             for (f.blocks[bi].succs) |s| {
                 for (o, in_[s * nw ..][0..nw]) |*ow, iw| ow.* |= iw;
             }
             const g = gen[bi * nw ..][0..nw];
             const k = kill[bi * nw ..][0..nw];
+            var diff: W = 0;
             for (in_[bi * nw ..][0..nw], g, k, o) |*iw, gw, kw, ow| {
                 const nv = gw | (ow & ~kw);
-                if (nv != iw.*) {
-                    iw.* = nv;
-                    changed = true;
-                }
+                diff |= nv ^ iw.*;
+                iw.* = nv;
+            }
+            if (diff != 0) {
+                changed_at[bi] = tick;
+                changed = true;
             }
         }
     }

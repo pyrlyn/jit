@@ -62,11 +62,24 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
     // Outgoing stack-argument area: the largest number of stack-passed call arguments.
     var out_args: u32 = 0;
     var nops: usize = 0;
-    for (f.blocks.items) |blk| {
+    // Labels and forward-branch fixups of the emission below (`CodeBuffer.reserve`): a label
+    // per block, the epilog and the skip label of every `cbr` (`bFar`); a fixup per branch to
+    // a label that is not bound yet (a later block, the skip label, the epilog).
+    var nlabels: usize = f.blocks.items.len + 1;
+    var nfixups: usize = 0;
+    for (f.blocks.items, 0..) |blk, bi| {
         nops += blk.ops.items.len;
-        for (blk.ops.items) |o| if (o == .call) {
+        for (blk.ops.items) |*o| if (o.* == .call) {
             out_args = @max(out_args, @as(u32, @intCast(o.call.args.len -| CC.args.len)));
         };
+        switch (blk.ops.items[blk.ops.items.len - 1]) {
+            .br => |tg| nfixups += @intFromBool(tg > bi),
+            .cbr => |c| {
+                nlabels += 1;
+                nfixups += 1 + @as(usize, @intFromBool(c.then > bi)) + @intFromBool(c.@"else" > bi);
+            },
+            else => nfixups += 1,
+        }
     }
     const out: u32 = std.mem.alignForward(u32, 8 * out_args, 16);
 
@@ -164,13 +177,14 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
     if (res.entry_undef.len != 0) try a.li(s0, 0);
     for (res.entry_undef) |v| try ctx.put(a, v, s0);
 
+    // The output buffer grows to about its final size, estimated from the ops done so far.
+    const tracks = comptime @hasField(@TypeOf(a), "buf");
+    if (tracks) try a.buf.reserve(nlabels, nfixups);
     const labels = try gpa.alloc(rv.Label, f.blocks.items.len);
     defer gpa.free(labels);
     for (labels) |*l| l.* = try a.newLabel();
     const epilog = try a.newLabel();
 
-    // The output buffer grows to about its final size, estimated from the ops done so far.
-    const tracks = comptime @hasField(@TypeOf(a), "buf");
     const code0: usize = if (tracks) a.buf.len else 0;
     defer if (tracks) {
         a.buf.size_hint = 0;
@@ -180,7 +194,7 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
         if (tracks) a.buf.expect(code0, done, nops);
         done += blk.ops.items.len;
         try a.bind(labels[bi]);
-        for (blk.ops.items) |o| switch (o) {
+        for (blk.ops.items) |*o| switch (o.*) {
             .@"const" => |c| switch (res.locs[c.dst]) {
                 .reg => |r| try a.li(L.reg(r), c.imm),
                 else => {
