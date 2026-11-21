@@ -1,4 +1,99 @@
-# Compiler performance, 2026-11-08
+# Compiler performance
+
+Measured rounds of compile-time and peak-heap work on the IR compilers, newest
+first. Every round uses the 12-case suite of `bench/compile_bench.zig` and requires
+byte-identical machine code. Each table compares against its own baseline commit:
+the 2026-11-21 baseline also contains #79, which has no section here, so its
+"Before" columns are not the "After" columns of 2026-11-08.
+
+## 2026-11-21
+
+Baseline: `e90d5705e7d242a009976a033ecae4e5e7ec343c`. Host: Apple M3 Max,
+arm64 macOS, Zig 0.17.1, ReleaseFast, C allocator.
+
+The equal-weight suite result is **−5.6% time per compilation (1.06× throughput)**
+and **−12.9% peak allocated heap**. The target of this round was to halve both
+again; it was **not met**, and it cannot be met while the generated code stays
+byte-identical (see "Limits").
+
+5 alternating runs, 400 ms/case/run, seed 24301; all code checksums match.
+
+| Backend/case | Before µs | After µs | Time reduction | Before peak KiB | After peak KiB | Peak reduction |
+|---|---:|---:|---:|---:|---:|---:|
+| aarch64/small | 1.833 | 1.833 | 0.0% | 1.9 | 1.5 | 21.1% |
+| aarch64/medium | 28.625 | 28.083 | 1.9% | 20.3 | 20.3 | 0.0% |
+| aarch64/large | 290.292 | 282.333 | 2.7% | 148.4 | 141.0 | 5.0% |
+| aarch64/huge | 1475.875 | 1408.625 | 4.6% | 690.8 | 656.5 | 5.0% |
+| x86_64/small | 5.166 | 5.333 | -3.2% | 3.8 | 3.2 | 15.8% |
+| x86_64/medium | 81.666 | 75.125 | 8.0% | 30.3 | 29.7 | 2.0% |
+| x86_64/large | 785.208 | 757.416 | 3.5% | 217.8 | 216.5 | 0.6% |
+| x86_64/huge | 4164.792 | 4327.125 | -3.9% | 1015.5 | 1013.2 | 0.2% |
+| riscv64/small | 1.042 | 1.083 | -3.9% | 3.1 | 1.2 | 61.3% |
+| riscv64/medium | 10.791 | 10.667 | 1.1% | 13.0 | 12.3 | 5.4% |
+| riscv64/large | 149.167 | 100.125 | 32.9% | 102.7 | 95.3 | 7.2% |
+| riscv64/huge | 956.875 | 802.375 | 16.1% | 724.0 | 700.7 | 3.2% |
+
+Equal-weight geometric mean across all 12 cases: time −5.6%, peak allocated heap −12.9%.
+Compilation throughput: +5.9% (inverse of the time ratio).
+These are suite averages, not a minimum improvement for each individual case. Peak heap excludes input IR, stack and allocator overhead/RSS.
+
+The three negative time rows are run-to-run noise of about ±4% in this table; the
+small cases are also only 25 to 130 ticks of the 41.67 ns clock. Measured one case
+at a time (10 alternations each), the candidate/baseline time ratio is 0.975 to
+0.984 for x86_64/huge, 1.008 to 1.016 for x86_64/small and 1.000 for
+riscv64/small.
+
+### Limits
+
+- **Heap.** The machine code lives in the caller-owned CodeBuffer and is counted.
+  It is 56 to 87% of the peak in the medium, large and huge cases: 632 of 701 KiB
+  for riscv64/huge, 796 of 1013 KiB for x86_64/huge, and 516 KiB of code plus
+  16 KiB of size-estimate slack out of 657 KiB for aarch64/huge. With identical
+  code, only the remainder can shrink.
+- **Time.** Emission is about 40% of a compilation. Every backend also walks the
+  ops at least twice with a `switch` per op; on the random ops of the large and
+  huge cases that branch mispredicts and costs about 5.6 ns per op (1 to 2 ns in
+  the small and medium cases, where the predictor learns the repeated function).
+  The walks that could still be removed are worth a few percent each.
+
+### Changes
+
+- The liveness fixpoint recomputes a block only when the live-in set of one of
+  its successors changed since the block's last visit. This is the source of the
+  riscv64/large and riscv64/huge time reductions.
+- `ir.shapes` is a comptime table of operand offsets per op tag. Structural
+  `verify`, `isIntOnly` and operand collection in `reg_classes` read operands
+  through it instead of a `switch` per op. The call and terminator checks have
+  one implementation (`checkSpecial`) shared with the op walk; the checks and the
+  order of their errors are unchanged.
+- `CodeBuffer.reserve` lets a backend reserve its labels and fixups exactly,
+  which removes regrowth and capacity slack of both lists. RV64 counts labels
+  and forward branches before lowering; AArch64 and x86-64 reserve their labels,
+  and x86-64 reserves one fixup per jump that is left after relaxation.
+- AArch64 per-op masks are `u8` instead of `u16`, and the call argument mask,
+  which nothing read, is no longer built.
+
+Left out on purpose: an 8 KiB stack scratch buffer is 5 to 14% faster in the small
+cases but only moves memory from the heap to the stack, and a minimum code capacity
+below 1 KiB would improve the small-case heap numbers without helping real callers.
+
+### Correctness checks
+
+- `zig build test`: 749 passed, 40 architecture-dependent skips; all 87 build steps pass.
+- `zig build test -Dtarget=x86_64-macos` (Rosetta): 753 passed, 36 skips; all 87 steps pass.
+- `zig build fmt-check` and `git diff --check` pass.
+- All 72 generated-code checksums match the baseline: 12 cases for each seed
+  `0x5eed`, `1`, `7`, `42`, `314159`, `0xdeadbeef`.
+- A new test builds a function with every op kind, corrupts every `u32` field
+  and argument list of every op in turn, misplaces terminators and breaks the
+  function header, and requires the table-driven `verify` to return what the op
+  walk returns. All seven structural errors occur in it. The shape table itself
+  is checked against `Op.uses`/`Op.def` for a sample of each of the 17 op tags.
+
+Reproduce with the commands under "Reproduction" below, with `BASELINE_SRC` in a
+checkout of the baseline commit above.
+
+## 2026-11-08
 
 Baseline: `20d0ed4e4618d6ee040943644f5521db5fb91353`. Host: Apple M3 Max,
 arm64 macOS, Zig 0.17.0, ReleaseFast, C allocator. All three backends emit code
@@ -39,7 +134,7 @@ the supplied allocator. Linear allocation also uses a **768-byte active-interval
 array** (at most 64 physical registers). This is a heap metric, not a measurement
 of total process memory or stack use; the change does not claim a 71.1% RSS saving.
 
-## Changes
+### Changes
 
 - Linear allocation without spill splitting visits IR operands directly while
   collecting liveness and local interval endpoints. It stores only block/edge
@@ -67,7 +162,7 @@ of total process memory or stack use; the change does not claim a 71.1% RSS savi
   Growth reserves 25% slack, and fresh code buffers start at 1 KiB instead of 4 KiB.
 - The existing encoding-form validation is inlined, retaining its checks.
 
-## Reproduction
+### Reproduction
 
 Use the **same current** `bench/compile_bench.zig` harness for both library revisions.
 `zig build bench-compile --verbose` prints the benchmark compiler command and its
@@ -94,7 +189,7 @@ checksums, alternates binary order and takes the median of each case's run media
 It reports both individual results and the geometric mean of candidate/baseline
 ratios. To inspect another deterministic workload, pass `--seed INTEGER`.
 
-## Correctness checks
+### Correctness checks
 
 - `zig build test`: 261 passed, 17 architecture-dependent skips; all 75 build steps pass.
 - `zig build test -Dtarget=x86_64-macos` (Rosetta): 265 passed, 13 skips; all 75 steps pass.
@@ -113,7 +208,7 @@ ratios. To inspect another deterministic workload, pass `--seed INTEGER`.
   non-v0 opcodes after KXBC added v1 variants; that build failure also reproduces
   on the baseline commit. Its benchmark workloads are unchanged.
 
-### Existing emitter benchmark thresholds
+#### Existing emitter benchmark thresholds
 
 With the harness build repaired, `zig build bench-test` reports 16 passed and two
 failed historical thresholds. A reference binary built with this same repaired
