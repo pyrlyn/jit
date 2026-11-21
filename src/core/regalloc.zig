@@ -282,8 +282,9 @@ fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals:
     const bits = @bitSizeOf(W);
     const nw = liveWords(f);
     // gen | kill | in, then `out` (returned) in its own allocation.
-    // The last `nb` words are the fixpoint's visit stamps (two u32 per block).
-    const flat = try gpa.alloc(W, 3 * nb * nw + nb);
+    // The words after those are the fixpoint's visit stamps (two u32 per block).
+    const stamp_words = std.math.divCeil(usize, 2 * nb * @sizeOf(u32), @sizeOf(W)) catch unreachable;
+    const flat = try gpa.alloc(W, 3 * nb * nw + stamp_words);
     defer gpa.free(flat);
     @memset(flat, 0);
     const gen = flat[0 .. nb * nw];
@@ -348,7 +349,7 @@ fn liveOutIntervals(gpa: std.mem.Allocator, f: anytype, comptime with_intervals:
     // block, as visit counts): the sets only grow, so the result is the same least fixpoint.
     const stamps: []u32 = @ptrCast(flat[3 * nb * nw ..]);
     const visited = stamps[0..nb];
-    const changed_at = stamps[nb..];
+    const changed_at = stamps[nb..][0..nb];
     var tick: u32 = 0;
     var changed = true;
     while (changed) {
