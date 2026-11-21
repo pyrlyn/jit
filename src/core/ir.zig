@@ -206,6 +206,112 @@ pub const Op = union(enum) {
     }
 };
 
+/// Operand layout of one `Op` tag, for walks that need the vregs of an op and not its kind:
+/// they read the operands through `shapes` instead of a `switch` on the tag (a branch that
+/// is mispredicted on most ops of mixed code).
+pub const Shape = struct {
+    /// Byte offsets of the used vregs in the payload (`nuses` of them are valid).
+    use: [2]u8 = .{ 0, 0 },
+    /// Byte offset of the defined vreg in the payload (when `has_def`).
+    def: u8 = 0,
+    nuses: u8 = 0,
+    has_def: bool = false,
+    /// Variable operand list (`call`, `bra`, `cbra`): not described here.
+    list: bool = false,
+    /// Neither a terminator nor a `list` op: `verify` only range-checks its vregs, the three
+    /// at the offsets `check` (an op with fewer repeats one of them).
+    plain: bool = false,
+    check: [3]u8 = .{ 0, 0, 0 },
+    /// False for the float and vector ops (`Func.isIntOnly`).
+    int: bool = true,
+    /// Byte offset of the memory type of `load` / `store` in the payload, else `no_ty`.
+    ty: u8 = no_ty,
+
+    pub const no_ty = 0xFF;
+
+    /// Address of the payload of `o`. Every field of a union starts there; `ret` is a bare
+    /// vreg, so the compiler's own layout gives the address for any active tag.
+    inline fn payload(o: *const Op) [*]const u8 {
+        const field: *align(1) const VReg = @ptrCast(o);
+        const parent: *align(1) const Op = @fieldParentPtr("ret", field);
+        return @as([*]const u8, @ptrCast(o)) + (@intFromPtr(o) -% @intFromPtr(parent));
+    }
+    /// The vreg at payload offset `off` of `o`.
+    pub inline fn vreg(o: *const Op, off: u8) VReg {
+        return @as(*align(1) const VReg, @ptrCast(payload(o) + off)).*;
+    }
+    /// The memory type at payload offset `off` of `o` (`ty`).
+    pub inline fn typeAt(o: *const Op, off: u8) Type {
+        return @as(*align(1) const Type, @ptrCast(payload(o) + off)).*;
+    }
+    /// The shape of `o`. Safe builds compare it with `Op.uses` / `Op.def` on every op.
+    pub inline fn of(o: *const Op) *const Shape {
+        const sh = &shapes[@backingInt(std.meta.activeTag(o.*))];
+        if (std.debug.runtime_safety and !sh.list) {
+            var buf: [2]VReg = undefined;
+            const us = o.uses(&buf);
+            std.debug.assert(us.len == sh.nuses);
+            for (us, sh.use[0..us.len]) |u, off| std.debug.assert(u == vreg(o, off));
+            std.debug.assert((o.def() != null) == sh.has_def);
+            if (o.def()) |d| std.debug.assert(d == vreg(o, sh.def));
+        }
+        return sh;
+    }
+};
+/// `shapes[@intFromEnum(tag)]`. Uses are in the order of `Op.uses`.
+pub const shapes = blk: {
+    const info = @typeInfo(Op).@"union";
+    var table: [info.field_names.len]Shape = undefined;
+    for (info.field_names, info.field_types, 0..) |name_, P, i| {
+        std.debug.assert(@backingInt(@field(std.meta.Tag(Op), name_)) == i);
+        var sh: Shape = .{};
+        if (std.mem.eql(u8, name_, "ret")) {
+            sh.nuses = 1;
+        } else if (@typeInfo(P) == .@"struct") {
+            if (@hasField(P, "args") or @hasField(P, "then_args")) {
+                sh.list = true;
+            } else {
+                for ([_][]const u8{ "base", "src", "a", "b" }) |name| if (@hasField(P, name)) {
+                    sh.use[sh.nuses] = @offsetOf(P, name);
+                    sh.nuses += 1;
+                };
+                if (@hasField(P, "dst")) {
+                    sh.def = @offsetOf(P, "dst");
+                    sh.has_def = true;
+                }
+            }
+        }
+        const tag = @field(std.meta.Tag(Op), name_);
+        sh.plain = !sh.list and switch (tag) {
+            .br, .cbr, .bra, .cbra, .ret => false,
+            else => true,
+        };
+        if (sh.plain) {
+            var offs: [3]u8 = undefined;
+            var k = 0;
+            for (sh.use[0..sh.nuses]) |off| {
+                offs[k] = off;
+                k += 1;
+            }
+            if (sh.has_def) {
+                offs[k] = sh.def;
+                k += 1;
+            }
+            std.debug.assert(k != 0);
+            for (&sh.check, 0..) |*c, j| c.* = offs[if (j < k) j else 0];
+        }
+        sh.int = switch (tag) {
+            .fconst, .typed, .fcmp, .cvt, .splat, .extract => false,
+            else => true,
+        };
+        sh.ty = switch (tag) {
+            .load, .store => @offsetOf(P, "ty"),
+            else => Shape.no_ty,
+        };
+        table[i] = sh;
+    }
+    break :blk table;
+};
 pub const Block = struct {
     name: []const u8,
     ops: std.ArrayList(Op) = .empty,
@@ -268,7 +374,75 @@ pub const Func = struct {
     /// Structural checks: every block ends with exactly one terminator, branch targets exist,
     /// vregs are in range, calls carry at most `max_args` and edges `max_edge_args` arguments.
     pub fn verify(f: *const Func) VerifyError!void {
-        return f.checkWalk(undefined, true, false);
+        if (f.blocks.items.len == 0) return error.EmptyFunction;
+        const n = f.num_vregs;
+        for (f.blocks.items) |b| {
+            const ops = b.ops.items;
+            if (ops.len == 0 or !ops[ops.len - 1].isTerminator()) return error.MissingTerminator;
+            for (ops, 0..) |*o, oi| {
+                const sh = Shape.of(o);
+                if (sh.plain) {
+                    // All in range iff the largest is: no branch on the kind of op.
+                    if (@max(Shape.vreg(o, sh.check[0]), Shape.vreg(o, sh.check[1]), Shape.vreg(o, sh.check[2])) >= n) return error.BadVReg;
+                    continue;
+                }
+                switch (o.*) {
+                    inline .call, .br, .cbr, .bra, .cbra, .ret => |x, tag| try f.checkSpecial(tag, x, oi == ops.len - 1),
+                    else => unreachable,
+                }
+            }
+        }
+        return f.checkParams();
+    }
+
+    /// Structural checks of the ops that are not `Shape.plain`: `call` and the terminators.
+    inline fn checkSpecial(f: *const Func, comptime tag: std.meta.Tag(Op), x: anytype, at_end: bool) VerifyError!void {
+        const n = f.num_vregs;
+        const fb = f.blocks.items;
+        const all = struct {
+            inline fn f_(vs: []const VReg, n_: u32) bool {
+                for (vs) |v| if (v >= n_) return false;
+                return true;
+            }
+        }.f_;
+        if (tag != .call and !at_end) return error.TerminatorNotLast;
+        switch (tag) {
+            .call => {
+                if (x.args.len > max_args) return error.TooManyArgs;
+                if (!all(x.args, n) or x.dst >= n) return error.BadVReg;
+            },
+            .br => {
+                if (x >= fb.len) return error.BadBlock;
+                if (fb[x].params.len != 0) return error.ArgCountMismatch;
+            },
+            .cbr => {
+                if (x.then >= fb.len or x.@"else" >= fb.len) return error.BadBlock;
+                if (fb[x.then].params.len != 0 or fb[x.@"else"].params.len != 0) return error.ArgCountMismatch;
+                if (x.a >= n or x.b >= n) return error.BadVReg;
+            },
+            .bra => {
+                if (x.target >= fb.len) return error.BadBlock;
+                if (x.args.len > max_edge_args) return error.TooManyArgs;
+                if (x.args.len != fb[x.target].params.len) return error.ArgCountMismatch;
+                if (!all(x.args, n)) return error.BadVReg;
+            },
+            .cbra => {
+                if (x.then >= fb.len or x.@"else" >= fb.len) return error.BadBlock;
+                if (x.then_args.len > max_edge_args or x.else_args.len > max_edge_args) return error.TooManyArgs;
+                if (x.then_args.len != fb[x.then].params.len or
+                    x.else_args.len != fb[x.@"else"].params.len) return error.ArgCountMismatch;
+                if (x.a >= n or x.b >= n or !all(x.then_args, n) or !all(x.else_args, n)) return error.BadVReg;
+            },
+            .ret => if (x >= n) return error.BadVReg,
+            else => comptime unreachable,
+        }
+    }
+
+    /// The range checks of `verify` after its walk: block and function parameters.
+    fn checkParams(f: *const Func) VerifyError!void {
+        const n = f.num_vregs;
+        for (f.blocks.items) |b| for (b.params) |p| if (p >= n) return error.BadVReg;
+        if (f.params > n and f.params > 0) return error.BadVReg;
     }
 
     /// `verify` plus SSA form: every vreg is defined once (function parameters, block
@@ -293,11 +467,10 @@ pub const Func = struct {
 
     /// True if the function only uses untyped (i64) operations (what the compilers support).
     pub fn isIntOnly(f: *const Func) bool {
-        for (f.blocks.items) |b| for (b.ops.items) |o| switch (o) {
-            .fconst, .typed, .fcmp, .cvt, .splat, .extract => return false,
-            .load => |x| if (x.ty != .i64) return false,
-            .store => |x| if (x.ty != .i64) return false,
-            else => {},
+        for (f.blocks.items) |b| for (b.ops.items) |*o| {
+            const sh = Shape.of(o);
+            if (!sh.int) return false;
+            if (sh.ty != Shape.no_ty and Shape.typeAt(o, sh.ty) != .i64) return false;
         };
         return true;
     }
@@ -390,10 +563,6 @@ pub const Func = struct {
             }
         };
         const C = struct {
-            inline fn all(vs: []const VReg, n_: u32) bool {
-                for (vs) |v| if (v >= n_) return false;
-                return true;
-            }
             inline fn is(types: []const ?Type, need: []?Type, v: VReg, want: Type) error{TypeMismatch}!void {
                 if (types[v]) |have| {
                     if (have != want) return error.TypeMismatch;
@@ -499,51 +668,26 @@ pub const Func = struct {
                     }
                 },
                 .call => |x| {
-                    if (V) {
-                        if (x.args.len > max_args) return error.TooManyArgs;
-                        if (!C.all(x.args, n) or x.dst >= n) return error.BadVReg;
-                    }
+                    if (V) try f.checkSpecial(.call, x, oi == last);
                     if (T) {
                         _ = try set(ty, x.dst, .i64);
                         for (x.args) |arg| try C.is(ty, required, arg, .i64);
                     }
                 },
-                .br => |tg| if (V) {
-                    if (oi != last) return error.TerminatorNotLast;
-                    if (tg >= nb) return error.BadBlock;
-                    if (f.blocks.items[tg].params.len != 0) return error.ArgCountMismatch;
-                },
+                .br => |tg| if (V) try f.checkSpecial(.br, tg, oi == last),
                 .cbr => |x| {
-                    if (V) {
-                        if (oi != last) return error.TerminatorNotLast;
-                        if (x.then >= nb or x.@"else" >= nb) return error.BadBlock;
-                        if (f.blocks.items[x.then].params.len != 0 or f.blocks.items[x.@"else"].params.len != 0) return error.ArgCountMismatch;
-                        if (x.a >= n or x.b >= n) return error.BadVReg;
-                    }
+                    if (V) try f.checkSpecial(.cbr, x, oi == last);
                     if (T) {
                         try C.is(ty, required, x.a, .i64);
                         try C.is(ty, required, x.b, .i64);
                     }
                 },
                 .bra => |x| {
-                    if (V) {
-                        if (oi != last) return error.TerminatorNotLast;
-                        if (x.target >= nb) return error.BadBlock;
-                        if (x.args.len > max_edge_args) return error.TooManyArgs;
-                        if (x.args.len != f.blocks.items[x.target].params.len) return error.ArgCountMismatch;
-                        if (!C.all(x.args, n)) return error.BadVReg;
-                    }
+                    if (V) try f.checkSpecial(.bra, x, oi == last);
                     if (T and try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
                 },
                 .cbra => |x| {
-                    if (V) {
-                        if (oi != last) return error.TerminatorNotLast;
-                        if (x.then >= nb or x.@"else" >= nb) return error.BadBlock;
-                        if (x.then_args.len > max_edge_args or x.else_args.len > max_edge_args) return error.TooManyArgs;
-                        if (x.then_args.len != f.blocks.items[x.then].params.len or
-                            x.else_args.len != f.blocks.items[x.@"else"].params.len) return error.ArgCountMismatch;
-                        if (x.a >= n or x.b >= n or !C.all(x.then_args, n) or !C.all(x.else_args, n)) return error.BadVReg;
-                    }
+                    if (V) try f.checkSpecial(.cbra, x, oi == last);
                     if (T) {
                         if (try flow.op(ty, f.blocks.items, o, &ch)) try work.append(gpa, .{ .b = @intCast(bi), .i = @intCast(oi) });
                         try C.is(ty, required, x.a, .i64);
@@ -551,18 +695,12 @@ pub const Func = struct {
                     }
                 },
                 .ret => |v| {
-                    if (V) {
-                        if (oi != last) return error.TerminatorNotLast;
-                        if (v >= n) return error.BadVReg;
-                    }
+                    if (V) try f.checkSpecial(.ret, v, oi == last);
                     if (T) try C.is(ty, required, v, .i64);
                 },
             };
         }
-        if (V) {
-            for (f.blocks.items) |b| for (b.params) |p| if (p >= n) return error.BadVReg;
-            if (f.params > n and f.params > 0) return error.BadVReg;
-        }
+        if (V) try f.checkParams();
         if (!T) return;
         // Another round only if the previous one typed some vreg.
         ch = true;
@@ -1357,6 +1495,136 @@ test "ir: typed memory and type errors" {
     var ok = try parse(t.allocator, "func b 1\ne:\n  v1 = copy v9\n  br j v9\nj(v2):\n  v1 = add v1 v2\n  ret v1\n");
     defer ok.deinit();
     t.allocator.free(try ok.typeCheck(t.allocator));
+}
+
+test "ir: op shapes match the ops, table-driven verify equals the op walk" {
+    // Every tag: the shape's operands are those of `uses` / `def` (asserted by `Shape.of`).
+    const args = [_]VReg{ 21, 22 };
+    var samples = [_]Op{
+        .{ .@"const" = .{ .dst = 1, .imm = -5 } },
+        .{ .copy = .{ .dst = 1, .src = 2 } },
+        .{ .arith = .{ .op = .sdiv, .dst = 1, .a = 2, .b = 3 } },
+        .{ .load = .{ .dst = 1, .base = 2, .disp = 8, .ty = .f64 } },
+        .{ .store = .{ .base = 1, .disp = -8, .src = 2, .ty = .f32 } },
+        .{ .fconst = .{ .dst = 1, .ty = .f64, .bits = 7 } },
+        .{ .typed = .{ .op = .add, .ty = .f64, .dst = 1, .a = 2, .b = 3 } },
+        .{ .fcmp = .{ .cond = .lt, .ty = .f64, .dst = 1, .a = 2, .b = 3 } },
+        .{ .cvt = .{ .to = .i64, .from = .f64, .dst = 1, .src = 2 } },
+        .{ .splat = .{ .ty = .v2f64, .dst = 1, .src = 2 } },
+        .{ .extract = .{ .ty = .v2f64, .dst = 1, .src = 2, .lane = 1 } },
+        .{ .call = .{ .dst = 1, .addr = 0x1000, .args = &args } },
+        .{ .br = 0 },
+        .{ .cbr = .{ .cond = .eq, .a = 1, .b = 2, .then = 0, .@"else" = 0 } },
+        .{ .bra = .{ .target = 0, .args = &args } },
+        .{ .cbra = .{ .cond = .eq, .a = 1, .b = 2, .then = 0, .@"else" = 0, .then_args = &args, .else_args = &args } },
+        .{ .ret = 1 },
+    };
+    try t.expectEqual(shapes.len, samples.len);
+    for (&samples, 0..) |*o, i| {
+        try t.expectEqual(i, @backingInt(std.meta.activeTag(o.*)));
+        const sh = Shape.of(o);
+        var buf: [2 + 2 * args.len]VReg = undefined;
+        try t.expectEqual(sh.list, o.numUses() > 2 or o.* == .call or o.* == .bra);
+        try t.expectEqual(sh.plain, !sh.list and !o.isTerminator());
+        if (sh.plain) {
+            // `check` names every vreg of the op, and nothing else.
+            var want: [3]VReg = undefined;
+            var k: usize = 0;
+            for (o.uses(&buf)) |u| {
+                want[k] = u;
+                k += 1;
+            }
+            if (o.def()) |d| {
+                want[k] = d;
+                k += 1;
+            }
+            for (sh.check, 0..) |off, j| try t.expectEqual(want[if (j < k) j else 0], Shape.vreg(o, off));
+        }
+        try t.expectEqual(sh.ty != Shape.no_ty, o.* == .load or o.* == .store);
+    }
+    try t.expectEqual(Type.f64, Shape.typeAt(&samples[3], shapes[3].ty));
+    try t.expectEqual(Type.f32, Shape.typeAt(&samples[4], shapes[4].ty));
+
+    // `verify` against the op walk it replaced, on a function with every kind of op and on
+    // each single-field corruption of it: the same result, error for error.
+    var f = Func.init(t.allocator);
+    defer f.deinit();
+    f.params = 2;
+    const b0 = try f.addBlock("b0");
+    const b1 = try f.addBlock("b1");
+    const b2 = try f.addBlock("b2");
+    f.blocks.items[b2].params = try f.alloc().dupe(VReg, &.{ 8, 9 });
+    for (samples[0..12]) |o| try f.emit(b0, o);
+    try f.emit(b0, .{ .cbr = .{ .cond = .ne, .a = 1, .b = 2, .then = b1, .@"else" = b1 } });
+    try f.emit(b1, .{ .cbra = .{ .cond = .eq, .a = 1, .b = 2, .then = b2, .@"else" = b2, .then_args = &args, .else_args = &args } });
+    try f.emit(b2, .{ .ret = 3 });
+    try f.verify();
+    try f.checkWalk(undefined, true, false);
+    const Same = struct {
+        var seen: [8]anyerror = undefined;
+        var nseen: usize = 0;
+        fn check(g: *const Func) !void {
+            const want = g.checkWalk(undefined, true, false);
+            try t.expectEqual(want, g.verify());
+            want catch |e| if (std.mem.indexOfScalar(anyerror, seen[0..nseen], e) == null) {
+                seen[nseen] = e;
+                nseen += 1;
+            };
+        }
+    };
+    const bad = f.num_vregs + 100;
+    const long = try f.alloc().alloc(VReg, max_args + 1);
+    @memset(long, 1);
+    for (f.blocks.items) |*b| {
+        for (b.ops.items) |*o| switch (o.*) {
+            // Every vreg, block index and argument list in turn.
+            inline else => |*x| {
+                const P = @TypeOf(x.*);
+                if (P == u32) {
+                    const old = x.*;
+                    x.* = bad;
+                    try Same.check(&f);
+                    x.* = old;
+                } else inline for (@typeInfo(P).@"struct".field_names, @typeInfo(P).@"struct".field_types) |name, F| {
+                    const old = @field(x, name);
+                    if (F == u32) {
+                        @field(x, name) = bad;
+                        try Same.check(&f);
+                    } else if (F == []const VReg) {
+                        @field(x, name) = &.{ 1, bad };
+                        try Same.check(&f);
+                        @field(x, name) = &.{1};
+                        try Same.check(&f);
+                        @field(x, name) = long;
+                        try Same.check(&f);
+                    }
+                    @field(x, name) = old;
+                }
+            },
+        };
+        // A block without a terminator, a terminator before the end.
+        const ops = b.ops.items;
+        const term = ops[ops.len - 1];
+        ops[ops.len - 1] = .{ .@"const" = .{ .dst = 1, .imm = 0 } };
+        try Same.check(&f);
+        ops[ops.len - 1] = term;
+        const first = ops[0];
+        ops[0] = term;
+        try Same.check(&f);
+        ops[0] = first;
+    }
+    try f.verify();
+    f.num_vregs = 3;
+    try Same.check(&f);
+    f.params = 4;
+    try Same.check(&f);
+    f.blocks.items.len = 0;
+    try Same.check(&f);
+    f.blocks.items.len = 3;
+    // Every structural error occurred (`MultipleDefs` belongs to `verifySsa`).
+    for ([_]anyerror{ error.EmptyFunction, error.MissingTerminator, error.TerminatorNotLast, error.BadBlock, error.BadVReg, error.TooManyArgs, error.ArgCountMismatch }) |e| {
+        try t.expect(std.mem.indexOfScalar(anyerror, Same.seen[0..Same.nseen], e) != null);
+    }
 }
 
 test "ir: int-only check" {

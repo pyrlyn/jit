@@ -510,6 +510,7 @@ fn lowerInto(backing: std.mem.Allocator, f0: *const ir.Func, b: anytype, opts: O
     const seg_next = try A.alloc(u32, if (res.seg_start.len == 0) 0 else res.seg_start.len - 1);
     if (seg_next.len != 0) @memcpy(seg_next, res.seg_start[0..seg_next.len]);
     const labels = try A.alloc(bld.Label, f.blocks.items.len);
+    if (comptime @hasDecl(@TypeOf(b.*), "reserveLabels")) try b.reserveLabels(labels.len);
     for (labels) |*l| l.* = try b.newLabel();
     var s: Lowering(@TypeOf(b)) = .{
         .b = b,

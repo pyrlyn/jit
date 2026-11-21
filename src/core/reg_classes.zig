@@ -322,52 +322,39 @@ fn Source(comptime class: ?Class, comptime typed: bool) type {
                 collector.next();
             }
             for (b.insts.ops) |*o| {
-                var def: ?ir.VReg = null;
-                switch (o.*) {
-                    .br => {},
-                    .ret => |v| try c.use(v),
-                    inline .@"const", .fconst => |x| def = x.dst,
-                    .copy => |x| {
-                        try c.use(x.src);
-                        def = x.dst;
-                    },
-                    inline .cvt, .splat, .extract => |x| {
-                        try c.use(x.src);
-                        def = x.dst;
-                    },
-                    .load => |x| {
-                        try c.use(x.base);
-                        def = x.dst;
-                    },
-                    .store => |x| {
-                        try c.use(x.base);
-                        try c.use(x.src);
-                    },
-                    .cbr => |x| {
-                        try c.use(x.a);
-                        try c.use(x.b);
-                    },
-                    inline .arith, .typed, .fcmp => |x| {
-                        try c.use(x.a);
-                        try c.use(x.b);
-                        def = x.dst;
-                    },
-                    .call => |x| {
-                        try collector.call();
-                        for (x.args) |v| try c.use(v);
-                        def = x.dst;
-                    },
-                    .bra => |x| for (x.args) |v| try c.use(v),
-                    .cbra => |x| {
-                        try c.use(x.a);
-                        try c.use(x.b);
-                        for (x.then_args) |v| try c.use(v);
-                        for (x.else_args) |v| try c.use(v);
-                    },
+                const sh = ir.Shape.of(o);
+                if (sh.list) {
+                    @branchHint(.unlikely);
+                    var def: ?ir.VReg = null;
+                    switch (o.*) {
+                        .call => |x| {
+                            try collector.call();
+                            for (x.args) |v| try c.use(v);
+                            def = x.dst;
+                        },
+                        .bra => |x| for (x.args) |v| try c.use(v),
+                        .cbra => |x| {
+                            try c.use(x.a);
+                            try c.use(x.b);
+                            for (x.then_args) |v| try c.use(v);
+                            for (x.else_args) |v| try c.use(v);
+                        },
+                        else => unreachable,
+                    }
+                    if (def) |d| if (s.member(d)) {
+                        try collector.def(d);
+                    };
+                    collector.next();
+                    continue;
                 }
-                if (def) |d| if (s.member(d)) {
-                    try collector.def(d);
-                };
+                if (sh.nuses != 0) {
+                    try c.use(ir.Shape.vreg(o, sh.use[0]));
+                    if (sh.nuses == 2) try c.use(ir.Shape.vreg(o, sh.use[1]));
+                }
+                if (sh.has_def) {
+                    const d = ir.Shape.vreg(o, sh.def);
+                    if (s.member(d)) try collector.def(d);
+                }
                 collector.next();
             }
         }
