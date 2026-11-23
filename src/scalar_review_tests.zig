@@ -704,14 +704,19 @@ test "review-scalar: dump" {
     );
 }
 
-extern "c" fn clock_gettime_nsec_np(clock: c_int) u64;
+/// Monotonic clock in nanoseconds (portable across libc targets).
+fn monoNs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
 fn timeOpt(src: []const u8, label: []const u8) !void {
     const gpa = std.heap.page_allocator;
     var f = try ir.parse(gpa, src);
     defer f.deinit();
-    const t0 = clock_gettime_nsec_np(4);
+    const t0 = monoNs();
     const st = try opt.optimize(gpa, &f, .{ .level = .o2, .verify_each = false, .vector = opt.VectorTarget.host });
-    std.debug.print("{s}: {d} ms, ops {d} -> {d}, blocks {d}\n", .{ label, (clock_gettime_nsec_np(4) - t0) / 1_000_000, st.ops_before, st.ops_after, st.blocks_after });
+    std.debug.print("{s}: {d} ms, ops {d} -> {d}, blocks {d}\n", .{ label, (monoNs() - t0) / 1_000_000, st.ops_before, st.ops_after, st.blocks_after });
 }
 
 test "review-scalar: compile-time scaling" {
@@ -766,20 +771,20 @@ test "review-scalar: per-pass time on a loop nest" {
         var stats: opt.Stats = .{};
         var c = try opt.Ctx.init(gpa, &f, &options, &stats);
         defer c.deinit();
-        var t0 = clock_gettime_nsec_np(4);
+        var t0 = monoNs();
         try opt.ssa.build(&c);
-        std.debug.print("depth {d}: ssa.build {d} us\n", .{ depth, (clock_gettime_nsec_np(4) - t0) / 1000 });
+        std.debug.print("depth {d}: ssa.build {d} us\n", .{ depth, (monoNs() - t0) / 1000 });
         inline for (.{ .{ opt.sccp.run, "sccp" }, .{ opt.instcombine.run, "instcombine" }, .{ opt.gvn.run, "gvn" }, .{ opt.dce.run, "dce" }, .{ opt.simplifycfg.run, "simplifycfg" }, .{ opt.licm.run, "licm" }, .{ opt.loops.rotate, "rotate" }, .{ opt.licm.run, "licm2" }, .{ opt.sccp.run, "sccp" }, .{ opt.instcombine.run, "instcombine" }, .{ opt.gvn.run, "gvn" }, .{ opt.dce.run, "dce" }, .{ opt.simplifycfg.run, "simplifycfg" }, .{ opt.remat.run, "remat" } }) |p| {
-            t0 = clock_gettime_nsec_np(4);
+            t0 = monoNs();
             _ = try p[0](&c);
-            std.debug.print("  {s}: {d} us\n", .{ p[1], (clock_gettime_nsec_np(4) - t0) / 1000 });
+            std.debug.print("  {s}: {d} us\n", .{ p[1], (monoNs() - t0) / 1000 });
         }
-        t0 = clock_gettime_nsec_np(4);
+        t0 = monoNs();
         try opt.out_of_ssa.run(&c);
-        std.debug.print("  out_of_ssa: {d} us\n", .{(clock_gettime_nsec_np(4) - t0) / 1000});
-        t0 = clock_gettime_nsec_np(4);
+        std.debug.print("  out_of_ssa: {d} us\n", .{(monoNs() - t0) / 1000});
+        t0 = monoNs();
         _ = try opt.layout.run(&c);
-        std.debug.print("  layout: {d} us\n", .{(clock_gettime_nsec_np(4) - t0) / 1000});
+        std.debug.print("  layout: {d} us\n", .{(monoNs() - t0) / 1000});
     }
 }
 
@@ -793,18 +798,18 @@ test "review-scalar: Loops.init scaling" {
         defer f.deinit();
         var g = try opt.cfg.Cfg.init(gpa, &f);
         defer g.deinit();
-        const t0 = clock_gettime_nsec_np(4);
+        const t0 = monoNs();
         var ls = try opt.cfg.Loops.init(gpa, &f, &g);
         defer ls.deinit();
-        const t1 = clock_gettime_nsec_np(4);
+        const t1 = monoNs();
         var f2 = try ir.parse(gpa, src.items);
         defer f2.deinit();
         _ = try opt.optimize(gpa, &f2, .{ .level = .o2, .verify_each = false });
-        const t2 = clock_gettime_nsec_np(4);
+        const t2 = monoNs();
         var f3 = try ir.parse(gpa, src.items);
         defer f3.deinit();
         _ = try opt.optimize(gpa, &f3, .{ .level = .o1, .verify_each = false });
-        const t3 = clock_gettime_nsec_np(4);
+        const t3 = monoNs();
         std.debug.print("depth {d} ({d} ops): Loops.init {d} us, optimize o2 {d} ms, o1 {d} ms\n", .{ depth, opt.countOps(&f), (t1 - t0) / 1000, (t2 - t1) / 1_000_000, (t3 - t2) / 1_000_000 });
     }
 }
@@ -896,9 +901,9 @@ test "review-scalar: parameter chains scaling" {
         try chain(gpa, n, rev, &src);
         var f = try ir.parse(gpa, src.items);
         defer f.deinit();
-        const t0 = clock_gettime_nsec_np(4);
+        const t0 = monoNs();
         const st = try opt.optimize(gpa, &f, .{ .level = .o2, .verify_each = false });
-        std.debug.print("chain n={d} rev={}: {d} ms ({d} -> {d} ops)\n", .{ n, rev, (clock_gettime_nsec_np(4) - t0) / 1_000_000, st.ops_before, st.ops_after });
+        std.debug.print("chain n={d} rev={}: {d} ms ({d} -> {d} ops)\n", .{ n, rev, (monoNs() - t0) / 1_000_000, st.ops_before, st.ops_after });
     };
 }
 
@@ -913,12 +918,12 @@ test "review-scalar: per-pass time on a parameter chain" {
     var stats: opt.Stats = .{};
     var c = try opt.Ctx.init(gpa, &f, &options, &stats);
     defer c.deinit();
-    var t0 = clock_gettime_nsec_np(4);
+    var t0 = monoNs();
     try opt.ssa.build(&c);
-    std.debug.print("ssa.build {d} us\n", .{(clock_gettime_nsec_np(4) - t0) / 1000});
+    std.debug.print("ssa.build {d} us\n", .{(monoNs() - t0) / 1000});
     inline for (.{ .{ opt.sccp.run, "sccp" }, .{ opt.instcombine.run, "instcombine" }, .{ opt.gvn.run, "gvn" }, .{ opt.dce.run, "dce" }, .{ opt.simplifycfg.run, "simplifycfg" }, .{ opt.sccp.run, "sccp" }, .{ opt.instcombine.run, "instcombine" }, .{ opt.gvn.run, "gvn" }, .{ opt.dce.run, "dce" }, .{ opt.simplifycfg.run, "simplifycfg" } }) |p| {
-        t0 = clock_gettime_nsec_np(4);
+        t0 = monoNs();
         const ch = try p[0](&c);
-        std.debug.print("  {s}: {d} us changed={}\n", .{ p[1], (clock_gettime_nsec_np(4) - t0) / 1000, ch });
+        std.debug.print("  {s}: {d} us changed={}\n", .{ p[1], (monoNs() - t0) / 1000, ch });
     }
 }
