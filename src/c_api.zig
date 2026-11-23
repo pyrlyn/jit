@@ -16,7 +16,7 @@ const rvc = @import("riscv/compiler.zig");
 const opt = @import("core/opt/opt.zig");
 
 pub const version_major: u32 = 0;
-pub const version_minor: u32 = 3;
+pub const version_minor: u32 = 4;
 pub const version_patch: u32 = 0;
 /// MAJOR<<16 | MINOR<<8 | PATCH; must match PJIT_VERSION in include/pyrlyn_jit.h (checked by a test).
 pub const version: u32 = version_major << 16 | version_minor << 8 | version_patch;
@@ -621,7 +621,7 @@ test "c api: opcode fast path emits the same bytes as the mnemonic path; pool" {
 }
 
 test "c api: version, errors, IR compile + eval" {
-    try std.testing.expectEqual(@as(u32, 0x000300), pjit_version());
+    try std.testing.expectEqual(@as(u32, 0x000400), pjit_version());
     const src = "func f 2\ne:\n  v2 = add v0 v1\n  ret v2\n";
     var r: i64 = 0;
     try std.testing.expectEqual(OK, pjit_ir_eval(src, src.len, &[_]i64{ 40, 2 }, 2, 0, &r));

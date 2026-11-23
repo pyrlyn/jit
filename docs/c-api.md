@@ -7,7 +7,7 @@ explicit padding.
 ## Versioning
 
 - Header: `PJIT_VERSION_MAJOR/MINOR/PATCH`, `PJIT_VERSION` (`PJIT_MAKE_VERSION(major, minor, patch)`
-  = `MAJOR << 16 | MINOR << 8 | PATCH`). Library: `pjit_version()`. Current: 0.3.0.
+  = `MAJOR << 16 | MINOR << 8 | PATCH`). Library: `pjit_version()`. Current: 0.4.0.
 - Within one major version the ABI only grows: functions and enum values are appended,
   existing ones never change value, meaning or struct layout (`tests/c/capi_test.c` pins the
   struct sizes and status values with `_Static_assert`).
@@ -20,6 +20,7 @@ explicit padding.
 | 0.1.0 | buffers, labels, AArch64/x86-64 emitters, executable memory |
 | 0.2.0 | version macros, `pjit_last_error`/`pjit_clear_error`, IR compiler (`pjit_ir_compile`, `pjit_ir_eval`), statuses `PJIT_ERR_UNSUPPORTED`..`PJIT_ERR_STEP_LIMIT` |
 | 0.3.0 | IR optimizer: `pjit_ir_compile_opt` (levels 0-2) |
+| 0.4.0 | `include/pyrlyn_jit_fast.h`: opcode ids (`pjit_a64_opcode`/`pjit_a64_emit_op`, `pjit_x64_opcode`/`pjit_x64_emit_op`) and a shared executable pool (`pjit_pool_new`/`pjit_pool_add`/`pjit_pool_free`) |
 
 ## Building
 
@@ -54,6 +55,18 @@ whose members are not 8-byte aligned. The build therefore also emits a plain obj
    the target (NEON/SSE). Results never change; `PJIT_ARCH_X86` supports level 0 only.
 6. `pjit_jit_add` copies the code into W^X executable memory. `pjit_func_ptr` gives the entry
    point, and `pjit_func_free` releases it.
+
+Fast paths (`include/pyrlyn_jit_fast.h`, same library, since 0.4.0):
+
+- Opcode ids: `pjit_a64_opcode("add")` / `pjit_x64_opcode("mov")` resolve a mnemonic once
+  (-1 if unknown); `pjit_a64_emit_op` / `pjit_x64_emit_op` then emit by id with the same operand
+  validation and the same bytes as the string entry points, without a string lookup per
+  instruction. Ids are only valid for the library build that returned them.
+- Pool: `pjit_pool_new(chunk_size, &pool)` (0: 256 KiB chunks), `pjit_pool_add(pool, b, &fn)`
+  appends finalized code (16-byte aligned) to a shared mapping instead of mapping 16 KiB per
+  function like `pjit_jit_add`; everything is unmapped by `pjit_pool_free`. W^X as for
+  `pjit_jit_add` (MAP_JIT on Apple Silicon, a dual RW/RX mapping on Linux and macOS/x86-64,
+  RW/RX toggling under Rosetta 2 and on Windows).
 
 ## Errors
 
@@ -98,7 +111,10 @@ All four examples also compile IR text for the host and check the result (C/C++/
 
 A `pjit_buffer` must not be used from several threads at once. Different buffers and functions
 are independent. On Apple Silicon, `pjit_jit_add` toggles the calling thread's JIT write
-protection for the duration of the copy.
+protection for the duration of the copy. A `pjit_pool` is not thread-safe: use one per thread
+or lock around `pjit_pool_add`; under Rosetta 2 and on Windows a pool's chunk is briefly not
+executable while `pjit_pool_add` copies into it, so do not run code from a pool on another
+thread while adding to it.
 
 ## KXBC bytecode
 

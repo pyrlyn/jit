@@ -149,7 +149,10 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 21; i++) {
       uint64_t t0 = now();
       uint64_t a = 0;
-      for (volatile int64_t k = 0; k < 1000000; k++) a += (uint64_t)((FactFn)fns[1])(20 + (k & 1));
+      for (int64_t k = 0; k < 1000000; k++) {
+        volatile int64_t arg = 20 + (k & 1); // opaque argument, as doNotOptimizeAway in bench_ir.zig
+        a += (uint64_t)((FactFn)fns[1])(arg);
+      }
       te.push_back(now() - t0);
       acc = (int64_t)a;
     }

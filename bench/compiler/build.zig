@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{}); // use -Doptimize=ReleaseFast
     const opts = b.addOptions();
+    opts.addOption(bool, "llvm", false);
+    opts.addOption(bool, "bc2jit", false);
     opts.addOption(bool, "x86_64", true);
     opts.addOption(bool, "aarch64", true);
     opts.addOption(bool, "validate", false);

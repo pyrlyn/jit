@@ -1,4 +1,4 @@
-/* pyrlyn-jit C API, fast paths (same library as pyrlyn_jit.h).
+/* pyrlyn-jit C API, fast paths (same library as pyrlyn_jit.h; since 0.4.0, docs/c-api.md).
  *
  * Opcode ids: resolve a mnemonic once, then emit by id. pjit_*_emit_op does the same operand
  * validation as pjit_*_emit but skips the per-call mnemonic string lookup. Ids are valid for

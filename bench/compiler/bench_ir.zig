@@ -1,6 +1,8 @@
-//! IR compiler benchmark: sum/fact (same IR as ~/Grok/cranelift-vs-pyrlyn-jit and
-//! asmjit_compiler_bench.cpp) compiled with `optimize = false` (codegen before the opt passes)
-//! and `optimize = true`, installed with JitRuntime.add (one mapping per function) or JitPool.
+//! IR compiler benchmark: sum/fact (same IR as the Cranelift harness and
+//! asmjit_compiler_bench.cpp). `o0`: the IR compiler alone; `o2`: `opt.optimize` (level o2,
+//! loop rotation and block layout included) and then the compiler; compile times include the
+//! optimizer. Installed with JitRuntime.add (one mapping per function) or JitPool (if present,
+//! so the same file also measures main).
 //! Usage: [BENCH_DUMP=dir] bench-ir
 const std = @import("std");
 const pj = @import("pyrlyn_jit");
@@ -66,6 +68,22 @@ fn dump(dir: ?[:0]const u8, name: []const u8, code: []const u8) void {
 }
 
 const N = 1000;
+const has_pool = @hasDecl(pj, "JitPool");
+
+fn compileA64(f: *ir.Func, cb: *pj.CodeBuffer, o2: bool) !pj.aarch64_compiler.Stats {
+    if (o2) _ = try pj.opt.optimize(gpa, f, .{});
+    cb.reset();
+    return pj.aarch64_compiler.compile(gpa, f, cb, .{});
+}
+fn compileX64(f: *ir.Func, cb: *pj.CodeBuffer, o2: bool) !pj.x86_64_compiler.Stats {
+    if (o2) _ = try pj.opt.optimize(gpa, f, .{});
+    cb.reset();
+    return pj.x86_64_compiler.compile(gpa, f, cb, .{});
+}
+fn frameless(st: anytype) []const u8 {
+    if (@hasField(@TypeOf(st), "frameless")) return if (st.frameless) "true" else "false";
+    return "n/a";
+}
 
 pub fn main() !void {
     const dir: ?[:0]const u8 = if (std.c.getenv("BENCH_DUMP")) |d| std.mem.span(d) else null;
@@ -83,7 +101,7 @@ pub fn main() !void {
     const builders = .{ buildSum, buildFact };
     const names = [_][]const u8{ "sum", "fact" };
     for ([_]bool{ false, true }) |opt| {
-        const tag = if (opt) "opt" else "unopt";
+        const tag = if (opt) "o2" else "o0";
         var fns: [2]pj.JitRuntime.Function = undefined;
         inline for (builders, 0..) |build, k| {
             var st: pj.aarch64_compiler.Stats = .{};
@@ -91,8 +109,7 @@ pub fn main() !void {
                 const t0 = now();
                 var f = ir.Func.init(gpa);
                 try build(&f);
-                cb.reset();
-                st = try pj.aarch64_compiler.compile(gpa, &f, &cb, .{ .optimize = opt });
+                st = try compileA64(&f, &cb, opt);
                 f.deinit();
                 t.* = now() - t0;
             }
@@ -100,22 +117,20 @@ pub fn main() !void {
                 const t0 = now();
                 var f = ir.Func.init(gpa);
                 try build(&f);
-                cb.reset();
-                _ = try pj.aarch64_compiler.compile(gpa, &f, &cb, .{ .optimize = opt });
+                _ = try compileA64(&f, &cb, opt);
                 f.deinit();
                 const fun = try pj.JitRuntime.add(&cb);
                 t.* = now() - t0;
                 fun.release();
             }
-            {
+            if (has_pool) {
                 var pool = pj.JitPool.Pool.init(gpa, .{});
                 defer pool.deinit();
                 for (&tp) |*t| {
                     const t0 = now();
                     var f = ir.Func.init(gpa);
                     try build(&f);
-                    cb.reset();
-                    _ = try pj.aarch64_compiler.compile(gpa, &f, &cb, .{ .optimize = opt });
+                    _ = try compileA64(&f, &cb, opt);
                     f.deinit();
                     _ = try pool.add(&cb);
                     t.* = now() - t0;
@@ -124,7 +139,7 @@ pub fn main() !void {
             fns[k] = try pj.JitRuntime.add(&cb);
             var nb: [64]u8 = undefined;
             dump(dir, try std.fmt.bufPrint(&nb, "pyrlyn_{s}_{s}", .{ tag, names[k] }), cb.code());
-            std.debug.print("a64 {s} {s} compile_ns={d} full_runtime_ns={d} full_pool_ns={d} bytes={d} spills={d} frameless={}\n", .{ tag, names[k], median(&ts), median(&tf), median(&tp), cb.code().len, st.spills, st.frameless });
+            std.debug.print("a64 {s} {s} compile_ns={d} full_runtime_ns={d} full_pool_ns={d} bytes={d} spills={d} frameless={s}\n", .{ tag, names[k], median(&ts), median(&tf), if (has_pool) median(&tp) else 0, cb.code().len, st.spills, frameless(st) });
         }
         const sum = fns[0].ptr(*const fn ([*]const i64, i64) callconv(.c) i64);
         const fact = fns[1].ptr(*const fn (i64) callconv(.c) i64);
@@ -159,17 +174,17 @@ pub fn main() !void {
                 const t0 = now();
                 var f = ir.Func.init(gpa);
                 try build(&f);
-                cb.reset();
-                st = try pj.x86_64_compiler.compile(gpa, &f, &cb, .{ .optimize = opt });
+                st = try compileX64(&f, &cb, opt);
                 f.deinit();
                 t.* = now() - t0;
             }
             var nb: [64]u8 = undefined;
             dump(dir, try std.fmt.bufPrint(&nb, "pyrlyn_x64_{s}_{s}", .{ tag, names[k] }), cb.code());
-            std.debug.print("x64 {s} {s} compile_ns={d} bytes={d} spills={d} frameless={}\n", .{ tag, names[k], median(&ts), cb.code().len, st.spills, st.frameless });
+            std.debug.print("x64 {s} {s} compile_ns={d} bytes={d} spills={d} frameless={s}\n", .{ tag, names[k], median(&ts), cb.code().len, st.spills, frameless(st) });
         }
     }
-    // Install cost alone: 1000 x 48-byte functions.
+    // Install cost alone: 48-byte functions. add+release reuses JitRuntime's page cache;
+    // `live` keeps all N functions installed (one 16 KiB mapping each vs a shared pool).
     var code: [48]u8 = @splat(0);
     std.mem.writeInt(u32, code[44..48], 0xD65F03C0, .little);
     cb.reset();
@@ -181,12 +196,23 @@ pub fn main() !void {
         t.* = now() - t0;
         fun.release();
     }
-    var pool = pj.JitPool.Pool.init(gpa, .{});
-    defer pool.deinit();
-    for (&tp) |*t| {
-        const t0 = now();
-        _ = try pool.add(&cb);
-        t.* = now() - t0;
+    var live: [N]pj.JitRuntime.Function = undefined;
+    const tl0 = now();
+    for (&live) |*l| l.* = try pj.JitRuntime.add(&cb);
+    const live_ns = (now() - tl0) / N;
+    for (live) |l| l.release();
+    var pool_ns: u64 = 0;
+    var pool_mapped: usize = 0;
+    if (has_pool) {
+        var pool = pj.JitPool.Pool.init(gpa, .{});
+        defer pool.deinit();
+        for (&tp) |*t| {
+            const t0 = now();
+            _ = try pool.add(&cb);
+            t.* = now() - t0;
+        }
+        pool_ns = median(&tp);
+        pool_mapped = pool.mapped;
     }
-    std.debug.print("install 48B runtime_add_ns={d} pool_add_ns={d} pool_mapped_bytes={d} (runtime maps 16384 per function)\n", .{ median(&tf), median(&tp), pool.mapped });
+    std.debug.print("install 48B runtime_add_release_ns={d} runtime_live_ns={d} runtime_live_mapped={d} pool_add_ns={d} pool_mapped_bytes={d}\n", .{ median(&tf), live_ns, N * 16384, pool_ns, pool_mapped });
 }

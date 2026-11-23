@@ -82,6 +82,8 @@ pub const Pool = struct {
     opts: Options,
     mode: Mode,
     chunks: std.ArrayList(?Chunk) = .empty,
+    /// Chunk that functions are appended to (dedicated chunks of oversized functions never are).
+    cur: ?u32 = null,
     /// Bytes mapped / bytes of code installed (stats).
     mapped: usize = 0,
     installed: usize = 0,
@@ -110,10 +112,10 @@ pub const Pool = struct {
         const size = std.mem.alignForward(usize, @max(min, p.opts.chunk_size), page);
         var ch: Chunk = undefined;
         switch (p.mode) {
-            .dual => {
+            .dual => if (rt.dual_mapping_supported) {
                 const d = try rt.allocDual(size);
                 ch = .{ .rx = d.rx, .rw = d.rw };
-            },
+            } else unreachable,
             .map_jit, .toggle => {
                 var mem: []align(4096) u8 = undefined;
                 if (is_windows) {
@@ -128,7 +130,7 @@ pub const Pool = struct {
                     const q = mmap(null, size, prot, flags, -1, 0) orelse return error.MapFailed;
                     if (@intFromPtr(q) == MAP_FAILED) return error.MapFailed;
                     mem = @as([*]align(4096) u8, @ptrCast(@alignCast(q)))[0..size];
-                    if (p.mode == .map_jit) {
+                    if (use_map_jit and p.mode == .map_jit) {
                         pthread_jit_write_protect_np(0);
                         rt.fillTrap(mem);
                         pthread_jit_write_protect_np(1);
@@ -163,22 +165,22 @@ pub const Pool = struct {
 
     pub fn addBytes(p: *Pool, code: []const u8) Error!Function {
         const n = @max(code.len, 1);
-        // Last chunk with room (functions are appended; no hole reuse inside a chunk).
+        // The current chunk if it has room (functions are appended; no hole reuse inside a
+        // chunk). A function larger than a chunk gets a dedicated one, which never becomes current.
         var ci: ?u32 = null;
         var off: usize = 0;
-        if (p.chunks.items.len != 0) {
-            const last: u32 = @intCast(p.chunks.items.len - 1);
-            if (p.chunks.items[last]) |ch| {
-                const o = std.mem.alignForward(usize, ch.used, p.opts.alignment);
-                if (o + n <= ch.rx.len) {
-                    ci = last;
-                    off = o;
-                }
+        if (p.cur) |c| {
+            const ch = p.chunks.items[c].?;
+            const o = std.mem.alignForward(usize, ch.used, p.opts.alignment);
+            if (o + n <= ch.rx.len) {
+                ci = c;
+                off = o;
             }
         }
         if (ci == null) {
             ci = try p.newChunk(n);
             off = 0;
+            if (n <= p.opts.chunk_size) p.cur = ci;
         }
         const ch = &p.chunks.items[ci.?].?;
         try write(p.mode, ch, off, code);
@@ -191,11 +193,11 @@ pub const Pool = struct {
     fn write(mode: Mode, ch: *Chunk, off: usize, code: []const u8) Error!void {
         const dst_rx = ch.rx[off..][0..code.len];
         switch (mode) {
-            .map_jit => {
+            .map_jit => if (use_map_jit) {
                 pthread_jit_write_protect_np(0);
                 @memcpy(ch.rw[off..][0..code.len], code);
                 pthread_jit_write_protect_np(1);
-            },
+            } else unreachable,
             .dual => @memcpy(ch.rw[off..][0..code.len], code),
             .toggle => {
                 // Pages covering the copy: RW, copy, RX.
@@ -228,7 +230,7 @@ pub const Pool = struct {
         const ch = &slot.*.?;
         ch.live -= 1;
         if (ch.live == 0) {
-            if (f.chunk + 1 == p.chunks.items.len) {
+            if (p.cur == f.chunk) {
                 // Rewinding re-uses addresses that already ran; under Rosetta keep appending.
                 if (p.mode == .toggle) return;
                 ch.used = 0; // rewind the tail chunk; stale code stays trap-free only up to `used`
@@ -237,6 +239,7 @@ pub const Pool = struct {
             p.mapped -= ch.rx.len;
             unmapChunk(p.mode, ch.*);
             slot.* = null;
+            if (f.chunk + 1 == p.chunks.items.len) p.chunks.items.len -= 1;
         }
     }
 };
@@ -293,6 +296,15 @@ test "jit pool: function larger than a chunk gets its own chunk" {
         while (i < big.len) : (i += 4) std.mem.writeInt(u32, big[i..][0..4], 0xD503201F, .little);
     } else @memset(big, 0x90);
     @memcpy(big[big.len - tail.len ..], tail);
+    const s1 = try p.addBytes(tail);
     const f = try p.addBytes(big);
+    const s2 = try p.addBytes(tail);
     try t.expectEqual(@as(u64, 5), f.ptr(*const fn () callconv(.c) u64)() & 0xFFFF);
+    // The oversized function's chunk is its own; small functions keep filling the current one.
+    try t.expect(f.chunk != s1.chunk);
+    try t.expectEqual(s1.chunk, s2.chunk);
+    try t.expectEqual(@as(u64, 5), s2.ptr(*const fn () callconv(.c) u64)() & 0xFFFF);
+    try t.expectEqual(@as(usize, 16384 + 49152), p.mapped);
+    p.release(f);
+    try t.expectEqual(@as(usize, 16384), p.mapped);
 }

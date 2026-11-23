@@ -1,3 +1,4 @@
 out/
 zig-out/
 .zig-cache/
+cranelift/target/

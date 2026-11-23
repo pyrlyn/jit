@@ -251,6 +251,56 @@ test "a64 codegen: constants fold into immediates and xzr" {
     }
 }
 
+test "a64 codegen: shl by a constant fuses into the add/sub that uses it" {
+    const lsl3 = @as(u32, 3) << 10;
+    const cases = [_]struct { src: []const u8, want: []const u32 }{
+        // y = b + (a << 3), either operand order; sub with the shift on the right; x == y
+        .{ .src = "func f 2\ne:\n  v2 = const 3\n  v3 = shl v1 v2\n  v4 = add v0 v3\n  ret v4\n", .want = &.{ enc.rrr(enc.add_r, 0, 0, 1) | lsl3, enc.ret } },
+        .{ .src = "func f 2\ne:\n  v2 = const 3\n  v3 = shl v1 v2\n  v4 = add v3 v0\n  ret v4\n", .want = &.{ enc.rrr(enc.add_r, 0, 0, 1) | lsl3, enc.ret } },
+        .{ .src = "func f 2\ne:\n  v2 = const 3\n  v3 = shl v1 v2\n  v4 = sub v0 v3\n  ret v4\n", .want = &.{ enc.rrr(enc.sub_r, 0, 0, 1) | lsl3, enc.ret } },
+        .{ .src = "func f 2\ne:\n  v2 = const 3\n  v3 = shl v1 v2\n  v3 = add v0 v3\n  ret v3\n", .want = &.{ enc.rrr(enc.add_r, 0, 0, 1) | lsl3, enc.ret } },
+        // shift count taken mod 64
+        .{ .src = "func f 2\ne:\n  v2 = const 67\n  v3 = shl v1 v2\n  v4 = add v0 v3\n  ret v4\n", .want = &.{ enc.rrr(enc.add_r, 0, 0, 1) | lsl3, enc.ret } },
+        // not fused: the shifted value is used again; sub with the shift on the left
+        .{ .src = "func f 2\ne:\n  v2 = const 3\n  v3 = shl v1 v2\n  v4 = add v0 v3\n  v5 = add v4 v3\n  ret v5\n", .want = &.{ enc.shiftImm(.shl, 1, 1, 3), enc.rrr(enc.add_r, 0, 0, 1), enc.rrr(enc.add_r, 0, 0, 1), enc.ret } },
+        .{ .src = "func f 2\ne:\n  v2 = const 3\n  v3 = shl v1 v2\n  v4 = sub v3 v0\n  ret v4\n", .want = &.{ enc.shiftImm(.shl, 1, 1, 3), enc.rrr(enc.sub_r, 0, 1, 0), enc.ret } },
+    };
+    for (cases) |cs| {
+        const c = try codeOfSrc(cs.src);
+        defer t.allocator.free(c);
+        t.expectEqualSlices(u32, cs.want, c) catch |e| {
+            std.debug.print("source:\n{s}\n", .{cs.src});
+            return e;
+        };
+    }
+}
+
+test "a64 codegen: shift fusion matches the interpreter (spills, x == a, x == y, loops)" {
+    if (!can_run) return error.SkipZigTest;
+    const srcs = [_][]const u8{
+        "func f 2\ne:\n  v2 = const 3\n  v3 = shl v1 v2\n  v4 = add v0 v3\n  ret v4\n",
+        "func f 2\ne:\n  v2 = const 1\n  v3 = shl v1 v2\n  v4 = sub v0 v3\n  ret v4\n",
+        "func f 2\ne:\n  v2 = const 63\n  v1 = shl v1 v2\n  v4 = add v1 v0\n  ret v4\n",
+        "func f 2\ne:\n  v2 = const 0\n  v1 = shl v1 v2\n  v1 = add v0 v1\n  ret v1\n",
+        "func f 2\ne:\n  v2 = const 5\n  v3 = shl v1 v2\n  v4 = add v1 v3\n  ret v4\n",
+        "func f 2\ne:\n  v2 = const 5\n  v3 = shl v0 v2\n  v4 = add v0 v3\n  v5 = sub v4 v0\n  ret v5\n",
+        "func f 2\ne:\n  v2 = const 2\n  v3 = shl v1 v2\n  v4 = add v9 v3\n  ret v4\n",
+        // loop-carried: x read at the top of the next iteration is not fused
+        "func f 2\ne:\n  v2 = const 2\n  v5 = const 0\n  v3 = const 0\n  br l\nl:\n  v5 = add v5 v3\n  v3 = shl v1 v2\n  v4 = add v0 v3\n  v0 = sub v0 v4\n  v1 = add v1 v1\n  v6 = const 0\n  cbr ne v1 v6 l x\nx:\n  ret v5\n",
+        // sum: end = p + (n << 3) in the entry block, x == y
+        "func f 2\ne:\n  v4 = const 3\n  v2 = shl v1 v4\n  v2 = add v0 v2\n  v3 = sub v2 v0\n  ret v3\n",
+    };
+    const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 1, 1 }, &.{ -1, 3 }, &.{ maxI, minI }, &.{ 123456789, -987654321 }, &.{ 7, 1 << 40 } };
+    for (srcs) |src| {
+        var f = try ir.parse(t.allocator, src);
+        defer f.deinit();
+        for (inputs) |in| check(&f, in) catch |e| {
+            std.debug.print("source:\n{s}\nargs {any}\n", .{ src, in });
+            return e;
+        };
+    }
+}
+
 test "a64 codegen: a counted loop" {
     const src =
         \\func f 1

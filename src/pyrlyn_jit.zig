@@ -60,7 +60,6 @@ test {
     _ = @import("core/code_buffer.zig");
     _ = @import("core/regalloc.zig");
     _ = @import("core/jit_pool.zig");
-    _ = @import("core/lower_plan.zig");
     _ = @import("core/reg_classes.zig");
     _ = @import("fp_tests.zig");
     _ = @import("core/ir.zig");
