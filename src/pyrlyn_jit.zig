@@ -65,6 +65,9 @@ test {
     _ = @import("core/ir.zig");
     _ = @import("core/opt/opt.zig");
     _ = @import("opt_tests.zig");
+    _ = @import("rev_codegen_tests.zig");
+    _ = @import("scalar_review_tests.zig");
+    _ = @import("vec_native_tests.zig");
     _ = @import("core/engine.zig");
     if (opts.aarch64) _ = @import("a64_codegen_tests.zig");
     if (opts.x86_64) _ = @import("x64_codegen_tests.zig");

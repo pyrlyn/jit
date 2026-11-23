@@ -306,7 +306,14 @@ pub const Ctx = struct {
     /// Structural, type and (in SSA) single-definition checks after `pass`, when enabled.
     pub fn check(c: *Ctx, pass: []const u8) Error!void {
         if (!c.options.verify_each) return;
-        errdefer std.log.err("pyrlyn_jit.opt: IR invalid after {s}", .{pass});
+        c.checkIr() catch |err| {
+            // Running out of memory while verifying says nothing about the IR.
+            if (err != error.OutOfMemory) std.log.err("pyrlyn_jit.opt: IR invalid after {s}", .{pass});
+            return err;
+        };
+    }
+
+    fn checkIr(c: *Ctx) Error!void {
         try c.f.verify();
         const nb = c.f.blocks.items.len;
         if (c.types.items.len != c.f.num_vregs or c.freq.items.len != nb or c.taken.items.len != nb) return error.InvalidSsa;

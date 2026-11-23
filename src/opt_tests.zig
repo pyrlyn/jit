@@ -832,3 +832,229 @@ test "opt_tests: review: duplicate block parameter and entry params without pred
     , &.{ &.{5}, &.{-1} });
     try endLeakCheck();
 }
+
+// ---- Salvaged review fuzzers (rev-core) -------------------------------------------------------
+
+fn rc0() callconv(.c) i64 {
+    return 77;
+}
+fn rc1(a: i64) callconv(.c) i64 {
+    return a *% 3 +% 1;
+}
+fn rc2(a: i64, b: i64) callconv(.c) i64 {
+    return a *% 5 -% b;
+}
+fn rc3(a: i64, b: i64, c: i64) callconv(.c) i64 {
+    return (a ^ b) *% 7 +% c;
+}
+fn rc6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) callconv(.c) i64 {
+    return a +% b *% 3 +% c *% 5 +% d *% 7 +% e *% 11 +% f *% 13;
+}
+fn rc8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) callconv(.c) i64 {
+    return a +% b *% 3 +% c *% 5 +% d *% 7 +% e *% 11 +% f *% 13 +% g *% 17 +% h *% 19;
+}
+fn rc10(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64) callconv(.c) i64 {
+    return a +% b *% 3 +% c *% 5 +% d *% 7 +% e *% 11 +% f *% 13 +% g *% 17 +% h *% 19 +% i *% 23 +% j *% 29;
+}
+const rev_callees = [_]struct { n: u32, addr: *const anyopaque }{
+    .{ .n = 0, .addr = @ptrCast(&rc0) },   .{ .n = 1, .addr = @ptrCast(&rc1) }, .{ .n = 2, .addr = @ptrCast(&rc2) },
+    .{ .n = 3, .addr = @ptrCast(&rc3) },   .{ .n = 6, .addr = @ptrCast(&rc6) }, .{ .n = 8, .addr = @ptrCast(&rc8) },
+    .{ .n = 10, .addr = @ptrCast(&rc10) },
+};
+
+/// High-pressure random program: v0, v1 params; pool v2..v(2+P-1); counter vC; scratch vS, vT.
+fn revProgram(rng: std.Random, out: *std.ArrayList(u8), P: u32, nblocks: u32, nops: u32) !void {
+    return revProgramP(rng, out, P, nblocks, nops, false);
+}
+
+fn revProgramP(rng: std.Random, out: *std.ArrayList(u8), P: u32, nblocks: u32, nops: u32, with_params: bool) !void {
+    const C = 2 + P;
+    const S = C + 1;
+    const T = C + 2;
+    const n = rng.intRangeAtMost(u32, 1, nblocks);
+    var bparams: [16][8]u32 = undefined;
+    var nparams: [16]u32 = @splat(0);
+    if (with_params) for (0..n) |bi| {
+        var perm: [64]u32 = undefined;
+        for (0..P) |i| perm[i] = 2 + @as(u32, @intCast(i));
+        rng.shuffle(u32, perm[0..P]);
+        nparams[bi] = rng.uintAtMost(u32, @min(P, 6));
+        @memcpy(bparams[bi][0..nparams[bi]], perm[0..nparams[bi]]);
+    };
+    const Edge = struct {
+        fn args(r: std.Random, o: *std.ArrayList(u8), k: u32, pool: u32, sep: []const u8) !void {
+            for (0..k) |_| try o.print(gpa, "{s}v{d}", .{ sep, if (r.uintLessThan(u32, 4) == 0) r.uintLessThan(u32, pool) else 2 + r.uintLessThan(u32, pool - 2) });
+        }
+    };
+    try out.print(gpa, "func r 2\n", .{});
+    for (0..n) |bi| {
+        try out.print(gpa, "b{d}", .{bi});
+        if (nparams[bi] != 0) {
+            try out.print(gpa, "(", .{});
+            for (bparams[bi][0..nparams[bi]], 0..) |pv, i| try out.print(gpa, "{s}v{d}", .{ if (i == 0) "" else " ", pv });
+            try out.print(gpa, ")", .{});
+        }
+        try out.print(gpa, ":\n  v{d} = const 1\n  v{d} = add v{d} v{d}\n", .{ S, C, C, S });
+        for (0..rng.uintAtMost(u32, nops)) |_| {
+            const d = 2 + rng.uintLessThan(u32, P);
+            const a = rng.uintLessThan(u32, 2 + P);
+            const b = rng.uintLessThan(u32, 2 + P);
+            switch (rng.uintLessThan(u32, 12)) {
+                0 => try out.print(gpa, "  v{d} = const {d}\n", .{ d, rng.intRangeAtMost(i64, -100, 100) }),
+                1, 2 => try out.print(gpa, "  v{d} = {s} v{d} v{d}\n", .{ d, @tagName(rng.enumValue(enum { add, sub, mul, @"and", @"or", xor })), a, b }),
+                3, 4 => try out.print(gpa, "  v{d} = {s} v{d} v{d}\n", .{ d, @tagName(rng.enumValue(enum { shl, shr, sar })), a, b }),
+                5, 6 => {
+                    try out.print(gpa, "  v{d} = const 255\n  v{d} = and v{d} v{d}\n  v{d} = const 1\n  v{d} = or v{d} v{d}\n", .{ T, T, b, T, S, T, T, S });
+                    try out.print(gpa, "  v{d} = {s} v{d} v{d}\n", .{ d, if (rng.boolean()) "sdiv" else "srem", a, T });
+                },
+                7 => try out.print(gpa, "  v{d} = copy v{d}\n", .{ d, a }),
+                8, 9 => {
+                    const k = rev_callees[rng.uintLessThan(usize, rev_callees.len)];
+                    try out.print(gpa, "  v{d} = call 0x{x}", .{ d, @intFromPtr(k.addr) });
+                    for (0..k.n) |_| try out.print(gpa, " v{d}", .{rng.uintLessThan(u32, 2 + P)});
+                    try out.print(gpa, "\n", .{});
+                },
+                else => {
+                    try out.print(gpa, "  v{d} = const {d}\n", .{ T, rng.intRangeAtMost(i64, 2, 9) });
+                    try out.print(gpa, "  v{d} = {s} v{d} v{d}\n", .{ d, if (rng.boolean()) "sdiv" else "srem", a, T });
+                },
+            }
+        }
+        const t1 = rng.uintLessThan(u32, n);
+        const t2 = rng.uintLessThan(u32, n);
+        if (with_params) {
+            const t2b = if (rng.uintLessThan(u32, 4) == 0) t1 else t2;
+            switch (rng.uintLessThan(u32, 5)) {
+                0 => try out.print(gpa, "  br x\n", .{}),
+                1 => {
+                    try out.print(gpa, "  br b{d}", .{t1});
+                    try Edge.args(rng, out, nparams[t1], 2 + P, " ");
+                    try out.print(gpa, "\n", .{});
+                },
+                2 => {
+                    try out.print(gpa, "  v{d} = const {d}\n  cbr lt v{d} v{d} b{d}", .{ S, rng.intRangeAtMost(i64, 1, 12), C, S, t1 });
+                    try Edge.args(rng, out, nparams[t1], 2 + P, ":");
+                    try out.print(gpa, " x\n", .{});
+                },
+                else => {
+                    try out.print(gpa, "  cbr {s} v{d} v{d} b{d}", .{ @tagName(rng.enumValue(ir.CondCode)), rng.uintLessThan(u32, 2 + P), rng.uintLessThan(u32, 2 + P), t1 });
+                    try Edge.args(rng, out, nparams[t1], 2 + P, ":");
+                    try out.print(gpa, " b{d}", .{t2b});
+                    try Edge.args(rng, out, nparams[t2b], 2 + P, ":");
+                    try out.print(gpa, "\n", .{});
+                },
+            }
+        } else switch (rng.uintLessThan(u32, 5)) {
+            0 => try out.print(gpa, "  br x\n", .{}),
+            1 => try out.print(gpa, "  br b{d}\n", .{t1}),
+            2 => try out.print(gpa, "  v{d} = const {d}\n  cbr lt v{d} v{d} b{d} x\n", .{ S, rng.intRangeAtMost(i64, 1, 12), C, S, t1 }),
+            else => try out.print(gpa, "  cbr {s} v{d} v{d} b{d} b{d}\n", .{ @tagName(rng.enumValue(ir.CondCode)), rng.uintLessThan(u32, 2 + P), rng.uintLessThan(u32, 2 + P), t1, t2 }),
+        }
+    }
+    try out.print(gpa, "x:\n  v{d} = const 0\n", .{S});
+    for (0..2 + P) |v| try out.print(gpa, "  v{d} = mul v{d} v{d}\n  v{d} = xor v{d} v{d}\n  v{d} = const 31\n  v{d} = add v{d} v{d}\n", .{ S, S, S, S, S, v, T, S, S, T });
+    try out.print(gpa, "  ret v{d}\n", .{S});
+}
+
+test "rev: high-pressure random programs (calls, idiv, shifts)" {
+    beginLeakCheck();
+    errdefer _ = leak_check.deinit();
+    var src: std.ArrayList(u8) = .empty;
+    errdefer src.deinit(gpa);
+    const n = fuzzCount(20);
+    const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ std.math.minInt(i64), 5 }, &.{ 63, 64 } };
+    for ([_]struct { p: u32, b: u32, o: u32 }{ .{ .p = 6, .b = 4, .o = 8 }, .{ .p = 16, .b = 5, .o = 12 }, .{ .p = 28, .b = 6, .o = 16 } }, 0..) |cf, ci| {
+        var prng = std.Random.DefaultPrng.init(0x5e7_c0de + ci);
+        for (0..n) |_| {
+            src.clearRetainingCapacity();
+            try revProgram(prng.random(), &src, cf.p, cf.b, cf.o);
+            try revCheck(src.items, &inputs);
+        }
+    }
+    src.deinit(gpa);
+    try endLeakCheck();
+}
+
+test "rev: random programs with block parameters (parallel copies)" {
+    beginLeakCheck();
+    errdefer _ = leak_check.deinit();
+    var src: std.ArrayList(u8) = .empty;
+    errdefer src.deinit(gpa);
+    const n = fuzzCount(20);
+    const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ std.math.minInt(i64), 5 }, &.{ 63, 64 } };
+    for ([_]struct { p: u32, b: u32, o: u32 }{ .{ .p = 4, .b = 4, .o = 3 }, .{ .p = 6, .b = 6, .o = 6 }, .{ .p = 12, .b = 8, .o = 8 }, .{ .p = 20, .b = 6, .o = 12 } }, 0..) |cf, ci| {
+        var prng = std.Random.DefaultPrng.init(0xb10c_9a + ci);
+        for (0..n) |_| {
+            src.clearRetainingCapacity();
+            try revProgramP(prng.random(), &src, cf.p, cf.b, cf.o, true);
+            try revCheck(src.items, &inputs);
+        }
+    }
+    src.deinit(gpa);
+    try endLeakCheck();
+}
+
+fn revCheckOpts(src: []const u8, inputs: []const []const i64, comptime optsets: anytype) !void {
+    if (builtin.cpu.arch != .x86_64 or !can_run) return;
+    var p = try Program.init(src, null);
+    defer p.deinit();
+    inline for (optsets) |o| {
+        for ([_]*const ir.Func{ &p.ref, &p.opt[0], &p.opt[1] }, 0..) |f, fi| {
+            var cb = CodeBuffer.init(gpa);
+            defer cb.deinit();
+            _ = try host_compiler.compile(gpa, f, &cb, o);
+            const fun = try JitRuntime.add(&cb);
+            defer fun.release();
+            var w = try wrapper(@intFromPtr(fun.mem.ptr), f.params);
+            defer w.deinit();
+            for (inputs) |in| {
+                const want = ir.interpret(&p.ref, in, 1_000_000) catch continue;
+                const got = try ir.interpret(&w, in, 10);
+                if (got != want) {
+                    std.debug.print("opts {any} func#{d} input {any}: want {d} got {d}\n", .{ o, fi, in, want, got });
+                    printProgram("mismatch", src, &p);
+                    return error.TestUnexpectedResult;
+                }
+            }
+        }
+    }
+}
+
+test "rev: x86 option combos on high-pressure programs" {
+    if (builtin.cpu.arch != .x86_64) return;
+    beginLeakCheck();
+    errdefer _ = leak_check.deinit();
+    const X = @import("x86_64/assembler.zig").Gp;
+    const b = struct {
+        fn m(rs: []const X) ra_mask {
+            var x: ra_mask = 0;
+            for (rs) |r| x |= @as(ra_mask, 1) << @backingInt(r);
+            return x;
+        }
+    };
+    const few = comptime b.m(&.{ .rax, .rcx, .rdx, .rbx, .r12 });
+    const mid = comptime b.m(&.{ .rax, .rcx, .rdx, .rsi, .rdi, .r8, .rbx, .r12, .r13 });
+    const optsets = .{
+        host_compiler.Options{ .allocatable = few },
+        host_compiler.Options{ .allocatable = mid, .split_at_calls = false },
+        host_compiler.Options{ .algo = .graph },
+        host_compiler.Options{ .allocatable = few, .algo = .graph },
+        host_compiler.Options{ .split = false },
+        host_compiler.Options{ .allocatable = mid, .split = false, .algo = .graph, .split_at_calls = true },
+    };
+    var src: std.ArrayList(u8) = .empty;
+    errdefer src.deinit(gpa);
+    const n = fuzzCount(4);
+    const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ 63, 64 } };
+    for ([_]struct { p: u32, b: u32, o: u32, bp: bool }{ .{ .p = 8, .b = 4, .o = 8, .bp = false }, .{ .p = 16, .b = 5, .o = 12, .bp = true }, .{ .p = 24, .b = 6, .o = 14, .bp = false } }, 0..) |cf, ci| {
+        var prng = std.Random.DefaultPrng.init(0xa11_0c + ci);
+        for (0..n) |_| {
+            src.clearRetainingCapacity();
+            try revProgramP(prng.random(), &src, cf.p, cf.b, cf.o, cf.bp);
+            try revCheckOpts(src.items, &inputs, optsets);
+        }
+    }
+    src.deinit(gpa);
+    try endLeakCheck();
+}
+const ra_mask = @import("core/regalloc.zig").RegMask;
