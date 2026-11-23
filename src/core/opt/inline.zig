@@ -805,6 +805,8 @@ const RandGen = struct {
     base: ir.VReg = 0,
     mask: ir.VReg = 0,
     one: ir.VReg = 0,
+    exact_arity: bool = false,
+    no_div: bool = false,
 
     const trips = 3;
 
@@ -856,7 +858,11 @@ const RandGen = struct {
         switch (if (n >= 12 and r.targets.len == 0) 2 else n) {
             0 => try r.emit(b, .{ .@"const" = .{ .dst = try r.dst(.i64), .imm = if (r.rng.boolean()) imms[r.rng.uintLessThan(usize, imms.len)] else r.rng.intRangeAtMost(i64, -9, 9) } }),
             1 => try r.emit(b, .{ .copy = .{ .dst = try r.dst(.i64), .src = r.pick(.i64) } }),
-            2, 3 => try r.emit(b, .{ .arith = .{ .op = r.rng.enumValue(ir.Arith), .dst = try r.dst(.i64), .a = r.pick(.i64), .b = r.pick(.i64) } }),
+            2, 3 => {
+                var aop = r.rng.enumValue(ir.Arith);
+                if (r.no_div and (aop == .sdiv or aop == .srem)) aop = .sub;
+                try r.emit(b, .{ .arith = .{ .op = aop, .dst = try r.dst(.i64), .a = r.pick(.i64), .b = r.pick(.i64) } });
+            },
             4 => {
                 const ty: ir.Type = if (r.rng.boolean()) .i64 else .f64;
                 const q = try r.address(b);
@@ -879,7 +885,8 @@ const RandGen = struct {
             else => {
                 const k = r.rng.uintLessThan(usize, r.targets.len);
                 // Mostly the right arity; sometimes not (must stay a call).
-                const na = if (r.rng.uintLessThan(u8, 8) == 0) r.rng.uintLessThan(u32, 4) else r.arity[k];
+                const na0 = if (r.rng.uintLessThan(u8, 8) == 0) r.rng.uintLessThan(u32, 4) else r.arity[k];
+                const na = if (r.exact_arity) r.arity[k] else na0;
                 const a = try r.f.alloc().alloc(ir.VReg, na);
                 for (a) |*x| x.* = r.pick(.i64);
                 try r.emit(b, .{ .call = .{ .dst = try r.dst(.i64), .addr = r.targets[k], .args = a } });
@@ -901,9 +908,12 @@ const RandGen = struct {
     }
 
     fn gen(rng: std.Random, params: u32, targets: []const usize, arity: []const u32, call_weight: u8) !ir.Func {
+        return genX(rng, params, targets, arity, call_weight, false);
+    }
+    fn genX(rng: std.Random, params: u32, targets: []const usize, arity: []const u32, call_weight: u8, native: bool) !ir.Func {
         var f = ir.Func.init(t.allocator);
         errdefer f.deinit();
-        var r: RandGen = .{ .rng = rng, .f = &f, .targets = targets, .arity = arity, .call_weight = call_weight };
+        var r: RandGen = .{ .rng = rng, .f = &f, .targets = targets, .arity = arity, .call_weight = call_weight, .exact_arity = native, .no_div = native };
         defer r.deinit();
         for (0..params) |_| _ = try r.fresh(.i64);
         f.params = params;
@@ -1031,4 +1041,364 @@ test "inline: random callees and callers agree with the interpreter" {
         }
     }
     try t.expect(inlined > 300);
+}
+
+// ---- review tests (rev-engine) ----------------------------------------------------------
+const engine_mod = @import("../engine.zig");
+
+test "rev: engine random callers/callees agree with the interpreter across tier-up" {
+    if (!engine_mod.supported) return error.SkipZigTest;
+    defer Bound.reset();
+    const oracle_targets = Bound.addrs();
+    const seeds = 300;
+    var mismatches: u32 = 0;
+    var tier_ups: u32 = 0;
+    var inl: u32 = 0;
+    for (0..seeds) |seed| {
+        const hot: u32 = @intCast(seed % 4);
+        const e = try engine_mod.Engine.create(t.allocator, .{ .hot_calls = hot, .opt = .{ .level = .o2, .vector = opt.VectorTarget.host, .verify_each = true } });
+        defer e.destroy();
+        var ids: [Bound.n + 1]engine_mod.FuncId = undefined;
+        var eaddr: [Bound.n]usize = undefined;
+        for (&ids) |*id| id.* = try e.reserve();
+        for (0..Bound.n) |k| eaddr[k] = e.address(ids[k]);
+        var oracle: [Bound.n]ir.Func = undefined;
+        var eng: [Bound.n]ir.Func = undefined;
+        var arity: [Bound.n]u32 = undefined;
+        var made: usize = 0;
+        defer for (oracle[0..made], eng[0..made]) |*a, *b| {
+            a.deinit();
+            b.deinit();
+        };
+        for (0..Bound.n) |k| {
+            var p1 = std.Random.DefaultPrng.init(seed * 1000 + k);
+            const params = p1.random().uintLessThan(u32, 4);
+            var pa = std.Random.DefaultPrng.init(seed * 1000 + k + 500);
+            var pb = std.Random.DefaultPrng.init(seed * 1000 + k + 500);
+            oracle[k] = try RandGen.genX(pa.random(), params, oracle_targets[0..k], arity[0..k], 2, true);
+            eng[k] = RandGen.genX(pb.random(), params, eaddr[0..k], arity[0..k], 2, true) catch |err| {
+                oracle[k].deinit();
+                return err;
+            };
+            made += 1;
+            arity[k] = params;
+            Bound.funcs[k] = &oracle[k];
+            try e.define(ids[k], &eng[k]);
+        }
+        var pa = std.Random.DefaultPrng.init(seed * 7919 + 13);
+        var pb = std.Random.DefaultPrng.init(seed * 7919 + 13);
+        var want = try RandGen.genX(pa.random(), 2, &oracle_targets, &arity, 8, true);
+        defer want.deinit();
+        var ef = try RandGen.genX(pb.random(), 2, &eaddr, &arity, 8, true);
+        defer ef.deinit();
+        try e.define(ids[Bound.n], &ef);
+        const call = e.ptr(ids[Bound.n], *const fn (i64, i64) callconv(.c) i64);
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rng = prng.random();
+        for (0..8) |_| {
+            for (&mem) |*x| x.* = if (rng.boolean()) rng.int(u64) else rng.uintLessThan(u64, 16);
+            const a = [2]i64{ rng.intRangeAtMost(i64, -3, 12), rng.int(i64) };
+            const init = mem;
+            const r = try ir.interpret(&want, &a, 1 << 22);
+            const after = mem;
+            mem = init;
+            const g = call(a[0], a[1]);
+            if (r != g or !std.mem.eql(u64, &after, &mem)) {
+                mismatches += 1;
+                if (mismatches < 4) std.debug.print("seed {d} args {any}: want {d} got {d} mem_eq {}\n", .{ seed, a, r, g, std.mem.eql(u64, &after, &mem) });
+            }
+        }
+        _ = e.poll();
+        const s = e.stats();
+        tier_ups += s.tier_ups;
+        inl += s.inlined_calls;
+        if (s.failed != 0) std.debug.print("seed {d}: failed tier-up {?}\n", .{ seed, s.last_error });
+    }
+    std.debug.print("tier_ups {d} inlined {d}\n", .{ tier_ups, inl });
+    try t.expectEqual(@as(u32, 0), mismatches);
+}
+
+fn engineCheck(e: *engine_mod.Engine, caller_id: engine_mod.FuncId, want: *const ir.Func, args_list: []const i64, rounds: usize) !void {
+    const call = e.ptr(caller_id, *const fn (i64) callconv(.c) i64);
+    for (0..rounds) |_| for (args_list) |n| {
+        const w = try ir.interpret(want, &.{n}, 1 << 22);
+        const g = call(n);
+        if (w != g) {
+            std.debug.print("n={d}: want {d} got {d} tier {s}\n", .{ n, w, g, @tagName(e.tier(caller_id)) });
+            return error.TestUnexpectedResult;
+        }
+    };
+}
+
+test "rev: engine inlines callees with typed undefined reads (vector, f32) and entry params in loops" {
+    if (!engine_mod.supported) return error.SkipZigTest;
+    defer Bound.reset();
+    const srcs = [_][]const u8{
+        // vector accumulators read before written (0 in every real call)
+        \\func vrbw 1
+        \\e:
+        \\  v9 = splat.v2i64 v0
+        \\  v8 = add.v2i64 v8 v9
+        \\  v10 = extract.v2i64 v8 1
+        \\  v3 = splat.v4f32 v4
+        \\  v5 = add.v4f32 v5 v3
+        \\  v6 = extract.v4f32 v5 2
+        \\  v4 = fconst.f32 2.5
+        \\  v7 = cvt.i64.f32 v6
+        \\  v11 = add v10 v7
+        \\  v12 = splat.v4i32 v0
+        \\  v13 = add.v4i32 v13 v12
+        \\  v14 = extract.v4i32 v13 3
+        \\  v11 = add v11 v14
+        \\  v15 = add.v2f64 v15 v15
+        \\  v16 = extract.v2f64 v15 0
+        \\  v17 = cvt.i64.f64 v16
+        \\  v11 = add v11 v17
+        \\  ret v11
+        ,
+        // entry block is a loop header with params
+        \\func cnt 1
+        \\top(v1 v2):
+        \\  v3 = const 1
+        \\  v4 = add v2 v3
+        \\  v5 = add v1 v0
+        \\  cbr lt v4 v0 top:v5:v4 out:v5
+        \\out(v6):
+        \\  ret v6
+        ,
+    };
+    for (srcs) |src| {
+        for ([_]u32{ 0, 1, 3 }) |hot| {
+            var g = try ir.parse(t.allocator, src);
+            defer g.deinit();
+            Bound.funcs[0] = &g;
+            const e = try engine_mod.Engine.create(t.allocator, .{ .hot_calls = hot, .opt = .{ .level = .o2, .vector = opt.VectorTarget.host, .verify_each = true } });
+            defer e.destroy();
+            const callee = try e.add(&g);
+            var want = try parseFmt(loop_caller, .{Bound.addr(0)});
+            defer want.deinit();
+            var ef = try parseFmt(loop_caller, .{e.address(callee)});
+            defer ef.deinit();
+            const id = try e.add(&ef);
+            try engineCheck(e, id, &want, &.{ 0, 1, 2, 5, 9 }, 4);
+            try t.expectEqual(engine_mod.Tier.optimized, e.tier(id));
+            try t.expect(e.stats().inlined_calls >= 1);
+            try t.expectEqual(@as(u32, 0), e.stats().failed);
+        }
+    }
+}
+
+test "rev: engine mutual recursion through reserve/define" {
+    if (!engine_mod.supported) return error.SkipZigTest;
+    for ([_]u32{ 0, 1, 2, 7 }) |hot| {
+        const e = try engine_mod.Engine.create(t.allocator, .{ .hot_calls = hot, .opt = .{ .level = .o2, .vector = opt.VectorTarget.host, .verify_each = true } });
+        defer e.destroy();
+        const even = try e.reserve();
+        const odd = try e.reserve();
+        // even(n) = n <= 0 ? 1 : odd(n-1); odd(n) = n <= 0 ? 0 : even(n-1) (+ a loop for weight)
+        var fe = try parseFmt(
+            \\func even 1
+            \\e:
+            \\  v1 = const 0
+            \\  cbr le v0 v1 base rec
+            \\base:
+            \\  v2 = const 1
+            \\  ret v2
+            \\rec:
+            \\  v3 = const 1
+            \\  v4 = sub v0 v3
+            \\  v5 = call {d} v4
+            \\  v6 = mul v5 v7
+            \\  v7 = const 3
+            \\  v6 = add v6 v5
+            \\  ret v6
+        , .{e.address(odd)});
+        defer fe.deinit();
+        var fo = try parseFmt(
+            \\func odd 1
+            \\e:
+            \\  v1 = const 0
+            \\  cbr le v0 v1 base rec
+            \\base:
+            \\  ret v1
+            \\rec:
+            \\  v3 = const 1
+            \\  v4 = sub v0 v3
+            \\  v5 = call {d} v4
+            \\  v5 = add v5 v9
+            \\  v9 = const 5
+            \\  ret v5
+        , .{e.address(even)});
+        defer fo.deinit();
+        try e.define(even, &fe);
+        try e.define(odd, &fo);
+        const ce = e.ptr(even, *const fn (i64) callconv(.c) i64);
+        for (0..3) |_| for (0..30) |n| {
+            const w = try ir.interpret(&fe, &.{@intCast(n)}, 1 << 22);
+            try t.expectEqual(w, ce(@intCast(n)));
+        };
+        try t.expectEqual(@as(u32, 0), e.stats().failed);
+    }
+}
+
+test "rev: engine survives allocation failure at every point" {
+    if (!engine_mod.supported) return error.SkipZigTest;
+    var sq = try ir.parse(t.allocator,
+        \\func sq 1
+        \\e:
+        \\  v1 = mul v0 v0
+        \\  ret v1
+    );
+    defer sq.deinit();
+    var idx: usize = 0;
+    var completed = false;
+    // Every 7th allocation keeps the default test run short; set the stride to 1 to fail
+    // every allocation.
+    const stride = 7;
+    while (!completed) : (idx += stride) {
+        for ([_]u32{ 0, 2 }) |hot| {
+            var fa = std.testing.FailingAllocator.init(t.allocator, .{ .fail_index = idx });
+            const e = engine_mod.Engine.create(fa.allocator(), .{ .hot_calls = hot, .opt = .{ .level = .o2, .vector = opt.VectorTarget.host, .verify_each = true } }) catch continue;
+            defer e.destroy();
+            const callee = e.add(&sq) catch continue;
+            var caller = try parseFmt(loop_caller, .{e.address(callee)});
+            defer caller.deinit();
+            const id = e.add(&caller) catch continue;
+            const call = e.ptr(id, *const fn (i64) callconv(.c) i64);
+            for (0..5) |_| {
+                const want = try ir.interpret(&caller, &.{6}, 1 << 20);
+                try t.expectEqual(want, call(6));
+            }
+            e.tierUp(id) catch {};
+            e.tierUp(callee) catch {};
+            _ = e.poll();
+            try t.expectEqual(try ir.interpret(&caller, &.{7}, 1 << 20), call(7));
+            if (hot == 2 and !fa.has_induced_failure) completed = true;
+        }
+    }
+    std.debug.print("alloc-failure iterations {d}\n", .{idx});
+}
+
+test "rev: engine native profile counts with cbra edges (both directions)" {
+    if (!engine_mod.supported) return error.SkipZigTest;
+    var f = try ir.parse(t.allocator,
+        \\func tri 2
+        \\e:
+        \\  v2 = const 0
+        \\  br h v2 v0
+        \\h(v3 v4):
+        \\  cbr gt v4 v2 body:v3:v4 out:v3
+        \\body(v5 v6):
+        \\  v7 = add v5 v6
+        \\  v8 = const 1
+        \\  v9 = sub v6 v8
+        \\  cbr lt v1 v2 neg pos
+        \\neg:
+        \\  v7 = sub v7 v1
+        \\  br h v7 v9
+        \\pos:
+        \\  br h v7 v9
+        \\out(v10):
+        \\  ret v10
+    );
+    defer f.deinit();
+    const e = try engine_mod.Engine.create(t.allocator, .{ .hot_calls = 1000, .auto_tier_up = false });
+    defer e.destroy();
+    const id = try e.add(&f);
+    const call = e.ptr(id, *const fn (i64, i64) callconv(.c) i64);
+    try t.expectEqual(@as(i64, 15), call(5, 1));
+    try t.expectEqual(@as(i64, 6 + 3 * 2), call(3, -2));
+    try t.expectEqual(@as(i64, 0), call(-4, 0));
+    const p = e.profile(id);
+    try t.expectEqualSlices(u64, &.{ 3, 11, 8, 3, 5, 3 }, p.blocks);
+    try t.expectEqualSlices(u64, &.{ 0, 8, 3, 0, 0, 0 }, p.taken);
+    try e.tierUp(id);
+    try t.expectEqual(@as(i64, 15), call(5, 1));
+    try t.expectEqual(@as(i64, 6 + 3 * 2), call(3, -2));
+}
+
+test "rev: engine hook fires once per function with many threads" {
+    if (!engine_mod.supported or @import("builtin").single_threaded) return error.SkipZigTest;
+    var f = try ir.parse(t.allocator, ir.fib_src);
+    defer f.deinit();
+    for (0..20) |_| {
+        const e = try engine_mod.Engine.create(t.allocator, .{ .hot_calls = 50 });
+        defer e.destroy();
+        var ids: [8]engine_mod.FuncId = undefined;
+        for (&ids) |*id| id.* = try e.add(&f);
+        const W = struct {
+            fn run(eng: *engine_mod.Engine, list: []const engine_mod.FuncId, src: *const ir.Func, bad: *std.atomic.Value(u32)) void {
+                for (0..400) |k| {
+                    const id = list[k % list.len];
+                    const n: i64 = @intCast(k % 40);
+                    const want = ir.interpret(src, &.{n}, 1 << 20) catch unreachable;
+                    if (eng.ptr(id, *const fn (i64) callconv(.c) i64)(n) != want) _ = bad.fetchAdd(1, .monotonic);
+                    if (k % 50 == 0) {
+                        const nid = eng.add(src) catch continue;
+                        _ = eng.ptr(nid, *const fn (i64) callconv(.c) i64)(n);
+                    }
+                }
+            }
+        };
+        var bad: std.atomic.Value(u32) = .init(0);
+        var th: [6]std.Thread = undefined;
+        for (&th) |*x| x.* = try std.Thread.spawn(.{}, W.run, .{ e, &ids, &f, &bad });
+        for (th) |x| x.join();
+        _ = e.poll();
+        try t.expectEqual(@as(u32, 0), bad.load(.monotonic));
+        for (ids) |id| try t.expectEqual(engine_mod.Tier.optimized, e.tier(id));
+        try t.expectEqual(@as(u32, 0), e.stats().failed);
+    }
+}
+
+test "rev: callee without a reachable ret, callee entry loops, calls in callee's own loop" {
+    defer Bound.reset();
+    var spin = try ir.parse(t.allocator,
+        \\func spin 1
+        \\e:
+        \\  v1 = const 1
+        \\  br l
+        \\l:
+        \\  v0 = add v0 v1
+        \\  br l
+    );
+    defer spin.deinit();
+    var h = try ir.parse(t.allocator,
+        \\func h 1
+        \\e:
+        \\  v1 = add v0 v0
+        \\  v2 = add v1 v9
+        \\  v9 = const 5
+        \\  ret v2
+    );
+    defer h.deinit();
+    Bound.funcs[0] = &spin;
+    Bound.funcs[1] = &h;
+    // the callee loops calling h (inlined at depth 2) and accumulating
+    var g = try parseFmt(loop_caller, .{Bound.addr(1)});
+    defer g.deinit();
+    Bound.funcs[2] = &g;
+    var want = try parseFmt(
+        \\func m 1
+        \\e:
+        \\  v1 = const 100
+        \\  cbr gt v0 v1 never ok
+        \\never:
+        \\  v2 = call {d} v0
+        \\  ret v2
+        \\ok:
+        \\  v3 = call {d} v0
+        \\  v4 = call {d} v3
+        \\  v5 = call {d} v0
+        \\  v4 = add v4 v5
+        \\  ret v4
+    , .{ Bound.addr(0), Bound.addr(2), Bound.addr(1), Bound.addr(2) });
+    defer want.deinit();
+    for ([_]opt.Level{ .o1, .o2 }) |lvl| for ([_]bool{ false, true }) |vec| {
+        var got = try profile.clone(t.allocator, &want);
+        defer got.deinit();
+        const st = try opt.optimize(t.allocator, &got, .{ .level = lvl, .resolver = .{ .lookup = Bound.lookup }, .vector = if (vec) opt.VectorTarget.host else .none, .verify_each = true });
+        _ = st;
+        for ([_]i64{ -3, 0, 1, 7, 20, 100 }) |n| try expectSame(&want, &got, &.{n});
+    };
 }

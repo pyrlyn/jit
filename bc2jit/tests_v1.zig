@@ -434,3 +434,43 @@ test "v1 decoder: no leak on any allocation failure" {
         }
     }.f, .{bytes});
 }
+
+test "rev: -O1/-O2 compile for every target and the optimized IR matches the interpreter" {
+    var prng = std.Random.DefaultPrng.init(0xBEEF_0042);
+    const rng = prng.random();
+    var fails: u32 = 0;
+    for (0..600) |_| {
+        var p: Prog = .{};
+        defer p.deinit();
+        try genProgram(rng, &p);
+        const m = try p.module(4);
+        defer t.allocator.free(m);
+        const f = try decodeOk(m);
+        defer f.deinit(t.allocator);
+        for ([_]jit.opt.Level{ .o1, .o2 }) |level| {
+            for ([_]Target{ .x86_64, .aarch64, .riscv64 }) |tg| {
+                if (!tg.isBuilt()) continue;
+                var cb = jit.CodeBuffer.init(t.allocator);
+                defer cb.deinit();
+                lower_ir.lowerIrOpt(t.allocator, tg, f, &cb, level) catch |e| {
+                    fails += 1;
+                    if (fails < 5) std.debug.print("{s} {s}: {s}\n", .{ @tagName(tg), @tagName(level), @errorName(e) });
+                };
+            }
+            var g = try lower_ir.toIr(t.allocator, f);
+            defer g.deinit();
+            _ = try jit.opt.optimize(t.allocator, &g, .{ .level = level, .vector = jit.opt.VectorTarget.aarch64, .verify_each = true });
+            for (0..3) |_| {
+                var a: [4]i64 = undefined;
+                for (&a) |*v| v.* = if (rng.boolean()) rng.intRangeAtMost(i64, -64, 64) else @bitCast(rng.int(u64));
+                const want = try bc.eval(f, a, 1 << 24);
+                const got = try jit.ir.interpret(&g, a[0..f.arg_count], 1 << 24);
+                if (want != got) {
+                    fails += 1;
+                    if (fails < 5) std.debug.print("interp mismatch {s}: want {d} got {d}\n", .{ @tagName(level), want, got });
+                }
+            }
+        }
+    }
+    try t.expectEqual(@as(u32, 0), fails);
+}
