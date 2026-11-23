@@ -2,6 +2,9 @@
 //! Each target is a separate module compiled in only if enabled via `-Dtargets=`.
 const opts = @import("pyrlyn_jit_options");
 
+/// C ABI implementation, instantiated by the library export root.
+pub const c_api = @import("c_api.zig");
+
 pub const CodeBuffer = @import("core/code_buffer.zig").CodeBuffer;
 pub const Label = @import("core/code_buffer.zig").Label;
 pub const Arch = @import("core/arch.zig").Arch;
@@ -12,8 +15,16 @@ pub const safety = @import("core/safety.zig");
 pub const build_options = opts;
 /// Arch-agnostic linear-scan register allocator (vregs -> physical registers / spill slots).
 pub const regalloc = @import("core/regalloc.zig");
+/// GP/FP register classes for the compilers (separate allocation runs per class).
+pub const reg_classes = @import("core/reg_classes.zig");
 /// Compiler IR: text parser, verifier, printer, reference interpreter.
 pub const ir = @import("core/ir.zig");
+/// IR optimizer: SSA scalar passes, runtime inlining, profiling, loop vectorization.
+pub const opt = @import("core/opt/opt.zig");
+/// Tiered JIT engine: stable entry points, profiled tier-0 code, tier-up with runtime inlining.
+pub const engine = @import("core/engine.zig");
+/// Optional LLVM C API backend for integer IR (JIT and LLVM Interpreter).
+pub const llvm = @import("core/llvm.zig");
 pub const JitRuntime = @import("core/jit_runtime.zig");
 /// Shared executable memory: one mapping, functions appended (AsmJit JitAllocator-like).
 pub const JitPool = @import("core/jit_pool.zig");
@@ -50,7 +61,14 @@ test {
     _ = @import("core/regalloc.zig");
     _ = @import("core/jit_pool.zig");
     _ = @import("core/lower_plan.zig");
+    _ = @import("core/reg_classes.zig");
+    _ = @import("fp_tests.zig");
     _ = @import("core/ir.zig");
+    _ = @import("core/opt/opt.zig");
+    _ = @import("opt_tests.zig");
+    _ = @import("core/engine.zig");
+    if (opts.aarch64) _ = @import("a64_codegen_tests.zig");
+    if (opts.x86_64) _ = @import("x64_codegen_tests.zig");
     _ = @import("tests.zig");
     _ = @import("enc_tests.zig");
     _ = @import("gp_tests.zig");

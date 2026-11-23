@@ -15,6 +15,13 @@ struct Error : std::runtime_error {
     Error(int s, const char *what) : std::runtime_error(std::string(what) + ": " + pjit_status_str(s)), status(s) {}
 };
 
+/// Throws unless the loaded library provides this header's ABI (call once at startup).
+inline void checkAbi() {
+    if (!PJIT_ABI_COMPATIBLE(pjit_version())) throw std::runtime_error("pyrlyn_jit: library ABI older than header");
+}
+
+inline int64_t evalIr(const std::string &src, std::initializer_list<int64_t> args, uint64_t maxSteps = 0);
+
 inline void check(int s, const char *what) {
     if (s != PJIT_OK) throw Error(s, what);
 }
@@ -39,6 +46,11 @@ public:
     void a64Branch(int cond, uint32_t l) { check(pjit_a64_branch(b_, cond, l), "pjit_a64_branch"); }
     void x64(const char *mn, std::initializer_list<pjit_x64_op> ops) { check(pjit_x64_emit(b_, mn, ops.begin(), ops.size()), mn); }
     void x64Jump(int cc, uint32_t l) { check(pjit_x64_jump(b_, cc, l), "pjit_x64_jump"); }
+    /// IR text -> machine code for `arch` (PJIT_ARCH_*); the buffer is reset first and finalized.
+    void compileIr(const std::string &src, int arch = PJIT_ARCH_HOST) {
+        reset();
+        check(pjit_ir_compile(b_, src.data(), src.size(), arch), "pjit_ir_compile");
+    }
 
     std::vector<uint8_t> code() const {
         size_t n = 0;
@@ -63,5 +75,11 @@ public:
 private:
     pjit_func *f_ = nullptr;
 };
+
+inline int64_t evalIr(const std::string &src, std::initializer_list<int64_t> args, uint64_t maxSteps) {
+    int64_t r = 0;
+    check(pjit_ir_eval(src.data(), src.size(), args.begin(), args.size(), maxSteps, &r), "pjit_ir_eval");
+    return r;
+}
 
 } // namespace pyrlyn_jit

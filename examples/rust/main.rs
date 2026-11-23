@@ -29,6 +29,9 @@ extern "C" {
     fn pjit_jit_add(b: *const Buffer, out: *mut *mut Func) -> c_int;
     fn pjit_func_ptr(f: *const Func) -> *const c_void;
     fn pjit_func_free(f: *mut Func);
+    fn pjit_buffer_reset(b: *mut Buffer);
+    fn pjit_ir_compile(b: *mut Buffer, src: *const c_char, len: usize, arch: c_int) -> c_int;
+    fn pjit_ir_eval(src: *const c_char, len: usize, args: *const i64, nargs: usize, max_steps: u64, out: *mut i64) -> c_int;
 }
 
 /// Owned code buffer (freed on drop).
@@ -77,7 +80,19 @@ fn run() -> Result<i64, String> {
         let func: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(pjit_func_ptr(f));
         let r = func(40, 2);
         pjit_func_free(f);
-        Ok(r)
+        if r != 42 { return Ok(r); }
+        // IR compiler (PJIT_ARCH_HOST = 0), checked against the interpreter.
+        let ir = "func sub 2\ne:\n  v2 = sub v0 v1\n  ret v2\n";
+        pjit_buffer_reset(b.0);
+        ok(pjit_ir_compile(b.0, ir.as_ptr().cast(), ir.len(), 0))?;
+        ok(pjit_jit_add(b.0, &mut f))?;
+        let sub: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(pjit_func_ptr(f));
+        let s = sub(50, 8);
+        pjit_func_free(f);
+        let mut want = 0i64;
+        ok(pjit_ir_eval(ir.as_ptr().cast(), ir.len(), [50i64, 8].as_ptr(), 2, 0, &mut want))?;
+        println!("pyrlyn_jit (Rust): IR sub(50, 8) = {s}");
+        Ok(if s == want { s } else { -1 })
     }
 }
 

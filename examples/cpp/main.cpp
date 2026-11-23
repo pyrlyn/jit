@@ -1,5 +1,6 @@
 // pyrlyn-jit C++ example (RAII wrapper include/pyrlyn_jit.hpp).
 #include <cstdio>
+#include <cinttypes>
 #include <pyrlyn_jit.hpp>
 
 int main() {
@@ -37,7 +38,16 @@ int main() {
         pyrlyn_jit::Function f(b);
         long r = f.as<long (*)(long, long)>()(40, 2);
         std::printf("pyrlyn_jit (C++): add(40, 2) = %ld\n", r);
-        return r == 42 ? 0 : 1;
+        if (r != 42) return 1;
+
+        // IR compiler: the same function from IR text, checked against the interpreter.
+        pyrlyn_jit::checkAbi();
+        const std::string ir = "func mul_add 3\ne:\n  v3 = mul v0 v1\n  v4 = add v3 v2\n  ret v4\n";
+        b.compileIr(ir);
+        pyrlyn_jit::Function g(b);
+        int64_t m = g.as<int64_t (*)(int64_t, int64_t, int64_t)>()(6, 7, 0);
+        std::printf("pyrlyn_jit (C++): IR mul_add(6, 7, 0) = %" PRId64 "\n", m);
+        return m == 42 && pyrlyn_jit::evalIr(ir, {6, 7, 0}) == 42 ? 0 : 1;
     } catch (const pyrlyn_jit::Error &e) {
         std::fprintf(stderr, "%s\n", e.what());
         return 1;

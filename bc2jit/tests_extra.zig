@@ -51,6 +51,7 @@ fn interpret(f: bc.Function, args: [4]i64) i64 {
         },
         .drop => d -= 1,
         .ret => return st[d - 1],
+        else => unreachable, // v1 opcodes (covered by tests_v1.zig)
     };
     unreachable;
 }
@@ -184,7 +185,7 @@ fn randomProgram(r: std.Random, buf: []bc.Inst, argc: u8) []bc.Inst {
             .mul => .mul,
             .dup => .dup,
             .drop => .drop,
-            .ret => unreachable,
+            else => unreachable,
         };
         buf[n] = inst;
         n += 1;
@@ -287,7 +288,7 @@ test "decoder: every bad magic byte, version and arg count" {
         bytes[k] ^= 0x20; // e.g. lowercase
         try expectErr(error.BadMagic, 0, &bytes);
     }
-    for (1..256) |v| {
+    for (bc.max_version + 1..256) |v| {
         var bytes = "KXBC\x00\x00\x01\x00\xF0".*;
         bytes[4] = @intCast(v);
         try expectErr(error.UnsupportedVersion, 4, &bytes);
@@ -481,8 +482,15 @@ test "fuzz: mutated modules never crash; accepted ones re-encode byte-identicall
         const again = try bc.encode(t.allocator, f);
         defer t.allocator.free(again);
         try t.expectEqualSlices(u8, bytes[0..cut], again);
-        // Anything the decoder accepts must lower on every built target.
-        _ = try checkAllTargets(f, .{ 1, -2, 3, -4 });
+        // Anything the decoder accepts must lower on every built target (v1: through the IR
+        // compilers; not executed, a mutated v1 module may loop forever).
+        if (f.version == bc.version) {
+            _ = try checkAllTargets(f, .{ 1, -2, 3, -4 });
+        } else inline for (std.meta.tags(Target)) |tg| if (tg.isBuilt()) {
+            var cb = jit.CodeBuffer.init(t.allocator);
+            defer cb.deinit();
+            try @import("lower_ir.zig").lowerIr(t.allocator, tg, f, &cb);
+        };
     }
     try t.expect(accepted > 0);
 }

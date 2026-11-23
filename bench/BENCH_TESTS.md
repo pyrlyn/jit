@@ -26,15 +26,23 @@ compared against AsmJit), plus the AArch64 / JitRuntime paths shown in `examples
 | `x86_64_avx` | AVX/AVX2/FMA through the table-driven VEX encoder (1537 instrs) |
 | `x86_64_avx512` | EVEX: opmask/zeroing, broadcast, {er}, compare into k, masked store (1537 instrs) |
 | `aarch64_emit` | 256 copies of the sum loop (movz, labels, cbz, ldr, add/sub imm, b, movImm) + finalize |
-| `jit_runtime_add_release` | `JitRuntime.add` (mmap + copy + protect) and `release` of a finalized 16-loop buffer |
+| `jit_runtime_add_release` | `JitRuntime.add` (cached mapping or mmap + copy/protect/flush) and `release` of a finalized 16-loop buffer |
 | `e2e_aarch64_compile_run` | emit sum loop, finalize, `JitRuntime.add`, call it on 64 i64s, check result, release (native arm64 only) |
+| `bc2jit_decode_small` | KXBC decode + validate of a ~100-byte module (4 all-opcode units), free |
+| `bc2jit_decode_64k` | KXBC decode + validate of a 65 523-byte module (2730 all-opcode units, max u16 code length) |
+| `bc2jit_lower_x86_64` | opcode -> x86-64 assembler translation of the 64 KiB module + finalize |
+| `bc2jit_lower_aarch64` | same, AArch64 backend |
+| `bc2jit_lower_riscv64` | same, RISC-V (RV64) backend |
+| `bc2jit_stack_all_opcodes` | stack model: lower a 64-unit program that uses every opcode and walks depth 1..5 each unit, host backend |
+| `bc2jit_e2e_aarch64` | decode + lower + `JitRuntime.add` + call + check vs reference interpreter + release (native arm64 only, 15%) |
 
 The x86-64 scenarios are imported from `bench_x86_64.zig` (`Scenarios` is now `pub`), so the code
 being timed is the same code the AsmJit golden-file tests check byte for byte.
 
-Not covered, because it isn't on `main` yet: bytecode-to-JIT (`bc2jit`, draft PR #63). Its
-decode / IR / passes cases should be added to this file when that PR lands. IR / builder /
-register-allocator passes on `main` have no existing benchmark; add cases here when one is wanted.
+bc2jit cases (`bc2jit_*`) import `bc2jit/lib.zig` as module `bc2jit`. The "all-opcode unit" is
+`push_arg×3, dup, drop, mul, sub, push_i64, dup, mul, add, add` (24 bytes, every opcode, stack depth
+1 -> 5 -> 1). IR Compiler time and peak heap are covered separately by `zig build bench-compile`
+(see below); they are not part of the emitter regression baseline.
 
 ## Measurement and thresholds
 
@@ -59,3 +67,34 @@ When a change makes a case notably faster (more than ~5% below baseline, the tes
 `<-- IMPROVED`), run `zig build bench-update` and commit the new baseline in the same PR.
 Stale, loose baselines would let later regressions through. Never loosen a baseline or tolerance
 just to make a regressed case pass.
+
+## IR Compiler time and memory
+
+`zig build bench-compile` measures AArch64, x86-64 and RV64 compilation for four
+function sizes. `PJIT_BENCH_MS` sets the time budget per case; `PJIT_BENCH_ONLY`
+selects one case, such as `x86_64/huge`. `PJIT_BENCH_SEED` changes the generated
+workload. `PJIT_BENCH_CHECKSUM=1` uses a deterministic call address and prints a
+machine-code checksum outside the timed region.
+
+For a before/after comparison, build the same harness against both library revisions
+and run `python3 scripts/compare_compile_bench.py BEFORE AFTER --repeats 5 --ms 400`.
+The script alternates execution order, checks code equivalence and reports per-case
+and geometric-mean changes. See [COMPILE_PERFORMANCE.md](COMPILE_PERFORMANCE.md)
+for the measured results, metric boundaries and full build commands.
+
+## Bytecode API comparison
+
+`python3 scripts/bench_bc2jit_api.py` builds ReleaseFast libraries and a static C consumer
+with bytecode support on and off, alternates seven runs, and compares compile/JIT/call time
+and artifact sizes. It also compares assembler emission with KXBC v0/v1 for the same `add`
+function. Raw samples are saved under `zig-out/bc2jit-compare/`; no regression baseline is
+rewritten. See [recorded results](BC2JIT_API_RESULTS.md).
+
+`zig build bench-test -Dbc2jit=false` skips bytecode cases and runs core JIT cases normally.
+
+The bytecode API comparison requires at least 2× full-cycle speedup in every paired run
+by default (`--min-speedup=2`). Both builds use the same bounded executable-page cache.
+The timed cycle includes fresh decode/emission, a call and ownership release. A separate
+`cold_jit` metric includes explicit cache trimming/OS unmapping; it has no 2× claim.
+The 2026-11-08 mapping-reuse baseline update tightens only `jit_runtime_add_release`,
+`e2e_aarch64_compile_run`, and `bc2jit_e2e_aarch64`, using the median of three run medians.

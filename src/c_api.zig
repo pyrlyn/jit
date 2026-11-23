@@ -1,5 +1,5 @@
 //! Stable C ABI (see include/pyrlyn_jit.h). Every entry point validates its arguments and returns a
-//! `pjit_status`; no Zig panics or UB are reachable through bad input from C.
+//! `pjit_status`. Pointers must be valid; interpreted/generated IR may access caller memory.
 const std = @import("std");
 const builtin = @import("builtin");
 const cbm = @import("core/code_buffer.zig");
@@ -8,8 +8,18 @@ const pool = @import("core/jit_pool.zig");
 const gp = @import("x86_64/gp.zig");
 const x86 = @import("x86_64/assembler.zig");
 const a64 = @import("aarch64/a64.zig");
+const ir = @import("core/ir.zig");
+const x64c = @import("x86_64/compiler.zig");
+const x86c = @import("x86/compiler.zig");
+const a64c = @import("aarch64/compiler.zig");
+const rvc = @import("riscv/compiler.zig");
+const opt = @import("core/opt/opt.zig");
 
-pub const version: u32 = 0x00_01_00; // 0.1.0, MAJOR<<16 | MINOR<<8 | PATCH
+pub const version_major: u32 = 0;
+pub const version_minor: u32 = 3;
+pub const version_patch: u32 = 0;
+/// MAJOR<<16 | MINOR<<8 | PATCH; must match PJIT_VERSION in include/pyrlyn_jit.h (checked by a test).
+pub const version: u32 = version_major << 16 | version_minor << 8 | version_patch;
 
 const Status = enum(c_int) {
     ok = 0,
@@ -26,12 +36,19 @@ const Status = enum(c_int) {
     map_failed,
     protect_failed,
     other,
+    // 0.2.0 (appended; existing values never change)
+    unsupported,
+    ir_parse,
+    ir_verify,
+    ir_type,
+    step_limit,
 };
 
 fn status(e: anyerror) c_int {
     const s: Status = switch (e) {
         error.OutOfMemory => .out_of_memory,
-        error.InvalidOperand, error.InvalidImmediate, error.OutOfBounds => .invalid_argument,
+        error.InvalidArgument, error.InvalidOperand, error.InvalidImmediate, error.OutOfBounds => .invalid_argument,
+        error.UnknownMnemonic => .unknown_mnemonic,
         error.NoMatchingForm => .no_matching_form,
         error.InvalidLabel, error.TooManyLabels => .invalid_label,
         error.LabelAlreadyBound => .label_already_bound,
@@ -41,14 +58,37 @@ fn status(e: anyerror) c_int {
         error.CodeTooLarge => .code_too_large,
         error.MapFailed => .map_failed,
         error.ProtectFailed => .protect_failed,
+        error.Unsupported, error.UnsupportedType, error.UnsupportedArch, error.TooManyParams, error.TooManySpills => .unsupported,
+        error.Syntax, error.UnknownLabel, error.DuplicateLabel, error.InvalidCharacter, error.Overflow => .ir_parse,
+        error.EmptyFunction, error.MissingTerminator, error.TerminatorNotLast, error.BadBlock, error.BadVReg, error.TooManyArgs, error.ArgCountMismatch, error.MultipleDefs => .ir_verify,
+        error.TypeMismatch => .ir_type,
+        error.StepLimit => .step_limit,
         else => .other,
     };
+    setLastError(@errorName(e));
     return @backingInt(s);
 }
 const OK: c_int = 0;
 const EINVAL: c_int = @backingInt(Status.invalid_argument);
 
 const gpa = std.heap.c_allocator;
+
+/// Detail of the last failing call on this thread (the Zig error name).
+/// Successful calls preserve it; `pjit_clear_error` resets it to "".
+threadlocal var last_error: [64:0]u8 = @splat(0);
+fn setLastError(name: []const u8) void {
+    const n = @min(name.len, last_error.len);
+    @memcpy(last_error[0..n], name[0..n]);
+    last_error[n] = 0;
+}
+
+export fn pjit_last_error() [*:0]const u8 {
+    return &last_error;
+}
+
+export fn pjit_clear_error() void {
+    last_error[0] = 0;
+}
 
 const Buffer = struct { cb: cbm.CodeBuffer };
 
@@ -73,13 +113,18 @@ export fn pjit_status_str(s: c_int) [*:0]const u8 {
         .map_failed => "mapping executable memory failed",
         .protect_failed => "changing memory protection failed",
         .other => "internal error",
+        .unsupported => "not supported by this target or build",
+        .ir_parse => "IR text does not parse",
+        .ir_verify => "IR function is malformed (verifier)",
+        .ir_type => "IR type error",
+        .step_limit => "IR interpreter step limit reached",
     };
 }
 
 // ---- buffer / labels ------------------------------------------------------------------------
 
 export fn pjit_buffer_new(out: ?*?*Buffer) c_int {
-    const o = out orelse return EINVAL;
+    const o = out orelse return status(error.InvalidArgument);
     const b = gpa.create(Buffer) catch return status(error.OutOfMemory);
     b.* = .{ .cb = cbm.CodeBuffer.init(gpa) };
     o.* = b;
@@ -103,29 +148,29 @@ export fn pjit_buffer_code(b: ?*const Buffer, len: ?*usize) ?[*]const u8 {
 }
 
 export fn pjit_buffer_emit_bytes(b: ?*Buffer, bytes: ?[*]const u8, n: usize) c_int {
-    const p = b orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
     if (n == 0) return OK;
-    const src = bytes orelse return EINVAL;
+    const src = bytes orelse return status(error.InvalidArgument);
     p.cb.emitBytes(src[0..n]) catch |e| return status(e);
     return OK;
 }
 
 export fn pjit_label_new(b: ?*Buffer, out: ?*u32) c_int {
-    const p = b orelse return EINVAL;
-    const o = out orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    const o = out orelse return status(error.InvalidArgument);
     const l = p.cb.newLabel() catch |e| return status(e);
     o.* = l.id;
     return OK;
 }
 
 export fn pjit_label_bind(b: ?*Buffer, label: u32) c_int {
-    const p = b orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
     p.cb.bind(.{ .id = label }) catch |e| return status(e);
     return OK;
 }
 
 export fn pjit_finalize(b: ?*Buffer) c_int {
-    const p = b orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
     p.cb.finalize() catch |e| return status(e);
     return OK;
 }
@@ -206,11 +251,11 @@ fn a64Op(o: A64Op) ?a64.Op {
 }
 
 export fn pjit_a64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const A64Op, n: usize) c_int {
-    const p = b orelse return EINVAL;
-    const mn = lookup(a64_map, mnemonic) orelse return @backingInt(Status.unknown_mnemonic);
-    if (n > 8 or (n > 0 and ops == null)) return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    const mn = lookup(a64_map, mnemonic) orelse return status(error.UnknownMnemonic);
+    if (n > 8 or (n > 0 and ops == null)) return status(error.InvalidArgument);
     var conv: [8]a64.Op = undefined;
-    for (0..n) |i| conv[i] = a64Op(ops.?[i]) orelse return EINVAL;
+    for (0..n) |i| conv[i] = a64Op(ops.?[i]) orelse return status(error.InvalidArgument);
     const word = a64.encodeMn(mn, conv[0..n]) orelse return status(error.NoMatchingForm);
     p.cb.ensure(4) catch |e| return status(e);
     p.cb.put32(word);
@@ -219,12 +264,13 @@ export fn pjit_a64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const A6
 
 /// `b label` (cond < 0) or `b.<cond> label` (cond 0..15).
 export fn pjit_a64_branch(b: ?*Buffer, cond: c_int, label: u32) c_int {
-    const p = b orelse return EINVAL;
-    if (cond > 15) return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    if (cond > 15) return status(error.InvalidArgument);
     const at = p.cb.offset();
     const word: u32 = if (cond < 0) 0x1400_0000 else 0x5400_0000 | @as(u32, @intCast(cond));
-    p.cb.addFixup(.{ .at = at, .base = at, .label = label, .kind = if (cond < 0) .a64_imm26 else .a64_imm19 }) catch |e| return status(e);
+    // Room first: a fixup without its instruction would fail every later `pjit_finalize`.
     p.cb.ensure(4) catch |e| return status(e);
+    p.cb.addFixup(.{ .at = at, .base = at, .label = label, .kind = if (cond < 0) .a64_imm26 else .a64_imm19 }) catch |e| return status(e);
     p.cb.put32(word);
     return OK;
 }
@@ -351,19 +397,19 @@ fn x64Op(o: X64Op) ?gp.Op {
 }
 
 export fn pjit_x64_emit(b: ?*Buffer, mnemonic: ?[*:0]const u8, ops: ?[*]const X64Op, n: usize) c_int {
-    const p = b orelse return EINVAL;
-    const forms = lookup(gp_map, mnemonic) orelse return @backingInt(Status.unknown_mnemonic);
-    if (n > 4 or (n > 0 and ops == null)) return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    const forms = lookup(gp_map, mnemonic) orelse return status(error.UnknownMnemonic);
+    if (n > 4 or (n > 0 and ops == null)) return status(error.InvalidArgument);
     var conv: [4]gp.Op = undefined;
-    for (0..n) |i| conv[i] = x64Op(ops.?[i]) orelse return EINVAL;
+    for (0..n) |i| conv[i] = x64Op(ops.?[i]) orelse return status(error.InvalidArgument);
     gp.emitOps(&p.cb, forms, conv[0..n]) catch |e| return status(e);
     return OK;
 }
 
 /// `jmp label` (cc < 0) or `j<cc> label` (cc 0..15, x86 condition code), rel32.
 export fn pjit_x64_jump(b: ?*Buffer, cc: c_int, label: u32) c_int {
-    const p = b orelse return EINVAL;
-    if (cc > 15) return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    if (cc > 15) return status(error.InvalidArgument);
     p.cb.ensure(6) catch |e| return status(e);
     const start = p.cb.offset();
     const len: u32 = if (cc < 0) 5 else 6;
@@ -376,14 +422,93 @@ export fn pjit_x64_jump(b: ?*Buffer, cc: c_int, label: u32) c_int {
     return OK;
 }
 
+// ---- IR compiler ----------------------------------------------------------------------------
+
+const Arch = enum(c_int) { host = 0, x86_64 = 1, aarch64 = 2, x86 = 3, riscv64 = 4 };
+
+fn hostArch() ?Arch {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => .x86_64,
+        .aarch64 => .aarch64,
+        .x86 => .x86,
+        .riscv64 => .riscv64,
+        else => null,
+    };
+}
+
+fn parseIr(src: ?[*]const u8, len: usize) !ir.Func {
+    const p = src orelse return error.InvalidOperand;
+    return ir.parse(gpa, p[0..len]);
+}
+
+/// Parses IR text (`docs/ROADMAP.md` §2, `src/core/ir.zig`) and compiles it for `arch`
+/// (`PJIT_ARCH_*`) into `b`, which must be empty or reset; the buffer is finalized.
+export fn pjit_ir_compile(b: ?*Buffer, src: ?[*]const u8, len: usize, arch: c_int) c_int {
+    return pjit_ir_compile_opt(b, src, len, arch, 0);
+}
+
+/// `pjit_ir_compile` after running the IR optimizer (`pyrlyn_jit.opt`) at `level` (0 none,
+/// 1 scalar SSA passes, 2 also loop optimizations and vectorization for the target's vector
+/// unit). `PJIT_ARCH_X86` computes in 32 bits, which the optimizer does not model: level 0 only.
+export fn pjit_ir_compile_opt(b: ?*Buffer, src: ?[*]const u8, len: usize, arch: c_int, level: c_int) c_int {
+    const p = b orelse return status(error.InvalidArgument);
+    const a0 = std.enums.fromInt(Arch, arch) orelse return status(error.InvalidArgument);
+    const a = if (a0 == .host) hostArch() orelse return status(error.UnsupportedArch) else a0;
+    const lvl: opt.Level = switch (level) {
+        0 => .o0,
+        1 => .o1,
+        2 => .o2,
+        else => return status(error.InvalidArgument),
+    };
+    if (lvl != .o0 and a == .x86) return status(error.Unsupported);
+    var f = parseIr(src, len) catch |e| return status(e);
+    defer f.deinit();
+    // What every compiler answers, before the optimizer allocates per parameter.
+    if (f.params > ir.max_args) return status(error.TooManyParams);
+    if (lvl != .o0) {
+        const vector: opt.VectorTarget = if (lvl != .o2) .none else switch (a) {
+            .x86_64 => .x86_64,
+            .aarch64 => .aarch64,
+            else => .none,
+        };
+        _ = opt.optimize(gpa, &f, .{ .level = lvl, .vector = vector, .verify_each = false }) catch |e| return status(e);
+    }
+    switch (a) {
+        .host => unreachable,
+        .x86_64 => _ = x64c.compile(gpa, &f, &p.cb, .{}) catch |e| return status(e),
+        .aarch64 => _ = a64c.compile(gpa, &f, &p.cb, .{}) catch |e| return status(e),
+        .x86 => _ = x86c.compile(gpa, &f, &p.cb, .{}) catch |e| return status(e),
+        .riscv64 => _ = rvc.compile(gpa, &f, &p.cb, .{}) catch |e| return status(e),
+    }
+    return OK;
+}
+
+/// Runs IR text in the reference interpreter (no code generation): `out = f(args...)`.
+export fn pjit_ir_eval(src: ?[*]const u8, len: usize, args: ?[*]const i64, nargs: usize, max_steps: u64, out: ?*i64) c_int {
+    const o = out orelse return status(error.InvalidArgument);
+    if (nargs > ir.max_args or (nargs > 0 and args == null)) return status(error.InvalidArgument);
+    const steps = if (max_steps == 0) 1 << 24 else std.math.cast(usize, max_steps) orelse return status(error.InvalidArgument);
+    var f = parseIr(src, len) catch |e| return status(e);
+    defer f.deinit();
+    f.verify() catch |e| return status(e);
+    if (nargs != f.params) return status(error.InvalidArgument);
+    const types = f.typeCheck(gpa) catch |e| return status(e);
+    defer gpa.free(types);
+    const a: []const i64 = if (nargs == 0) &.{} else args.?[0..nargs];
+    // Keep interpreter scratch on the same C allocator as parsing and type checking.
+    // Foreign-linked Windows executables need not provide Zig's native page allocator.
+    o.* = ir.interpretWithAllocator(gpa, &f, a, steps) catch |e| return status(e);
+    return OK;
+}
+
 // ---- executable memory ----------------------------------------------------------------------
 
 const Func = struct { f: rt.Function };
 
 /// Copies finalized code into W^X executable memory.
 export fn pjit_jit_add(b: ?*const Buffer, out: ?*?*Func) c_int {
-    const p = b orelse return EINVAL;
-    const o = out orelse return EINVAL;
+    const p = b orelse return status(error.InvalidArgument);
+    const o = out orelse return status(error.InvalidArgument);
     if (p.cb.fixups.items.len != 0) return status(error.UnboundLabel); // not finalized
     const f = rt.add(&p.cb) catch |e| return status(e);
     const h = gpa.create(Func) catch {
@@ -404,6 +529,11 @@ export fn pjit_func_free(f: ?*Func) void {
     const p = f orelse return;
     p.f.release();
     gpa.destroy(p);
+}
+
+/// Releases idle executable pages retained by the runtime; never invalidates a live function.
+export fn pjit_jit_trim_cache() usize {
+    return rt.trimCache();
 }
 
 test "c api: a64 add + ret, labels, errors" {
@@ -488,4 +618,39 @@ test "c api: opcode fast path emits the same bytes as the mnemonic path; pool" {
         const F = *const fn () callconv(.c) void;
         @as(F, @ptrCast(@alignCast(f2.?)))();
     }
+}
+
+test "c api: version, errors, IR compile + eval" {
+    try std.testing.expectEqual(@as(u32, 0x000300), pjit_version());
+    const src = "func f 2\ne:\n  v2 = add v0 v1\n  ret v2\n";
+    var r: i64 = 0;
+    try std.testing.expectEqual(OK, pjit_ir_eval(src, src.len, &[_]i64{ 40, 2 }, 2, 0, &r));
+    try std.testing.expectEqual(@as(i64, 42), r);
+    try std.testing.expectEqual(EINVAL, pjit_ir_eval(src, src.len, &[_]i64{40}, 1, 0, &r));
+    const bad = "func f 1\ne:\n  v1 = frob v0\n";
+    try std.testing.expectEqual(@backingInt(Status.ir_parse), pjit_ir_eval(bad, bad.len, &[_]i64{1}, 1, 0, &r));
+    try std.testing.expectEqualStrings("Syntax", std.mem.span(pjit_last_error()));
+    pjit_clear_error();
+    try std.testing.expectEqualStrings("", std.mem.span(pjit_last_error()));
+    try std.testing.expect(std.mem.span(pjit_status_str(@backingInt(Status.step_limit))).len > 0);
+    inline for (.{ Arch.x86_64, Arch.aarch64, Arch.x86, Arch.riscv64 }) |a| {
+        var b: ?*Buffer = null;
+        try std.testing.expectEqual(OK, pjit_buffer_new(&b));
+        defer pjit_buffer_free(b);
+        try std.testing.expectEqual(OK, pjit_ir_compile(b, src, src.len, @backingInt(a)));
+        var n: usize = 0;
+        _ = pjit_buffer_code(b, &n);
+        try std.testing.expect(n > 0);
+        // Too many parameters and sparse vreg numbers: errors for every target and level.
+        const wide = "func f 300\ne:\n  ret v0\n";
+        const sparse = "func f 0\ne:\n  v4000000000 = const 1\n  ret v0\n";
+        for ([_]c_int{ 0, 1 }) |level| {
+            if (level != 0 and a == .x86) continue;
+            try std.testing.expectEqual(@backingInt(Status.unsupported), pjit_ir_compile_opt(b, wide, wide.len, @backingInt(a), level));
+            try std.testing.expectEqualStrings("TooManyParams", std.mem.span(pjit_last_error()));
+            try std.testing.expectEqual(@backingInt(Status.ir_parse), pjit_ir_compile_opt(b, sparse, sparse.len, @backingInt(a), level));
+        }
+    }
+    try std.testing.expectEqual(EINVAL, pjit_ir_compile(null, src, src.len, 0));
+    try std.testing.expectEqual(EINVAL, pjit_ir_compile(null, src, src.len, 99));
 }

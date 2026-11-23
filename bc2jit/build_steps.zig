@@ -13,6 +13,10 @@ const Case = struct { name: []const u8, module: []const u8, args: []const []cons
 fn module(comptime argc: u8, comptime code: []const u8) []const u8 {
     return "KXBC" ++ [_]u8{ 0, argc, @truncate(code.len), @truncate(code.len >> 8) } ++ code;
 }
+/// KXBC v1 module (control flow, locals, IR lowering).
+fn moduleV1(comptime argc: u8, comptime code: []const u8) []const u8 {
+    return "KXBC" ++ [_]u8{ 1, argc, @truncate(code.len), @truncate(code.len >> 8) } ++ code;
+}
 fn imm(comptime v: i64) []const u8 {
     var b: [8]u8 = undefined;
     std.mem.writeInt(i64, &b, v, .little);
@@ -41,17 +45,23 @@ const cases = [_]Case{
     .{ .name = "dup-square", .module = module(1, arg(0) ++ DUP ++ MUL ++ RET), .args = &.{"-0x10"}, .stdout = "256\n" },
     .{ .name = "extra-args-ignored", .module = module(0, imm(5) ++ RET), .args = &.{ "1", "2", "3", "4" }, .stdout = "5\n" },
     .{ .name = "ret-top-of-deep-stack", .module = module(2, arg(0) ++ arg(1) ++ RET), .args = &.{ "1", "2" }, .stdout = "2\n" },
+    // v1: gcd(a, b) = while (b != 0) (a, b) = (b, a % b)
+    //   0 push_arg 0 | 2 push_arg 1 | 4 dup | 5 push 0 | 14 br_if eq 28 | 18 dup | 19 store_local 0
+    //   21 rem | 22 load_local 0 | 24 swap | 25 jmp 4 | 28 drop | 29 ret
+    .{ .name = "v1-gcd", .module = moduleV1(2, arg(0) ++ arg(1) ++ DUP ++ imm(0) ++ "\x41\x00\x1c\x00" ++ DUP ++ "\x31\x00" ++ "\x14" ++ "\x30\x00" ++ "\x22" ++ "\x40\x04\x00" ++ DROP ++ RET), .args = &.{ "1071", "462" }, .stdout = "21\n" },
+    .{ .name = "v1-div-by-zero-is-zero", .module = moduleV1(2, arg(0) ++ arg(1) ++ "\x13" ++ RET), .args = &.{ "7", "0" }, .stdout = "0\n" },
+    .{ .name = "v1-min-div-minus-one", .module = moduleV1(2, arg(0) ++ arg(1) ++ "\x13" ++ RET), .args = &.{ "-9223372036854775808", "-1" }, .stdout = "-9223372036854775808\n" },
     .{ .name = "four-args", .module = module(4, arg(0) ++ arg(1) ++ MUL ++ arg(2) ++ arg(3) ++ MUL ++ ADD ++ RET), .args = &.{ "3", "4", "5", "-6" }, .stdout = "-18\n" },
 };
 
 /// Registers the bc2jit steps; unit tests are also attached to `test_step`.
-pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, pyrlyn_jit: *std.Build.Module, test_step: *std.Build.Step) void {
+pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, pyrlyn_jit: *std.Build.Module, bc2jit: *std.Build.Module, test_step: *std.Build.Step, llvm_enabled: bool) void {
     const mod = b.createModule(.{
         .root_source_file = b.path("bc2jit/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "pyrlyn_jit", .module = pyrlyn_jit }},
+        .imports = &.{ .{ .name = "pyrlyn_jit", .module = pyrlyn_jit }, .{ .name = "bc2jit", .module = bc2jit } },
     });
     const exe = b.addExecutable(.{ .name = "bc2jit", .root_module = mod });
     b.step("bc2jit", "Build the bc2jit CLI (KXBC bytecode -> pyrlyn-jit machine code)").dependOn(&b.addInstallArtifact(exe, .{}).step);
@@ -87,8 +97,36 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         run.skip_foreign_checks = true;
         e2e.dependOn(&run.step);
     };
+    const llvm_arch: ?[]const u8 = if (target.result.cpu.arch == .x86_64) "x86-64" else arch_flag;
+    if (llvm_arch) |flag| {
+        if (llvm_enabled) {
+            for (cases) |c| for ([_][]const u8{ "llvm-jit", "llvm-interpreter" }) |backend| for ([_]bool{ false, true }) |optimized| {
+                const run = b.addRunArtifact(exe);
+                run.setName(b.fmt("bc2jit {s} {s} optimize={}", .{ backend, c.name, optimized }));
+                run.addArgs(&.{ "--arch", flag, "--backend", backend });
+                if (!optimized) run.addArg("--no-opt");
+                run.addFileArg(files.add(b.fmt("llvm-{s}.kxbc", .{c.name}), c.module));
+                run.addArgs(c.args);
+                run.expectExitCode(0);
+                run.expectStdOutEqual(c.stdout);
+                run.skip_foreign_checks = true;
+                e2e.dependOn(&run.step);
+            };
+        } else {
+            const run = b.addRunArtifact(exe);
+            run.setName("bc2jit LLVM backend disabled");
+            run.addArgs(&.{ "--arch", flag, "--backend", "llvm-jit" });
+            run.addFileArg(files.add("llvm-disabled.kxbc", cases[0].module));
+            run.expectExitCode(1);
+            run.addCheck(.{ .expect_stderr_match = "-Dllvm-prefix=PREFIX" });
+            run.skip_foreign_checks = true;
+            e2e.dependOn(&run.step);
+        }
+    }
     // CLI contract: usage errors go to stderr with exit status 2.
     const usage_cases = [_]struct { args: []const []const u8, stderr: []const u8 }{
+        .{ .args = &.{ "--arch", "aarch64", "--backend", "llvm-jit", "--no-jit", "x.kxbc" }, .stderr = "bc2jit: --no-jit requires the pyrlyn backend\n" },
+        .{ .args = &.{ "--arch", "aarch64", "--backend", "llvm-interpreter", "--no-jit", "x.kxbc" }, .stderr = "bc2jit: --no-jit requires the pyrlyn backend\n" },
         .{ .args = &.{"x.kxbc"}, .stderr = "bc2jit: missing required option --arch (allowed: x86-64, aarch64, riscv)\n" },
         .{ .args = &.{ "--arch", "mips", "x.kxbc" }, .stderr = "bc2jit: unknown --arch value 'mips' (allowed: x86-64, aarch64, riscv)\n" },
         .{ .args = &.{"--arch"}, .stderr = "bc2jit: option --arch requires a value (allowed: x86-64, aarch64, riscv)\n" },
@@ -122,6 +160,16 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         run.skip_foreign_checks = true;
         const check = b.addCheckFile(out, .{ .expected_exact = oc.bytes });
         e2e.dependOn(&check.step);
+    }
+    // Explicitly suppress JIT even for the host, and check the same golden code bytes.
+    for (out_cases) |oc| {
+        const run = b.addRunArtifact(exe);
+        run.addArgs(&.{ "--arch", oc.flag, "--no-jit" });
+        run.addFileArg(in_file);
+        run.expectExitCode(0);
+        run.expectStdOutEqual(b.fmt("{x}\n", .{oc.bytes}));
+        run.skip_foreign_checks = true;
+        e2e.dependOn(&run.step);
     }
     // Input errors: exit status 1 with the decoder's message and byte offset.
     const bad_cases = [_]struct { name: []const u8, module: []const u8, stderr: []const u8 }{

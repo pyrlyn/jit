@@ -374,7 +374,7 @@ pub fn validateMem(m: Mem) Error!void {
 }
 
 /// AsmJit forms for one emitted instruction (ALU ops and conditions select a sub-table).
-pub fn formsFor(comptime id: Inst, ops: Ops) []const isa.Form {
+pub inline fn formsFor(comptime id: Inst, ops: Ops) []const isa.Form {
     return switch (id) {
         .alu_rr, .alu_rm, .alu_mr, .alu_ri => @field(isa.table, @tagName(id))[@backingInt(ops.alu.?)],
         .jcc => isa.table.jcc[@backingInt(ops.cond.?)],
@@ -417,7 +417,7 @@ fn immSize(k: isa.Imm) usize {
 
 /// True if `bytes` is an encoding of form `f`: opcode bytes (after REX), `+r` register
 /// in the low 3 bits, ModRM `/digit`, and the immediate size for forms without ModRM.
-pub fn matchForm(f: isa.Form, bytes: []const u8) bool {
+pub inline fn matchForm(f: isa.Form, bytes: []const u8) bool {
     var i: usize = 0;
     while (i < bytes.len and bytes[i] & 0xF0 == 0x40) i += 1; // REX
     if (bytes.len < i + f.opcode.len) return false;

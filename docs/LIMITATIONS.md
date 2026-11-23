@@ -7,7 +7,10 @@
 - Hooks do not see raw bytes written with `CodeBuffer.emitBytes`, and `finalize` patches
   forward branches after `post` ran, so `ev.bytes` of a forward branch shows a zero displacement.
 - One section; no relocations or base address (absolute calls go through `mov r11, imm; call r11`).
-- `JitRuntime` maps a fresh 16 KiB region per function (no pooled allocator).
+- `JitRuntime` owns one 16 KiB-granule mapping per live function. Up to eight released
+  single-page mappings (128 KiB) are cached process-wide per linked runtime; larger mappings
+  and releases under cache contention are unmapped. `trimCache()` releases idle pages.
+  This is bounded mapping reuse, not suballocation of several functions on one page.
 
 ## ISA-database validation, CPU features, finalize and label checks
 

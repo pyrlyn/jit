@@ -8,7 +8,8 @@
 | `cb.finalize()` | patch forward branches; returns `error.UnboundLabel` / `DisplacementOutOfRange` |
 | `cb.code()` | the emitted bytes |
 | `a.newLabel()`, `a.bind(label)` | labels; backward branches resolve at once, forward ones in `finalize` |
-| `JitRuntime.add(&cb)` | map code executable (W^X; `MAP_JIT` on Apple arm64), `.ptr(T)`, `.release()` |
+| `JitRuntime.add(&cb)` | acquire an exclusive executable mapping (W^X; `MAP_JIT` on Apple arm64), `.ptr(T)`, `.release()`; up to 128 KiB of released pages cached |
+| `JitRuntime.trimCache()` | release idle cached mappings, returns bytes unmapped; live functions unaffected, best effort under contention |
 
 ## x86-64 (`pjit.x86_64`)
 Registers `Gp` (`.rax`..`.r15`), memory `ptr(base, disp)`, `ptrIdx(base, index, scale, disp)`,

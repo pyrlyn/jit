@@ -3,6 +3,10 @@
 Dependencies:
 - **Zig 0.17.0**, pinned in `mise.toml` (`mise install`, then `mise exec -- zig ...` or an activated shell).
 - No other dependencies for the library, tests and examples (stdlib only, links libc).
+- Optional LLVM backend: `-Dllvm-prefix=PREFIX` uses LLVM headers in `PREFIX/include` and
+  shared `libLLVM` in `PREFIX/lib` (including MCJIT, Interpreter and PassBuilder). Tested with
+  LLVM 23.1.5. The default build does not translate LLVM headers or link LLVM. See
+  [bc2jit LLVM backend](../bc2jit/README.md#llvm-backend) for execution and test commands.
 - Optional, only for the AsmJit benchmark and regenerating encoding tests: `clang` (Xcode
   command line tools), `objdump`, CMake + Ninja, Python 3, and an AsmJit checkout at `../asmjit-loc`.
 
@@ -14,6 +18,7 @@ zig build test -Doptimize=ReleaseFast              # tests with optimizations
 zig build run-example_aarch64                      # AArch64 JIT, executes natively
 zig build run-example_x86_64 -Dtarget=x86_64-macos # x86-64 JIT, executes under Rosetta
 zig build run-example_hooks                        # validation + hooks demo
+zig build -Dbc2jit=false                          # omit KXBC support (C stubs stay linkable)
 zig build -Dtargets=aarch64                        # compile only the AArch64 backend
 ```
 
@@ -55,7 +60,7 @@ cc main.c $(pkg-config --cflags pyrlyn-jit) /opt/pyrlyn-jit/lib/libpyrlyn-jit.a 
 `CMakeLists.txt` is a thin adapter: it runs `zig build install` into the build directory and
 exposes IMPORTED targets `pyrlyn-jit::pyrlyn-jit` (static) and `pyrlyn-jit::pyrlyn-jit_shared`. `-Doptimize` follows
 `CMAKE_BUILD_TYPE` (Release/MinSizeRel → ReleaseFast, RelWithDebInfo/none → ReleaseSafe,
-Debug → Debug); override with `-DPYRLYN_JIT_OPTIMIZE=...`, backends with `-DPYRLYN_JIT_TARGETS=x86_64`.
+Debug → Debug); override with `-DPYRLYN_JIT_OPTIMIZE=...`, backends with `-DPYRLYN_JIT_TARGETS=x86_64`, bytecode support with `-DPYRLYN_JIT_BC2JIT=OFF`.
 
 ```cmake
 # add_subdirectory
@@ -64,11 +69,11 @@ target_link_libraries(app PRIVATE pyrlyn-jit::pyrlyn-jit)
 
 # FetchContent
 include(FetchContent)
-FetchContent_Declare(pyrlyn-jit GIT_REPOSITORY https://github.com/pyrlyn/jit.git GIT_TAG main)
+FetchContent_Declare(pyrlyn-jit GIT_REPOSITORY https://github.com/pyrlyn/zjit.git GIT_TAG main)
 FetchContent_MakeAvailable(pyrlyn-jit)
 
 # CPM
-CPMAddPackage(NAME pyrlyn-jit GITHUB_REPOSITORY pyrlyn/jit GIT_TAG main)
+CPMAddPackage(NAME pyrlyn-jit GITHUB_REPOSITORY pyrlyn/zjit GIT_TAG main)
 
 # installed (cmake --install, or zig-built prefix with the config files)
 find_package(pyrlyn-jit 0.1 REQUIRED CONFIG)

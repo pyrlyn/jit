@@ -6,6 +6,10 @@ pub fn build(b: *std.Build) void {
     const targets = b.option([]const u8, "targets", "Comma-separated backends to compile in (x86_64,aarch64)") orelse "x86_64,aarch64";
 
     const opts = b.addOptions();
+    const llvm_prefix = b.option([]const u8, "llvm-prefix", "Enable the optional LLVM backend using PREFIX/include and PREFIX/lib (shared libLLVM)");
+    opts.addOption(bool, "llvm", llvm_prefix != null);
+    const want_bc2jit = b.option(bool, "bc2jit", "Include the KXBC Zig/C API and CLI (default: true)") orelse true;
+    opts.addOption(bool, "bc2jit", want_bc2jit);
     const want_x86_64 = std.mem.indexOf(u8, targets, "x86_64") != null;
     const want_aarch64 = std.mem.indexOf(u8, targets, "aarch64") != null;
     opts.addOption(bool, "x86_64", want_x86_64);
@@ -29,8 +33,30 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     pyrlyn_jit.addOptions("pyrlyn_jit_options", opts);
+    if (llvm_prefix) |prefix| {
+        const bindings = b.addTranslateC(.{
+            .root_source_file = b.path("src/core/llvm_c.h"),
+            .target = target,
+            .optimize = optimize,
+        });
+        bindings.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
+        pyrlyn_jit.addImport("llvm_c", bindings.createModule());
+        const lib: std.Build.LazyPath = .{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) };
+        pyrlyn_jit.addLibraryPath(lib);
+        pyrlyn_jit.addRPath(lib);
+        pyrlyn_jit.linkSystemLibrary("LLVM", .{ .use_pkg_config = .no });
+    }
 
-    const tests = b.addTest(.{ .root_module = pyrlyn_jit });
+    const bc2jit = b.addModule("bc2jit", .{
+        .root_source_file = b.path("bc2jit/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "pyrlyn_jit", .module = pyrlyn_jit }},
+    });
+
+    const test_filters = b.option([]const []const u8, "test-filter", "test, test-core: only run module tests whose name contains one of these strings") orelse &.{};
+    const tests = b.addTest(.{ .root_module = pyrlyn_jit, .filters = test_filters });
     // Standalone fuzz driver (seeded, replayable); `zig build test --fuzz` also works (see SECURITY.md).
     const fuzz_exe = b.addExecutable(.{ .name = "pyrlyn_jit_fuzz", .root_module = b.createModule(.{
         .root_source_file = b.path("src/fuzz_main.zig"),
@@ -100,8 +126,19 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
-    @import("bc2jit/build_steps.zig").add(b, target, optimize, pyrlyn_jit, test_step);
+    const run_tests = b.addRunArtifact(tests);
+    test_step.dependOn(&run_tests.step);
+    b.step("test-core", "Run only the pyrlyn_jit module tests (fast iteration; honours -Dtest-filter)").dependOn(&run_tests.step);
+    if (want_bc2jit) @import("bc2jit/build_steps.zig").add(b, target, optimize, pyrlyn_jit, bc2jit, test_step, llvm_prefix != null);
+
+    const runtime_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/core/jit_runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) }));
+    runtime_tests.skip_foreign_checks = true;
+    b.step("test-jit-runtime", "Test executable mapping reuse, ownership and concurrent calls").dependOn(&runtime_tests.step);
 
     // 32-bit x86 Compiler execution tests (x86-linux; runs natively on x86_64 Linux kernels).
     const x86_32_mod = b.createModule(.{
@@ -124,18 +161,19 @@ pub fn build(b: *std.Build) void {
 
     // ---- C ABI library (include/pyrlyn_jit.h) + examples in C, C++, Rust, Zig ----------------
     const capi_mod = b.createModule(.{
-        .root_source_file = b.path("src/c_api.zig"),
+        .root_source_file = b.path("src/library.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    capi_mod.addOptions("pyrlyn_jit_options", opts);
+    capi_mod.addImport("pyrlyn_jit", pyrlyn_jit);
+    capi_mod.addImport("bc2jit", bc2jit);
     const lib_static = b.addLibrary(.{ .name = "pyrlyn-jit", .linkage = .static, .root_module = capi_mod });
     const lib_shared = b.addLibrary(.{ .name = "pyrlyn-jit", .linkage = .dynamic, .root_module = capi_mod });
     b.installArtifact(lib_shared);
     b.installDirectory(.{ .source_dir = b.path("include"), .install_dir = .header, .install_subdir = "" });
     // pkg-config file (zig-out/lib/pkgconfig/pyrlyn-jit.pc); prefix is relocatable via pcfiledir.
-    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.1.0";
+    const pc_version = b.option([]const u8, "version", "Version written to pyrlyn-jit.pc") orelse "0.3.0";
     const pc = b.addWriteFiles().add("pyrlyn-jit.pc", b.fmt(
         \\prefix=${{pcfiledir}}/../..
         \\libdir=${{prefix}}/lib
@@ -150,19 +188,45 @@ pub fn build(b: *std.Build) void {
     , .{pc_version}));
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(pc, .lib, "pkgconfig/pyrlyn-jit.pc").step);
     b.step("lib", "Build libpyrlyn-jit (static + shared) and install include/").dependOn(&b.addInstallArtifact(lib_static, .{}).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = capi_mod })).step);
+    // Keep the legacy C ABI tests rooted in their implementation; imported modules' tests
+    // are not discovered from the export-only library root.
+    const capi_tests = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    capi_tests.addOptions("pyrlyn_jit_options", opts);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = capi_tests })).step);
     // Plain object for foreign toolchains: Apple ld rejects Zig's archive members that are not
     // 8-byte aligned ("64-bit mach-o not 8-byte aligned"), so external linkers get the .o.
     // Separate module without stack probes: x86_64 Debug code otherwise references Zig's
     // __zig_probe_stack (compiler_rt), which foreign linkers (c++, rustc) cannot resolve.
     const obj_mod = b.createModule(.{
-        .root_source_file = b.path("src/c_api.zig"),
+        .root_source_file = b.path("src/library.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .stack_check = false,
     });
-    obj_mod.addOptions("pyrlyn_jit_options", opts);
+    const obj_jit = b.createModule(.{
+        .root_source_file = b.path("src/pyrlyn_jit.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .stack_check = false,
+    });
+    obj_jit.addOptions("pyrlyn_jit_options", opts);
+    const obj_bc2jit = b.createModule(.{
+        .root_source_file = b.path("bc2jit/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .stack_check = false,
+        .imports = &.{.{ .name = "pyrlyn_jit", .module = obj_jit }},
+    });
+    obj_mod.addImport("pyrlyn_jit", obj_jit);
+    obj_mod.addImport("bc2jit", obj_bc2jit);
     const lib_obj = b.addObject(.{ .name = "pyrlyn_jit", .root_module = obj_mod });
 
     // Installed libpyrlyn-jit.a: on macOS the archive is re-packed with the system `ar` from the plain
@@ -177,12 +241,54 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(lib_static);
     }
 
+    const bc_api_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("bc2jit/api_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "bc2jit", .module = bc2jit }},
+    }) }));
+    bc_api_tests.skip_foreign_checks = true;
+    test_step.dependOn(&bc_api_tests.step);
+    b.step("test-bc2jit-api", "Test the public Zig bytecode API (also when disabled)").dependOn(&bc_api_tests.step);
+
+    const bc_c_test = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    bc_c_test.addCSourceFile(.{ .file = b.path("bc2jit/test_api.c"), .flags = &.{"-std=c11"} });
+    bc_c_test.addIncludePath(b.path("include"));
+    bc_c_test.linkLibrary(lib_static);
+    addLlvmPaths(b, bc_c_test, llvm_prefix);
+    const run_bc_c = b.addRunArtifact(b.addExecutable(.{ .name = "test_bc2jit_c", .root_module = bc_c_test }));
+    run_bc_c.skip_foreign_checks = true;
+    test_step.dependOn(&run_bc_c.step);
+    b.step("test-bc2jit-c", "Test the C bytecode API (also when disabled)").dependOn(&run_bc_c.step);
+
+    const bc_bench = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    bc_bench.addCSourceFile(.{ .file = b.path("bench/bc2jit_api.c"), .flags = &.{"-std=c11"} });
+    bc_bench.addIncludePath(b.path("include"));
+    bc_bench.linkLibrary(lib_static);
+    addLlvmPaths(b, bc_bench, llvm_prefix);
+    const bc_bench_exe = b.addExecutable(.{ .name = "bench_bc2jit_api", .root_module = bc_bench });
+    b.step("bench-bc2jit-api", "Build the C API JIT benchmark (use -Doptimize=ReleaseFast)").dependOn(&b.addInstallArtifact(bc_bench_exe, .{}).step);
+
+    // C-side ABI tests (tests/c/capi_test.c): every exported function called from C.
+    {
+        const m = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+        m.addCSourceFile(.{ .file = b.path("tests/c/capi_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Werror" } });
+        m.addIncludePath(b.path("include"));
+        m.linkLibrary(lib_static);
+        addLlvmPaths(b, m, llvm_prefix);
+        const run_capi = b.addRunArtifact(b.addExecutable(.{ .name = "capi_test", .root_module = m }));
+        run_capi.expectExitCode(0);
+        test_step.dependOn(&run_capi.step);
+        b.step("test-capi", "Build and run the C ABI tests (tests/c)").dependOn(&run_capi.step);
+    }
     const examples_step = b.step("examples", "Build and run examples/{c,cpp,zig} (+ rust with -Drust=true)");
     {
         const m = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
         m.addCSourceFile(.{ .file = b.path("examples/c/main.c"), .flags = &.{"-std=c11"} });
         m.addIncludePath(b.path("include"));
         m.linkLibrary(lib_static);
+        addLlvmPaths(b, m, llvm_prefix);
         examples_step.dependOn(&b.addRunArtifact(b.addExecutable(.{ .name = "example_c", .root_module = m })).step);
     }
     // C++ is built with the system compiler (`c++`, override with -Dcxx=...). Zig 0.17's bundled
@@ -266,7 +372,16 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseFast,
             .link_libc = true,
-            .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+            .imports = &.{
+                .{ .name = "pyrlyn_jit", .module = jit_fast },
+                .{ .name = "bc2jit", .module = b.createModule(.{
+                    .root_source_file = b.path("bc2jit/lib.zig"),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+                }) },
+            },
         }) });
         const tr = target.result;
         const base_path = (b.fmt("bench/baseline-{s}-{s}.txt", .{ @tagName(tr.cpu.arch), @tagName(tr.os.tag) }));
@@ -285,6 +400,39 @@ pub fn build(b: *std.Build) void {
         truncate.setCwd(b.path("."));
         upd_run.step.dependOn(&truncate.step);
         b.step("bench-update", "Re-measure and rewrite the benchmark baseline file").dependOn(&upd_run.step);
+
+        // IR Compiler time/memory (bench/compile_bench.zig), report only; PJIT_BENCH_MS = time budget per case.
+        const cbt = b.addExecutable(.{ .name = "compile_bench", .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/compile_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+        }) });
+        const cb_run = b.addRunArtifact(cbt);
+        cb_run.has_side_effects = true;
+        b.step("bench-compile", "Measure IR Compiler time and memory (x86-64, AArch64, RV64) on generated functions").dependOn(&cb_run.step);
+
+        // Execution speed of generated code (bench/exec_bench.zig), report only; host target.
+        const ebt = b.addExecutable(.{ .name = "exec_bench", .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/exec_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "pyrlyn_jit", .module = jit_fast },
+                .{ .name = "bc2jit", .module = b.createModule(.{
+                    .root_source_file = b.path("bc2jit/lib.zig"),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "pyrlyn_jit", .module = jit_fast }},
+                }) },
+            },
+        }) });
+        const eb_run = b.addRunArtifact(ebt);
+        eb_run.has_side_effects = true;
+        b.step("bench-exec", "Measure execution speed of generated code vs native Zig (host IR Compiler, optimizer variants)").dependOn(&eb_run.step);
     }
 
     // zig fmt: our sources only. AsmJit-derived and other generated files are excluded so they
@@ -312,4 +460,13 @@ pub fn build(b: *std.Build) void {
     };
     b.step("fmt", "Format sources with zig fmt (generated/AsmJit-derived files excluded)").dependOn(&b.addFmt(.{ .paths = fmt_paths, .exclude_paths = fmt_exclude }).step);
     b.step("fmt-check", "Check formatting with zig fmt --check (same exclusions as fmt)").dependOn(&b.addFmt(.{ .paths = fmt_paths, .exclude_paths = fmt_exclude, .check = true }).step);
+}
+
+// Static-library system dependencies propagate to C consumers, but their search/rpaths do not.
+fn addLlvmPaths(b: *std.Build, module: *std.Build.Module, prefix: ?[]const u8) void {
+    if (prefix) |p| {
+        const lib: std.Build.LazyPath = .{ .cwd_relative = b.pathJoin(&.{ p, "lib" }) };
+        module.addLibraryPath(lib);
+        module.addRPath(lib);
+    }
 }

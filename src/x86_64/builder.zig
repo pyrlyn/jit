@@ -18,6 +18,87 @@ const Mem = x.Mem;
 const Alu = x.Alu;
 const Cond = x.Cond;
 const gp = @import("gp.zig");
+const vec = x.vec;
+
+/// SSE/SSE2 ops used by the Compiler (`op xmm, xmm`, `sseRR`; `op xmm, m`, `sseRMop`):
+/// scalar float ops, then packed 128-bit float/integer ops and shuffles (SSE2 baseline only).
+pub const SseOp = enum {
+    addss,
+    addsd,
+    subss,
+    subsd,
+    mulss,
+    mulsd,
+    divss,
+    divsd,
+    minss,
+    minsd,
+    maxss,
+    maxsd,
+    movaps,
+    xorps,
+    ucomiss,
+    ucomisd,
+    cvtss2sd,
+    cvtsd2ss,
+    addps,
+    addpd,
+    subps,
+    subpd,
+    mulps,
+    mulpd,
+    divps,
+    divpd,
+    minps,
+    minpd,
+    maxps,
+    maxpd,
+    paddd,
+    paddq,
+    psubd,
+    psubq,
+    pand,
+    por,
+    pxor,
+    pmuludq,
+    punpckldq,
+    punpcklqdq,
+    unpcklpd,
+
+    /// Memory operand size of `op xmm, m` (packed forms need a 16-byte aligned m128).
+    pub fn memSize(op: SseOp) u16 {
+        return switch (op) {
+            .addss, .subss, .mulss, .divss, .minss, .maxss, .ucomiss, .cvtss2sd => 4,
+            .addsd, .subsd, .mulsd, .divsd, .minsd, .maxsd, .ucomisd, .cvtsd2ss => 8,
+            else => 16,
+        };
+    }
+};
+/// SSE load/store (`mov* xmm, m` and `m, xmm`): scalar movss/movsd, unaligned movups/movdqu,
+/// aligned movaps.
+pub const SseMov = enum {
+    movss,
+    movsd,
+    movups,
+    movdqu,
+    movaps,
+
+    pub fn size(op: SseMov) u16 {
+        return switch (op) {
+            .movss => 4,
+            .movsd => 8,
+            else => 16,
+        };
+    }
+};
+/// `pshufd/shufps xmm, xmm, imm8`.
+pub const SseImm = enum { pshufd, shufps };
+/// `cvtsi2ss/sd xmm, r64`.
+pub const SseFromInt = enum { cvtsi2ss, cvtsi2sd };
+/// `cvttss2si/cvttsd2si r64, xmm` (truncating; NaN/out of range give minInt(i64)).
+pub const SseToInt = enum { cvttss2si, cvttsd2si };
+/// xmm register number (0..15).
+pub const Xmm = u4;
 
 pub const Error = x.Error || generic.Error;
 
@@ -35,80 +116,163 @@ fn mapGp(e: anyerror) Error {
 pub const Label = generic.Label;
 
 /// One recorded instruction: tag = Assembler method name, payload = its arguments.
+/// Payloads are underaligned to avoid padding in the union and its enclosing Builder node.
+/// Accesses retain Zig's alignment information; no pointers are cast to stronger alignment.
 pub const Instr = union(enum) {
-    movRR: struct { Gp, Gp },
-    movRM: struct { Gp, Mem },
-    movMR: struct { Mem, Gp },
-    movMI: struct { Mem, i32 },
-    lea: struct { Gp, Mem },
-    movRI: struct { Gp, i64 },
-    movabs: struct { Gp, u64 },
-    aluRR: struct { Alu, Gp, Gp },
-    aluRM: struct { Alu, Gp, Mem },
-    aluMR: struct { Alu, Mem, Gp },
-    aluRI: struct { Alu, Gp, i32 },
-    addRR: struct { Gp, Gp },
-    addRI: struct { Gp, i32 },
-    subRR: struct { Gp, Gp },
-    subRI: struct { Gp, i32 },
-    cmpRR: struct { Gp, Gp },
-    cmpRI: struct { Gp, i32 },
-    xorRR: struct { Gp, Gp },
-    testRR: struct { Gp, Gp },
-    imulRR: struct { Gp, Gp },
-    imulRM: struct { Gp, Mem },
-    imulRRI: struct { Gp, Gp, i32 },
+    movRR: struct { Gp, Gp } align(1),
+    movRM: struct { Gp, Mem } align(1),
+    movMR: struct { Mem, Gp } align(1),
+    movMI: struct { Mem, i32 } align(1),
+    lea: struct { Gp, Mem } align(1),
+    movRI: struct { Gp, i64 } align(1),
+    movabs: struct { Gp, u64 } align(1),
+    aluRR: struct { Alu, Gp, Gp } align(1),
+    aluRM: struct { Alu, Gp, Mem } align(1),
+    aluMR: struct { Alu, Mem, Gp } align(1),
+    aluRI: struct { Alu, Gp, i32 } align(1),
+    addRR: struct { Gp, Gp } align(1),
+    addRI: struct { Gp, i32 } align(1),
+    subRR: struct { Gp, Gp } align(1),
+    subRI: struct { Gp, i32 } align(1),
+    cmpRR: struct { Gp, Gp } align(1),
+    cmpRI: struct { Gp, i32 } align(1),
+    xorRR: struct { Gp, Gp } align(1),
+    testRR: struct { Gp, Gp } align(1),
+    imulRR: struct { Gp, Gp } align(1),
+    imulRM: struct { Gp, Mem } align(1),
+    imulRRI: struct { Gp, Gp, i32 } align(1),
     /// `shl/shr/sar r64, cl`.
-    shiftRCl: struct { Shift, Gp },
+    shiftRCl: struct { Shift, Gp } align(1),
     /// `idiv r64` (rdx:rax / r).
-    idivR: struct { Gp },
+    idivR: struct { Gp } align(1),
     /// `cqo` (sign-extend rax into rdx:rax).
     cqo,
-    push: struct { Gp },
-    pop: struct { Gp },
+    push: struct { Gp } align(1),
+    pop: struct { Gp } align(1),
     ret,
     nop,
     int3,
-    callR: struct { Gp },
-    jmpR: struct { Gp },
-    callAbs: struct { usize },
-    jmp: struct { Label },
-    call: struct { Label },
-    jcc: struct { Cond, Label },
+    callR: struct { Gp } align(1),
+    jmpR: struct { Gp } align(1),
+    callAbs: struct { usize } align(1),
+    jmp: struct { Label } align(1),
+    call: struct { Label } align(1),
+    jcc: struct { Cond, Label } align(1),
     /// Fixed-size branches (produced by `shortenBranches`; rel8 / rel32).
-    jmp8: struct { Label },
-    jmp32: struct { Label },
-    jcc8: struct { Cond, Label },
-    jcc32: struct { Cond, Label },
+    jmp8: struct { Label } align(1),
+    jmp32: struct { Label } align(1),
+    jcc8: struct { Cond, Label } align(1),
+    jcc32: struct { Cond, Label } align(1),
+    /// Scalar SSE (SSE/SSE2 legacy encoding, xmm0..15).
+    sseRR: struct { SseOp, Xmm, Xmm } align(1),
+    sseRM: struct { SseMov, Xmm, Mem } align(1),
+    sseMR: struct { SseMov, Mem, Xmm } align(1),
+    /// `movq xmm, r64` / `movq r64, xmm`.
+    movqXR: struct { Xmm, Gp } align(1),
+    movqRX: struct { Gp, Xmm } align(1),
+    cvtFromInt: struct { SseFromInt, Xmm, Gp } align(1),
+    cvtToInt: struct { SseToInt, Gp, Xmm } align(1),
+    /// `setcc r8` (low byte of the register).
+    setcc: struct { Cond, Gp } align(1),
+    /// `movzx r32, r8` (zero-extends into the full register).
+    movzxB: struct { Gp, Gp } align(1),
+    /// `op xmm, m` (`SseOp.memSize`; packed forms need a 16-byte aligned operand).
+    sseRMop: struct { SseOp, Xmm, Mem } align(1),
+    /// `pshufd/shufps xmm, xmm, imm8`.
+    sseRRI: struct { SseImm, Xmm, Xmm, u8 } align(1),
+    /// `pshufd/shufps xmm, m128, imm8` (16-byte aligned operand).
+    sseRMI: struct { SseImm, Xmm, Mem, u8 } align(1),
+    /// `movd xmm, r32` / `movd r32, xmm`.
+    movdXR: struct { Xmm, Gp } align(1),
+    movdRX: struct { Gp, Xmm } align(1),
+    /// `movsxd r64, r32`.
+    movsxd: struct { Gp, Gp } align(1),
+    /// `shl/shr/sar r64, imm8`.
+    shiftRI: struct { Shift, Gp, u8 } align(1),
+    /// `neg r64`.
+    neg: struct { Gp } align(1),
+    /// `xor r32, r32`: zeroes the 64-bit register (clobbers flags).
+    zero32: struct { Gp } align(1),
+    /// `pmulld xmm, xmm` (SSE4.1). Only for callers that checked the CPU; a build gated
+    /// without SSE4.1 (`-Dx86-features`) rejects it with `error.InvalidOperand`.
+    pmulld: struct { Xmm, Xmm } align(1),
 
     pub const comment_prefix: []const u8 = ";";
-    pub const special: []const []const u8 = &.{ "aluRR", "aluRM", "aluMR", "aluRI", "shiftRCl", "idivR", "cqo", "jcc", "jmp8", "jmp32", "jcc8", "jcc32" };
+    pub const special: []const []const u8 = &.{ "aluRR", "aluRM", "aluMR", "aluRI", "shiftRCl", "idivR", "cqo", "jcc", "jmp8", "jmp32", "jcc8", "jcc32", "sseRR", "sseRM", "sseMR", "movqXR", "movqRX", "cvtFromInt", "cvtToInt", "setcc", "movzxB", "sseRMop", "sseRRI", "sseRMI", "movdXR", "movdRX", "movsxd", "shiftRI", "neg", "zero32", "pmulld" };
     pub fn emitSpecial(a: anytype, i: Instr, labels: []const core.Label) !void {
         switch (i) {
-            .aluRR => |o| switch (o[0]) {
+            inline else => |o, tag| try emitSpecialTyped(a, tag, o, labels),
+        }
+    }
+    /// Typed variant for append-only compiler emission: select the emitter at comptime.
+    pub inline fn emitSpecialTyped(a: anytype, comptime tag: std.meta.Tag(Instr), o: @FieldType(Instr, @tagName(tag)), labels: []const core.Label) !void {
+        switch (tag) {
+            .aluRR => switch (o[0]) {
                 inline else => |op| try a.aluRR(op, o[1], o[2]),
             },
-            .aluRM => |o| switch (o[0]) {
+            .aluRM => switch (o[0]) {
                 inline else => |op| try a.aluRM(op, o[1], o[2]),
             },
-            .aluMR => |o| switch (o[0]) {
+            .aluMR => switch (o[0]) {
                 inline else => |op| try a.aluMR(op, o[1], o[2]),
             },
-            .aluRI => |o| switch (o[0]) {
+            .aluRI => switch (o[0]) {
                 inline else => |op| try a.aluRI(op, o[1], o[2]),
             },
-            .shiftRCl => |o| switch (o[0]) {
+            .shiftRCl => switch (o[0]) {
                 inline else => |op| a.inst(@field(gp.Mnemonic, @tagName(op)), .{ gp.r64(o[1]), gp.r8(.rcx) }) catch |e| return mapGp(e),
             },
-            .idivR => |o| a.inst(.idiv, .{gp.r64(o[0])}) catch |e| return mapGp(e),
+            .idivR => a.inst(.idiv, .{gp.r64(o[0])}) catch |e| return mapGp(e),
             .cqo => a.inst(.cqo, .{}) catch |e| return mapGp(e),
-            .jcc => |o| switch (o[0]) {
+            .jcc => switch (o[0]) {
                 inline else => |c| try a.jcc(c, labels[o[1].id]),
             },
-            .jmp8 => |o| try rawBranch(a.buf, &.{0xEB}, true, labels[o[0].id]),
-            .jmp32 => |o| try rawBranch(a.buf, &.{0xE9}, false, labels[o[0].id]),
-            .jcc8 => |o| try rawBranch(a.buf, &.{0x70 + @as(u8, @backingInt(o[0]))}, true, labels[o[1].id]),
-            .jcc32 => |o| try rawBranch(a.buf, &.{ 0x0F, 0x80 + @as(u8, @backingInt(o[0])) }, false, labels[o[1].id]),
+            .sseRR => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.xmm(o[2]) }, .{}),
+            },
+            .sseRM => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.mem(o[2], comptime op.size()) }, .{}),
+            },
+            .sseMR => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.mem(o[1], comptime op.size()), vec.xmm(o[2]) }, .{}),
+            },
+            .sseRMop => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.mem(o[2], comptime op.memSize()) }, .{}),
+            },
+            .sseRRI => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.xmm(o[2]), o[3] }, .{}),
+            },
+            .sseRMI => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), vec.mem(o[2], 16), o[3] }, .{}),
+            },
+            .movdXR => try a.vinst(.movd, .{ vec.xmm(o[0]), gp.r32(o[1]) }, .{}),
+            .movdRX => try a.vinst(.movd, .{ gp.r32(o[0]), vec.xmm(o[1]) }, .{}),
+            .movsxd => a.movsx(.dword, o[0], o[1]) catch |e| return mapGp(e),
+            .shiftRI => switch (o[0]) {
+                inline else => |op| a.inst(@field(gp.Mnemonic, @tagName(op)), .{ gp.r64(o[1]), o[2] }) catch |e| return mapGp(e),
+            },
+            .neg => a.inst(.neg, .{gp.r64(o[0])}) catch |e| return mapGp(e),
+            .zero32 => a.inst(.xor, .{ gp.r32(o[0]), gp.r32(o[0]) }) catch |e| return mapGp(e),
+            .pmulld => if (comptime x.build_gate == null or x.build_gate.?.contains(.SSE4_1))
+                try a.vinst(.pmulld, .{ vec.xmm(o[0]), vec.xmm(o[1]) }, .{})
+            else
+                return error.InvalidOperand,
+            .movqXR => try a.vinst(.movq, .{ vec.xmm(o[0]), gp.r64(o[1]) }, .{}),
+            .movqRX => try a.vinst(.movq, .{ gp.r64(o[0]), vec.xmm(o[1]) }, .{}),
+            .cvtFromInt => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ vec.xmm(o[1]), gp.r64(o[2]) }, .{}),
+            },
+            .cvtToInt => switch (o[0]) {
+                inline else => |op| try a.vinst(@field(vec.Mnemonic, @tagName(op)), .{ gp.r64(o[1]), vec.xmm(o[2]) }, .{}),
+            },
+            .setcc => switch (o[0]) {
+                inline else => |c| a.setcc(c, o[1]) catch |e| return mapGp(e),
+            },
+            .movzxB => a.movzx(.byte, o[0], o[1]) catch |e| return mapGp(e),
+            .jmp8 => try rawBranch(a.buf, &.{0xEB}, true, labels[o[0].id]),
+            .jmp32 => try rawBranch(a.buf, &.{0xE9}, false, labels[o[0].id]),
+            .jcc8 => try rawBranch(a.buf, &.{0x70 + @as(u8, @backingInt(o[0]))}, true, labels[o[1].id]),
+            .jcc32 => try rawBranch(a.buf, &.{ 0x0F, 0x80 + @as(u8, @backingInt(o[0])) }, false, labels[o[1].id]),
             else => unreachable,
         }
     }
@@ -222,6 +386,39 @@ fn formatInstImpl(gpa: std.mem.Allocator, out: *std.ArrayList(u8), i: Instr) !vo
         .jcc, .jcc8, .jcc32 => |o| try out.print(gpa, "j{s}{s} L{d}", .{ @tagName(o[0]), bsuf(i), o[1].id }),
         .addRR, .subRR, .cmpRR, .xorRR => |o| try out.print(gpa, "{s} {s}, {s}", .{ aliasName(i), @tagName(o[0]), @tagName(o[1]) }),
         .addRI, .subRI, .cmpRI => |o| try out.print(gpa, "{s} {s}, {d}", .{ aliasName(i), @tagName(o[0]), o[1] }),
+        .sseRR => |o| try out.print(gpa, "{s} xmm{d}, xmm{d}", .{ @tagName(o[0]), o[1], o[2] }),
+        .sseRM => |o| {
+            try out.print(gpa, "{s} xmm{d}, ", .{ @tagName(o[0]), o[1] });
+            try fmtMem(gpa, out, o[2]);
+        },
+        .sseMR => |o| {
+            try out.print(gpa, "{s} ", .{@tagName(o[0])});
+            try fmtMem(gpa, out, o[1]);
+            try out.print(gpa, ", xmm{d}", .{o[2]});
+        },
+        .movqXR => |o| try out.print(gpa, "movq xmm{d}, {s}", .{ o[0], @tagName(o[1]) }),
+        .movqRX => |o| try out.print(gpa, "movq {s}, xmm{d}", .{ @tagName(o[0]), o[1] }),
+        .cvtFromInt => |o| try out.print(gpa, "{s} xmm{d}, {s}", .{ @tagName(o[0]), o[1], @tagName(o[2]) }),
+        .cvtToInt => |o| try out.print(gpa, "{s} {s}, xmm{d}", .{ @tagName(o[0]), @tagName(o[1]), o[2] }),
+        .setcc => |o| try out.print(gpa, "set{s} {s}", .{ @tagName(o[0]), @tagName(o[1]) }),
+        .movzxB => |o| try out.print(gpa, "movzx {s}, {s}.b", .{ @tagName(o[0]), @tagName(o[1]) }),
+        .sseRMop => |o| {
+            try out.print(gpa, "{s} xmm{d}, ", .{ @tagName(o[0]), o[1] });
+            try fmtMem(gpa, out, o[2]);
+        },
+        .sseRRI => |o| try out.print(gpa, "{s} xmm{d}, xmm{d}, {d}", .{ @tagName(o[0]), o[1], o[2], o[3] }),
+        .sseRMI => |o| {
+            try out.print(gpa, "{s} xmm{d}, ", .{ @tagName(o[0]), o[1] });
+            try fmtMem(gpa, out, o[2]);
+            try out.print(gpa, ", {d}", .{o[3]});
+        },
+        .movdXR => |o| try out.print(gpa, "movd xmm{d}, {s}.d", .{ o[0], @tagName(o[1]) }),
+        .movdRX => |o| try out.print(gpa, "movd {s}.d, xmm{d}", .{ @tagName(o[0]), o[1] }),
+        .movsxd => |o| try out.print(gpa, "movsxd {s}, {s}.d", .{ @tagName(o[0]), @tagName(o[1]) }),
+        .shiftRI => |o| try out.print(gpa, "{s} {s}, {d}", .{ @tagName(o[0]), @tagName(o[1]), o[2] }),
+        .neg => |o| try out.print(gpa, "neg {s}", .{@tagName(o[0])}),
+        .zero32 => |o| try out.print(gpa, "xor {s}.d, {s}.d", .{ @tagName(o[0]), @tagName(o[0]) }),
+        .pmulld => |o| try out.print(gpa, "pmulld xmm{d}, xmm{d}", .{ o[0], o[1] }),
     }
 }
 
@@ -320,6 +517,133 @@ pub fn shortenBranches(b: *Builder) !void {
             }
         }
     }
+}
+
+/// `shortenBranches` followed by `serialize` through a validating Assembler into `cb`, with
+/// every instruction encoded once instead of twice (same bytes; call `cb.finalize()` after).
+/// 1. Every non-branch node is encoded at a compact offset (branches, labels and padding take
+///    no space yet), which gives its size.
+/// 2. Branch relaxation over those sizes, as in `shortenBranches`, gives final offsets.
+/// 3. Back to front, each node moves to its final offset (never before its compact one) and
+///    branches, padding and label bindings are emitted there; fixups of moved instructions
+///    are shifted with them.
+/// One u32 per node: the size of an instruction or embed, or the final offset of any other
+/// node (those take no space in the compact layout).
+pub fn serializeShortened(b: *Builder, cb: *CodeBuffer) !void {
+    const slot = try b.gpa.alloc(u32, b.nodes.items.len);
+    defer b.gpa.free(slot);
+    const labels = try b.gpa.alloc(core.Label, b.label_node.items.len);
+    defer b.gpa.free(labels);
+    for (labels) |*l| l.* = try cb.newLabel();
+    const a = x.AssemblerT(.{ .validate = true }).init(cb);
+    const fix0 = cb.fixups.items.len;
+    const start = cb.offset();
+    const isBranch = struct {
+        inline fn f(d: Node.Data) bool {
+            return d == .inst and switch (d.inst) {
+                .jmp8, .jcc8, .jmp32, .jcc32 => true,
+                else => false,
+            };
+        }
+    }.f;
+    var it = b.first;
+    while (it != Node.none) : (it = b.nodes.items[it].next) {
+        const p = &b.nodes.items[it];
+        const at = cb.offset();
+        switch (p.data) {
+            .inst => |*in| switch (in.*) {
+                .jmp, .jmp32 => |o| in.* = .{ .jmp8 = o },
+                .jcc, .jcc32 => |o| in.* = .{ .jcc8 = o },
+                .jmp8, .jcc8 => {},
+                else => try Builder.emitInst(a, in.*, labels),
+            },
+            .embed => |e| try cb.emitBytes(b.slice(e.off, e.len)),
+            else => {},
+        }
+        slot[it] = cb.offset() - at;
+    }
+    const compact_end = cb.offset();
+    const fix_end = cb.fixups.items.len;
+    var end = start;
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var off = start;
+        it = b.first;
+        while (it != Node.none) : (it = b.nodes.items[it].next) {
+            const d = b.nodes.items[it].data;
+            switch (d) {
+                .inst => |in| switch (in) {
+                    .jmp8, .jcc8, .jmp32, .jcc32 => {
+                        slot[it] = off;
+                        off += switch (in) {
+                            .jmp8, .jcc8 => 2,
+                            .jmp32 => 5,
+                            else => 6,
+                        };
+                    },
+                    else => off += slot[it],
+                },
+                .embed => off += slot[it],
+                .@"align" => |al| {
+                    slot[it] = off;
+                    off += (al.boundary - (off & (al.boundary - 1))) & (al.boundary - 1);
+                },
+                .label, .comment => slot[it] = off,
+            }
+        }
+        end = off;
+        it = b.first;
+        while (it != Node.none) : (it = b.nodes.items[it].next) {
+            const p = &b.nodes.items[it];
+            if (p.data != .inst) continue;
+            const in = &p.data.inst;
+            if (in.* != .jmp8 and in.* != .jcc8) continue;
+            const ln = b.label_node.items[in.target().?.id];
+            if (ln == Node.none) return error.UnboundLabel;
+            const disp: i64 = @as(i64, slot[ln]) - @as(i64, slot[it] + 2);
+            if (std.math.cast(i8, disp) == null) {
+                in.* = switch (in.*) {
+                    .jmp8 => |o| .{ .jmp32 = o },
+                    .jcc8 => |o| .{ .jcc32 = o },
+                    else => unreachable,
+                };
+                changed = true;
+            }
+        }
+    }
+    // Capacity for the final size now: emitting at `len = offset` below must never grow the
+    // buffer (growth only keeps the bytes below `len`).
+    try cb.ensure(end - compact_end);
+    var k = fix_end;
+    var next_off = end; // final offset of the node after `it`
+    var cpos = compact_end; // compact offset of the node after `it`
+    it = b.last;
+    while (it != Node.none) : (it = b.nodes.items[it].prev) {
+        const d = b.nodes.items[it].data;
+        if (d == .inst and !isBranch(d) or d == .embed) {
+            const sz = slot[it];
+            const off = next_off - sz;
+            cpos -= sz;
+            std.mem.copyBackwards(u8, cb.data[off..][0..sz], cb.data[cpos..][0..sz]);
+            const shift = off - cpos;
+            while (k > fix0 and cb.fixups.items[k - 1].at >= cpos) : (k -= 1) {
+                cb.fixups.items[k - 1].at += shift;
+                cb.fixups.items[k - 1].base += shift;
+            }
+            next_off = off;
+            continue;
+        }
+        cb.len = slot[it];
+        switch (d) {
+            .inst => |in| try Builder.emitInst(a, in, labels),
+            .label => |l| try a.bind(labels[l.id]),
+            .@"align" => |al| if (al.nop) try a.alignNop(al.boundary) else try a.alignTrap(al.boundary),
+            .comment, .embed => {},
+        }
+        next_off = slot[it];
+    }
+    cb.len = end;
 }
 
 // ---- tests ----------------------------------------------------------------------------
@@ -539,4 +863,155 @@ test "builder: shortenBranches is a re-runnable pass; sized branches format and 
     try b.serialize(x.AssemblerT(.{}).init(&cb));
     try cb.finalize();
     try t.expectEqualSlices(u8, &.{ 0x75, 0xFE, 0xEB, 0xFC, 0xAB, 0xCD }, cb.code());
+}
+
+test "builder: scalar SSE nodes encode like LLVM" {
+    var b = Builder.init(std.testing.allocator);
+    defer b.deinit();
+    try b.emit(.sseRR, .{ .addsd, 1, 2 }); // f2 0f 58 ca
+    try b.emit(.sseRR, .{ .ucomiss, 9, 0 }); // 44 0f 2e c8
+    try b.emit(.sseRM, .{ .movss, 0, x.ptr(.rbp, -8) }); // f3 0f 10 45 f8
+    try b.emit(.sseMR, .{ .movsd, x.ptr(.rax, 0), 15 }); // f2 44 0f 11 38
+    try b.emit(.movqXR, .{ 3, .r10 }); // 66 49 0f 6e da
+    try b.emit(.movqRX, .{ .rax, 3 }); // 66 48 0f 7e d8
+    try b.emit(.cvtFromInt, .{ .cvtsi2sd, 0, .rdi }); // f2 48 0f 2a c7
+    try b.emit(.cvtToInt, .{ .cvttss2si, .r10, 1 }); // f3 4c 0f 2c d1
+    try b.emit(.setcc, .{ .a, .r10 }); // 41 0f 97 c2
+    try b.emit(.movzxB, .{ .r10, .r10 }); // 45 0f b6 d2
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    try b.serialize(x.AssemblerT(.{ .validate = true }).init(&cb));
+    try std.testing.expectEqualSlices(u8, &.{
+        0xf2, 0x0f, 0x58, 0xca,
+        0x44, 0x0f, 0x2e, 0xc8,
+        0xf3, 0x0f, 0x10, 0x45,
+        0xf8, 0xf2, 0x44, 0x0f,
+        0x11, 0x38, 0x66, 0x49,
+        0x0f, 0x6e, 0xda, 0x66,
+        0x48, 0x0f, 0x7e, 0xd8,
+        0xf2, 0x48, 0x0f, 0x2a,
+        0xc7, 0xf3, 0x4c, 0x0f,
+        0x2c, 0xd1, 0x41, 0x0f,
+        0x97, 0xc2, 0x45, 0x0f,
+        0xb6, 0xd2,
+    }, cb.code());
+    var txt: std.ArrayList(u8) = .empty;
+    defer txt.deinit(std.testing.allocator);
+    try formatInstImpl(std.testing.allocator, &txt, .{ .sseRR = .{ .addsd, 1, 2 } });
+    try std.testing.expectEqualStrings("addsd xmm1, xmm2", txt.items);
+}
+
+test "builder: vector SSE and extra GP nodes encode like LLVM" {
+    var b = Builder.init(std.testing.allocator);
+    defer b.deinit();
+    try b.emit(.sseRR, .{ .addps, 1, 2 }); // 0f 58 ca
+    try b.emit(.sseRR, .{ .mulpd, 1, 10 }); // 66 41 0f 59 ca
+    try b.emit(.sseRR, .{ .maxpd, 9, 2 }); // 66 44 0f 5f ca
+    try b.emit(.sseRR, .{ .paddd, 1, 2 }); // 66 0f fe ca
+    try b.emit(.sseRR, .{ .psubq, 1, 2 }); // 66 0f fb ca
+    try b.emit(.sseRR, .{ .pxor, 14, 15 }); // 66 45 0f ef f7
+    try b.emit(.sseRR, .{ .pmuludq, 1, 9 }); // 66 41 0f f4 c9
+    try b.emit(.sseRR, .{ .punpckldq, 1, 2 }); // 66 0f 62 ca
+    try b.emit(.sseRR, .{ .punpcklqdq, 1, 2 }); // 66 0f 6c ca
+    try b.emit(.sseRR, .{ .unpcklpd, 1, 2 }); // 66 0f 14 ca
+    try b.emit(.sseRMop, .{ .addpd, 3, x.ptr(.rbp, -32) }); // 66 0f 58 5d e0
+    try b.emit(.sseRMop, .{ .addsd, 10, x.ptr(.rax, 8) }); // f2 44 0f 58 50 08
+    try b.emit(.sseRMop, .{ .paddd, 1, x.ptr(.r12, 0) }); // 66 41 0f fe 0c 24
+    try b.emit(.sseRM, .{ .movups, 1, x.ptr(.rdi, 0) }); // 0f 10 0f
+    try b.emit(.sseMR, .{ .movdqu, x.ptr(.rsi, 16), 9 }); // f3 44 0f 7f 4e 10
+    try b.emit(.sseRM, .{ .movaps, 2, x.ptr(.rbp, -48) }); // 0f 28 55 d0
+    try b.emit(.sseRRI, .{ .pshufd, 1, 9, 0xF5 }); // 66 41 0f 70 c9 f5
+    try b.emit(.sseRRI, .{ .shufps, 2, 2, 0 }); // 0f c6 d2 00
+    try b.emit(.sseRMI, .{ .pshufd, 3, x.ptr(.rbp, -32), 0xF5 }); // 66 0f 70 5d e0 f5
+    try b.emit(.movdXR, .{ 1, .rax }); // 66 0f 6e c8
+    try b.emit(.movdRX, .{ .r10, 9 }); // 66 45 0f 7e ca
+    try b.emit(.movsxd, .{ .rax, .r10 }); // 49 63 c2
+    try b.emit(.shiftRI, .{ .shl, .r10, 3 }); // 49 c1 e2 03
+    try b.emit(.shiftRI, .{ .sar, .rax, 63 }); // 48 c1 f8 3f
+    try b.emit(.neg, .{.r9}); // 49 f7 d9
+    try b.emit(.zero32, .{.r8}); // 45 31 c0
+    try b.emit(.zero32, .{.rax}); // 31 c0
+    var cb = CodeBuffer.init(std.testing.allocator);
+    defer cb.deinit();
+    try b.serialize(x.AssemblerT(.{ .validate = true }).init(&cb));
+    try std.testing.expectEqualSlices(u8, &.{
+        0x0f, 0x58, 0xca, 0x66, 0x41, 0x0f, 0x59, 0xca, 0x66, 0x44, 0x0f, 0x5f,
+        0xca, 0x66, 0x0f, 0xfe, 0xca, 0x66, 0x0f, 0xfb, 0xca, 0x66, 0x45, 0x0f,
+        0xef, 0xf7, 0x66, 0x41, 0x0f, 0xf4, 0xc9, 0x66, 0x0f, 0x62, 0xca, 0x66,
+        0x0f, 0x6c, 0xca, 0x66, 0x0f, 0x14, 0xca, 0x66, 0x0f, 0x58, 0x5d, 0xe0,
+        0xf2, 0x44, 0x0f, 0x58, 0x50, 0x08, 0x66, 0x41, 0x0f, 0xfe, 0x0c, 0x24,
+        0x0f, 0x10, 0x0f, 0xf3, 0x44, 0x0f, 0x7f, 0x4e, 0x10, 0x0f, 0x28, 0x55,
+        0xd0, 0x66, 0x41, 0x0f, 0x70, 0xc9, 0xf5, 0x0f, 0xc6, 0xd2, 0x00, 0x66,
+        0x0f, 0x70, 0x5d, 0xe0, 0xf5, 0x66, 0x0f, 0x6e, 0xc8, 0x66, 0x45, 0x0f,
+        0x7e, 0xca, 0x49, 0x63, 0xc2, 0x49, 0xc1, 0xe2, 0x03, 0x48, 0xc1, 0xf8,
+        0x3f, 0x49, 0xf7, 0xd9, 0x45, 0x31, 0xc0, 0x31, 0xc0,
+    }, cb.code());
+    // pmulld (SSE4.1) unless the build gate excludes it.
+    var b2 = Builder.init(std.testing.allocator);
+    defer b2.deinit();
+    try b2.emit(.pmulld, .{ 1, 2 }); // 66 0f 38 40 ca
+    var cb2 = CodeBuffer.init(std.testing.allocator);
+    defer cb2.deinit();
+    if (b2.serialize(x.AssemblerT(.{ .validate = true }).init(&cb2))) {
+        try std.testing.expectEqualSlices(u8, &.{ 0x66, 0x0f, 0x38, 0x40, 0xca }, cb2.code());
+    } else |e| {
+        try std.testing.expect(x.build_gate != null and !x.build_gate.?.contains(.SSE4_1));
+        try std.testing.expectEqual(error.InvalidOperand, e);
+    }
+    var txt: std.ArrayList(u8) = .empty;
+    defer txt.deinit(std.testing.allocator);
+    try formatInstImpl(std.testing.allocator, &txt, .{ .sseRRI = .{ .pshufd, 1, 9, 0xF5 } });
+    try std.testing.expectEqualStrings("pshufd xmm1, xmm9, 245", txt.items);
+}
+
+test "x64 builder: serializeShortened matches shortenBranches + serialize" {
+    // Short and long forward/backward branches, an alignment, embedded bytes, a call to a
+    // label (a fixup inside a moved instruction) and a non-empty buffer to start with.
+    const build = struct {
+        fn f(b: *Builder) !void {
+            const top = try b.newLabel();
+            const far = try b.newLabel();
+            const near = try b.newLabel();
+            const func = try b.newLabel();
+            try b.bind(top);
+            try b.emit(.call, .{func});
+            try b.emit(.jcc, .{ .e, near });
+            try b.emit(.jmp, .{far});
+            try b.bind(near);
+            for (0..40) |_| try b.emit(.addRI, .{ .rax, 0x12345 });
+            try b.alignNop(16);
+            try b.embed(&.{ 0xAA, 0xBB, 0xCC });
+            try b.emit(.jcc, .{ .ne, top });
+            try b.emit(.jmp, .{near});
+            try b.bind(far);
+            try b.add(.ret);
+            try b.alignTrap(8);
+            try b.bind(func);
+            try b.emit(.movRR, .{ .rax, .rcx });
+            try b.add(.ret);
+        }
+    }.f;
+    for ([_]usize{ 0, 5 }) |pre| {
+        var b1 = Builder.init(t.allocator);
+        defer b1.deinit();
+        try build(&b1);
+        try shortenBranches(&b1);
+        var want = CodeBuffer.init(t.allocator);
+        defer want.deinit();
+        for (0..pre) |_| try want.emitBytes(&.{0x90});
+        try b1.serialize(x.AssemblerT(.{ .validate = true }).init(&want));
+        try want.finalize();
+
+        var b2 = Builder.init(t.allocator);
+        defer b2.deinit();
+        try build(&b2);
+        var got = CodeBuffer.init(t.allocator);
+        defer got.deinit();
+        for (0..pre) |_| try got.emitBytes(&.{0x90});
+        try serializeShortened(&b2, &got);
+        try got.finalize();
+        if (pre == 0) try t.expectEqualSlices(u8, want.code(), got.code());
+        // With a prefix, alignment is taken from the absolute offset (here 5) in both.
+        try t.expectEqual(want.code().len, got.code().len);
+    }
 }

@@ -21,6 +21,7 @@ const x = @import("assembler.zig");
 const bld = @import("builder.zig");
 const ir = @import("../core/ir.zig");
 const ra = @import("../core/regalloc.zig");
+const rc = @import("../core/reg_classes.zig");
 const CodeBuffer = @import("../core/code_buffer.zig").CodeBuffer;
 const Gp = x.Gp;
 
@@ -61,7 +62,8 @@ fn imm32(v: i64) i32 {
 /// Compiles `f` into `b` (an x86 Builder). Run passes and serialize separately, or use `compile`.
 pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: Options) !Stats {
     try f0.verify();
-    var lowered: ?ir.Func = if (f0.hasBlockParams()) try f0.lowerBlockParams(gpa) else null;
+    if (f0.params > ir.max_args) return error.TooManyParams;
+    var lowered: ?ir.Func = if (f0.hasBlockEdges()) try f0.lowerBlockParams(gpa) else null;
     defer if (lowered) |*g| g.deinit();
     const f: *const ir.Func = if (lowered) |*g| g else f0;
     const cc = x.CallConv.cdecl;
@@ -69,33 +71,12 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const A = arena.allocator();
-    const blocks = try A.alloc(ra.Block, f.blocks.items.len);
-    for (f.blocks.items, 0..) |blk, bi| {
-        const extra: usize = if (bi == 0) 1 else 0;
-        const insts = try A.alloc(ra.Inst, blk.ops.items.len + extra);
-        if (bi == 0) {
-            const params = try A.alloc(ra.VReg, f.params);
-            for (params, 0..) |*p, i| p.* = @intCast(i);
-            insts[0] = .{ .defs = params };
-        }
-        for (blk.ops.items, 0..) |o, i| {
-            var buf: [ir.max_args]ir.VReg = undefined;
-            const u = try A.dupe(ra.VReg, o.uses(&buf));
-            const d: []const ra.VReg = if (o.def()) |dv| try A.dupe(ra.VReg, &.{dv}) else &.{};
-            insts[i + extra] = .{ .uses = u, .defs = d, .is_call = o == .call, .is_copy = o == .copy };
-        }
-        const succs: []const u32 = switch (blk.ops.items[blk.ops.items.len - 1]) {
-            .br => |tg| try A.dupe(u32, &.{tg}),
-            .cbr => |c| try A.dupe(u32, &.{ c.then, c.@"else" }),
-            else => &.{},
-        };
-        blocks[bi] = .{ .insts = insts, .succs = succs };
-    }
-    const rf: ra.Func = .{ .blocks = blocks, .num_vregs = @max(f.num_vregs, 1) };
     const rcfg: ra.Config = .{ .allocatable = opts.allocatable, .callee_saved = callee_saved & opts.allocatable, .split_at_calls = opts.split_at_calls, .algo = opts.algo, .split = opts.split };
-    var res = try ra.allocate(gpa, rf, rcfg);
+    var res = try rc.allocateClass(gpa, f, null, .gp, true, rcfg);
     defer res.deinit(gpa);
-    std.debug.assert(ra.verify(rf, rcfg, res));
+    // Vregs saved/restored around calls (split ranges), ascending.
+    var save_vregs: std.ArrayList(ir.VReg) = .empty;
+    for (res.save_slot, 0..) |s, v| if (s != null) try save_vregs.append(A, @intCast(v));
 
     const used = res.usedRegs();
     var saved: std.ArrayList(Gp) = .empty;
@@ -160,6 +141,9 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
         try b.emit(.movRM, .{ s0, cc.stackArg(@intCast(i)) });
         try ctx.put(@intCast(i), s0);
     }
+    // Values read before any def on some path are 0 (IR semantics, as in `ir.interpret`).
+    if (res.entry_undef.len != 0) try b.emit(.movRI, .{ s0, 0 });
+    for (res.entry_undef) |v| try ctx.put(v, s0);
 
     const labels = try gpa.alloc(bld.Label, f.blocks.items.len);
     defer gpa.free(labels);
@@ -265,7 +249,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     try b.emit(.movMR, .{ x.ptr(base, c.disp), v });
                 },
                 .call => |c| {
-                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                    for (save_vregs.items) |v| if (res.savedAcross(v, pos)) {
                         try b.emit(.movMR, .{ ctx.slot(res.save_slot[v].?), L.reg(res.locs[v].reg) });
                     };
                     const n: u32 = @intCast(c.args.len);
@@ -280,7 +264,7 @@ pub fn lower(gpa: std.mem.Allocator, f0: *const ir.Func, b: *bld.Builder, opts: 
                     try b.emit(.callR, .{s0});
                     if (4 * n + pad != 0) try b.emit(.addRI, .{ .esp, @intCast(4 * n + pad) });
                     var restored = false;
-                    for (0..res.locs.len) |v| if (res.savedAcross(@intCast(v), pos)) {
+                    for (save_vregs.items) |v| if (res.savedAcross(v, pos)) {
                         if (!restored) try b.emit(.movRR, .{ s0, .eax });
                         restored = true;
                         try b.emit(.movRM, .{ L.reg(res.locs[v].reg), ctx.slot(res.save_slot[v].?) });
@@ -534,4 +518,43 @@ test "x86 compiler: random programs match interpret32 (x86 host)" {
         try t.expectEqual(want, try run(&f, .{ .allocatable = bit(.eax) | bit(.ebx) }, &args));
         try t.expectEqual(want, try run(&f, .{ .algo = .graph }, &args));
     }
+}
+
+test "x86 compiler: more parameters than ir.max_args is an error" {
+    const gpa = std.testing.allocator;
+    var f = try ir.parse(gpa, "func f 300\ne:\n  ret v0\n");
+    defer f.deinit();
+    var cb = CodeBuffer.init(gpa);
+    defer cb.deinit();
+    try std.testing.expectError(error.TooManyParams, compile(gpa, &f, &cb, .{}));
+    f.params = ir.max_args;
+    _ = try compile(gpa, &f, &cb, .{});
+}
+
+test "x86 compiler: bra/cbra without block parameters compile like br/cbr" {
+    const gpa = std.testing.allocator;
+    var f = try ir.parse(gpa,
+        \\func f 1
+        \\b0:
+        \\  v1 = const 1
+        \\  cbr lt v0 v1 b1 b2
+        \\b1:
+        \\  v1 = add v0 v1
+        \\  br b2
+        \\b2:
+        \\  ret v1
+        \\
+    );
+    defer f.deinit();
+    var plain = CodeBuffer.init(gpa);
+    defer plain.deinit();
+    _ = try compile(gpa, &f, &plain, .{});
+    const c = f.blocks.items[0].ops.items[1].cbr;
+    f.blocks.items[0].ops.items[1] = .{ .cbra = .{ .cond = c.cond, .a = c.a, .b = c.b, .then = c.then, .@"else" = c.@"else", .then_args = &.{}, .else_args = &.{} } };
+    f.blocks.items[1].ops.items[1] = .{ .bra = .{ .target = 2, .args = &.{} } };
+    try std.testing.expect(!f.hasBlockParams() and f.hasBlockEdges());
+    var edges = CodeBuffer.init(gpa);
+    defer edges.deinit();
+    _ = try compile(gpa, &f, &edges, .{});
+    try std.testing.expectEqualSlices(u8, plain.code(), edges.code());
 }

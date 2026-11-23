@@ -46,6 +46,18 @@ int main(void) {
     long r = fn(40, 2);
     printf("pyrlyn_jit %u.%u.%u (C): add(40, 2) = %ld\n", pjit_version() >> 16, (pjit_version() >> 8) & 0xFF, pjit_version() & 0xFF, r);
     pjit_func_free(f);
+    if (r != 42) return 1;
+
+    /* IR compiler: same function from IR text, for the host arch. */
+    if (!PJIT_ABI_COMPATIBLE(pjit_version())) return 1;
+    static const char ir[] = "func add 2\ne:\n  v2 = add v0 v1\n  ret v2\n";
+    pjit_buffer_reset(b);
+    CHECK(pjit_ir_compile(b, ir, sizeof ir - 1, PJIT_ARCH_HOST));
+    CHECK(pjit_jit_add(b, &f));
+    int64_t (*g)(int64_t, int64_t) = (int64_t (*)(int64_t, int64_t))pjit_func_ptr(f);
+    long r2 = (long)g(40, 2);
+    printf("pyrlyn_jit (C): IR add(40, 2) = %ld\n", r2);
+    pjit_func_free(f);
     pjit_buffer_free(b);
-    return r == 42 ? 0 : 1;
+    return r2 == 42 ? 0 : 1;
 }

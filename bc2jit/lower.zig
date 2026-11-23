@@ -91,6 +91,7 @@ fn emit(comptime M: type, a: M.Asm, f: bc.Function) !void {
                 try M.mov(a, M.ret_reg, M.slots[depth - 1]);
                 try a.ret();
             },
+            else => unreachable, // v1 opcodes: lowered by lower_ir.zig (driver dispatches on version)
         }
         depth = @intCast(@as(isize, @intCast(depth)) + inst.stackEffect());
     }

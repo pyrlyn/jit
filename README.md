@@ -1,6 +1,10 @@
-# pyrlyn-jit
+# zjit
 
-A small AsmJit-style machine code generator in Zig 0.17 (stdlib only).
+Repository [pyrlyn/zjit](https://github.com/pyrlyn/zjit) (formerly `pyrlyn/jit`). The library keeps its
+package and artifact names: Zig module `pyrlyn_jit`, CMake package `pyrlyn-jit`, `libpyrlyn-jit`, header
+`pyrlyn_jit.h`, so existing consumers build unchanged.
+
+A small AsmJit-style machine code generator in Zig 0.17 (stdlib only by default).
 
 - Backends are separate modules, picked at build time: **x86-64** and **AArch64**
   plus 32-bit x86 and RISC-V (MIPS and others: see [TODO-ARCHES.md](TODO-ARCHES.md)).
@@ -10,6 +14,9 @@ A small AsmJit-style machine code generator in Zig 0.17 (stdlib only).
   the buffer.
 - Optional **safety layer**: operand validation and emission hooks. Both are chosen at
   comptime and cost nothing when off.
+- Optional **LLVM backend** for KXBC: optimize through the LLVM C API, then execute with
+  LLVM JIT or LLVM Interpreter. Enable with `-Dllvm-prefix=PREFIX`; see
+  [bc2jit/README.md](bc2jit/README.md#llvm-backend).
 
 Design and comparison with AsmJit: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -50,12 +57,13 @@ Full build options, install, pkg-config, CMake and CPM: [docs/BUILDING.md](docs/
 
 - [docs/API.md](docs/API.md): core, x86-64, AArch64 and C/C++/Rust API.
 - [docs/c-api.md](docs/c-api.md): C ABI reference.
+- [docs/OPTIMIZER.md](docs/OPTIMIZER.md): IR optimizer (inlining, scalar passes, vectorizer, layout) and the tiered engine.
 - [docs/SAFETY.md](docs/SAFETY.md): validation, hooks, enabling and disabling.
 - [docs/BUILDING.md](docs/BUILDING.md): building and using from C/C++.
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): benchmark vs AsmJit.
 - [docs/LIMITATIONS.md](docs/LIMITATIONS.md): current limitations and implemented features.
 - [docs/llvm-tables.md](docs/llvm-tables.md): x86-64 GP table generated from LLVM.
-- [bc2jit/README.md](bc2jit/README.md): KXBC bytecode to machine code (draft).
+- [bc2jit/README.md](bc2jit/README.md): KXBC bytecode (v0, v1) to machine code.
 - [bench/BENCH_TESTS.md](bench/BENCH_TESTS.md): benchmark regression tests (`zig build bench-test`).
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/ROADMAP.md](docs/ROADMAP.md) (current state and planned work).
 
