@@ -32,7 +32,7 @@ Done and merged:
 3. Register allocator: lifetime holes, edge move resolution, loop-depth spill weights,
    two-address hints.
 4. x86-64 operands: remaining sizes and forms, AVX10.
-5. bc2jit / KXBC: calls, floats, more than four arguments; the KotlinX side that emits KXBC is a
+5. bc2jit / KXBC: calls, floats, more than four arguments; the ZKotlin side that emits KXBC is a
    separate change.
 6. Other architectures (MIPS, PowerPC64, LoongArch64, Wasm, AArch32) only if needed.
 

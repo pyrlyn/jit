@@ -1,0 +1,16 @@
+[package]
+name = "cl-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cranelift-codegen = "0.137"
+cranelift-frontend = "0.137"
+cranelift-module = "0.137"
+cranelift-jit = "0.137"
+cranelift-native = "0.137"
+
+[profile.release]
+opt-level = 3
+debug = false

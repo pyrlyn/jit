@@ -69,11 +69,11 @@ target_link_libraries(app PRIVATE pyrlyn-jit::pyrlyn-jit)
 
 # FetchContent
 include(FetchContent)
-FetchContent_Declare(pyrlyn-jit GIT_REPOSITORY https://github.com/pyrlyn/jit.git GIT_TAG main)
+FetchContent_Declare(pyrlyn-jit GIT_REPOSITORY https://github.com/pyrlyn/zjit.git GIT_TAG main)
 FetchContent_MakeAvailable(pyrlyn-jit)
 
 # CPM
-CPMAddPackage(NAME pyrlyn-jit GITHUB_REPOSITORY pyrlyn/jit GIT_TAG main)
+CPMAddPackage(NAME pyrlyn-jit GITHUB_REPOSITORY pyrlyn/zjit GIT_TAG main)
 
 # installed (cmake --install, or zig-built prefix with the config files)
 find_package(pyrlyn-jit 0.1 REQUIRED CONFIG)

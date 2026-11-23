@@ -1,5 +1,5 @@
 #!/bin/bash
-# Mutation run for pyrlyn/jit. Each mutant: one change to one line, written into a private copy of the tree
+# Mutation run for pyrlyn/zjit. Each mutant: one change to one line, written into a private copy of the tree
 # (scripts/mutation/setup.sh), then `zig build test` (unit, encoder, execution, bc2jit unit + e2e, examples).
 # usage: scripts/mutation/run.sh [file:max ...]   (default: the plan below)
 # env: MUT_WORK (default ~/Grok/mutation-tests/runs), MUT_JOBS (2), MUT_TIMEOUT (600 s), ZIG_J (3)

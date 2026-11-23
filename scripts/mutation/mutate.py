@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Source-level mutation testing for C (KotlinX GC/runtime) and Zig (pyrlyn/jit) without touching the repo.
+"""Source-level mutation testing for C (KotlinX GC/runtime) and Zig (pyrlyn/zjit) without touching the repo.
 
 Each mutant is one textual change to one line of one file. The file is mutated in a private copy of the tree
 under --work (never in the checkout); the test command runs inside that copy with a timeout.

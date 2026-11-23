@@ -26,6 +26,8 @@ pub const engine = @import("core/engine.zig");
 /// Optional LLVM C API backend for integer IR (JIT and LLVM Interpreter).
 pub const llvm = @import("core/llvm.zig");
 pub const JitRuntime = @import("core/jit_runtime.zig");
+/// Shared executable memory: one mapping, functions appended (AsmJit JitAllocator-like).
+pub const JitPool = @import("core/jit_pool.zig");
 
 /// `pyrlyn_jit.x86_64.Assembler`, `.Gp`, `.ptr`, ... (void if disabled at build time)
 pub const x86_64 = if (opts.x86_64) @import("x86_64/assembler.zig") else void;
@@ -57,6 +59,7 @@ pub const aarch64_builder = if (opts.aarch64) @import("aarch64/builder.zig") els
 test {
     _ = @import("core/code_buffer.zig");
     _ = @import("core/regalloc.zig");
+    _ = @import("core/jit_pool.zig");
     _ = @import("core/reg_classes.zig");
     _ = @import("fp_tests.zig");
     _ = @import("core/ir.zig");
