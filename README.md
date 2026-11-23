@@ -1,4 +1,4 @@
-# zjit
+<h1><picture><source media="(prefers-color-scheme: dark)" srcset="brand/logo-dark.svg"><img src="brand/logo.svg" width="32" height="32" alt="" align="absmiddle"></picture> zjit</h1>
 
 Repository [pyrlyn/zjit](https://github.com/pyrlyn/zjit) (formerly `pyrlyn/jit`). The library keeps its
 package and artifact names: Zig module `pyrlyn_jit`, CMake package `pyrlyn-jit`, `libpyrlyn-jit`, header
