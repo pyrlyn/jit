@@ -2,13 +2,13 @@
  * Exercises every exported function from C, including error paths. */
 #include <stdio.h>
 #include <string.h>
-#include <pyrlyn_jit.h>
+#include <pyrlyn_jit_fast.h>
 
 static int failures = 0;
 #define EXPECT(c) do { if (!(c)) { fprintf(stderr, "%s:%d: EXPECT(%s) failed (last error: %s)\n", __FILE__, __LINE__, #c, pjit_last_error()); failures++; } } while (0)
 #define EQ(a, b) EXPECT((a) == (b))
 
-_Static_assert(PJIT_VERSION == 0x000300u, "header version");
+_Static_assert(PJIT_VERSION == 0x000400u, "header version");
 _Static_assert(sizeof(pjit_x64_op) == 24, "pjit_x64_op layout");
 _Static_assert(sizeof(pjit_a64_op) == 32, "pjit_a64_op layout");
 _Static_assert(PJIT_ERR_OTHER == 13 && PJIT_ERR_STEP_LIMIT == 18, "status values are ABI");
@@ -73,6 +73,56 @@ int main(void) {
     pjit_func *f = NULL;
     EQ(pjit_jit_add(b, &f), PJIT_ERR_UNBOUND_LABEL); /* not finalized */
     pjit_buffer_reset(b);
+
+    /* fast paths (0.4.0): opcode ids emit the same bytes as mnemonics; shared pool */
+    {
+        int32_t a64_add = pjit_a64_opcode("add"), x64_mov = pjit_x64_opcode("mov");
+        EXPECT(a64_add >= 0 && x64_mov >= 0);
+        EQ(pjit_a64_opcode("nope"), -1);
+        EQ(pjit_x64_opcode(NULL), -1);
+        pjit_a64_op ao[] = {pjit_a64_x(0), pjit_a64_x(0), pjit_a64_x(1)};
+        EQ(pjit_a64_emit(b, "add", ao, 3), PJIT_OK);
+        EQ(pjit_a64_emit_op(b, (uint32_t)a64_add, ao, 3), PJIT_OK);
+        EQ(pjit_a64_emit_op(b, 0xFFFFFFFFu, ao, 3), PJIT_ERR_UNKNOWN_MNEMONIC);
+        EQ(pjit_a64_emit_op(NULL, (uint32_t)a64_add, ao, 3), PJIT_ERR_INVALID_ARGUMENT);
+        const uint8_t *c = pjit_buffer_code(b, &n);
+        EXPECT(n == 8 && memcmp(c, c + 4, 4) == 0);
+        pjit_buffer_reset(b);
+        pjit_x64_op xo[] = {pjit_x64_reg(PJIT_RAX, 8), pjit_x64_imm(1)};
+        EQ(pjit_x64_emit(b, "mov", xo, 2), PJIT_OK);
+        EQ(pjit_x64_emit_op(b, (uint32_t)x64_mov, xo, 2), PJIT_OK);
+        EQ(pjit_x64_emit_op(b, 0xFFFFFFFFu, xo, 2), PJIT_ERR_UNKNOWN_MNEMONIC);
+        c = pjit_buffer_code(b, &n);
+        EXPECT(n > 0 && n % 2 == 0 && memcmp(c, c + n / 2, n / 2) == 0);
+        pjit_buffer_reset(b);
+
+        pjit_pool *pool = NULL;
+        EQ(pjit_pool_new(0, NULL), PJIT_ERR_INVALID_ARGUMENT);
+        EQ(pjit_pool_new(0, &pool), PJIT_OK);
+        const void *p1 = NULL, *p2 = NULL;
+        EQ(pjit_pool_add(pool, NULL, &p1), PJIT_ERR_INVALID_ARGUMENT);
+#if defined(__aarch64__) || defined(_M_ARM64)
+        const uint8_t ret42[] = {0x40, 0x05, 0x80, 0xD2, 0xC0, 0x03, 0x5F, 0xD6}; /* mov x0, #42; ret */
+#define POOL_RUN 1
+#elif defined(__x86_64__) || defined(_M_X64)
+        const uint8_t ret42[] = {0xB8, 42, 0, 0, 0, 0xC3}; /* mov eax, 42; ret */
+#define POOL_RUN 1
+#else
+        const uint8_t ret42[] = {0};
+#define POOL_RUN 0
+#endif
+        EQ(pjit_buffer_emit_bytes(b, ret42, sizeof ret42), PJIT_OK);
+        EQ(pjit_finalize(b), PJIT_OK);
+        EQ(pjit_pool_add(pool, b, &p1), PJIT_OK);
+        EQ(pjit_pool_add(pool, b, &p2), PJIT_OK);
+        EXPECT(p1 && p2 && (const uint8_t *)p2 - (const uint8_t *)p1 == 16);
+#if POOL_RUN
+        EQ(((int64_t (*)(void))p2)() & 0xFF, 42);
+#endif
+        pjit_pool_free(pool);
+        pjit_pool_free(NULL);
+        pjit_buffer_reset(b);
+    }
 
     /* IR: interpreter */
     int64_t r = 0;

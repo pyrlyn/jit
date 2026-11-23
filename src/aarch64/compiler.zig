@@ -15,6 +15,9 @@
 //!   any use there. Known operands become immediates (add/sub/cmp/cmn imm12, logical
 //!   immediates, shifts, cbz/cbnz, xzr); a constant whose uses are all folded is never
 //!   materialized and takes no register.
+//! - Shift fusion: `x = shl a, K` (K known) directly followed by `y = add b, x` (either order)
+//!   or `y = sub b, x`, where `x` has no other use (or `y` is `x`), is one `add|sub y, b, a,
+//!   lsl #K`; the `shl` emits nothing.
 //! - frame: none at all for leaves without calls, spills or callee-saved registers;
 //!   otherwise `Assembler.prolog(used callee-saved, out + slots)`: outgoing stack arguments
 //!   at [sp + 8i], GP spill slot k at [sp + out + 8k], FP slot k at [sp + fbase + size*k]
@@ -487,6 +490,31 @@ fn movLen(v: u64) u32 {
 /// Extra `analyze` mask bits of an `arith`: the `APlan` kind (`reg` when neither is set).
 const plan_konst: u8 = 1 << 4;
 const plan_imm: u8 = 1 << 5;
+/// Shift fusion (`fusedShl`): the `shl` (emits nothing) and the `add`/`sub` that takes it as
+/// a shifted register operand.
+const plan_fshl: u8 = 1 << 6;
+const plan_fadd: u8 = 1 << 7;
+
+/// `ops[i]` is `x = shl a, K` with K known and `a` not, and `ops[i + 1]` is `y = add b, x`
+/// (either order) or `y = sub b, x` with `b` not known, and `x` is read nowhere else (or `y`
+/// is `x`): the pair is one `add|sub y, b, a, lsl #K`. Returns `b`.
+fn fusedShl(an: *Analysis, ops: []const ir.Op, i: usize) ra.Error!?ir.VReg {
+    if (i + 1 >= ops.len or ops[i] != .arith or ops[i + 1] != .arith) return null;
+    const s = ops[i].arith;
+    const y = ops[i + 1].arith;
+    if (s.op != .shl or s.b == s.dst) return null;
+    const c = &an.cs;
+    if (c.get(s.b) == null or c.get(s.a) != null) return null;
+    const x = s.dst;
+    const other = switch (y.op) {
+        .add => if (y.a == x and y.b != x) y.b else if (y.b == x and y.a != x) y.a else return null,
+        .sub => if (y.b == x and y.a != x) y.a else return null,
+        else => return null,
+    };
+    if (c.get(other) != null) return null;
+    if (y.dst != x and (try an.useCount(x)) != 1) return null;
+    return other;
+}
 
 /// The `aplan` that `analyze` recorded in `m` (constant operands are read from `c`).
 inline fn planOf(m: u8, c: *const Consts, x: ArithOp) APlan {
@@ -651,6 +679,28 @@ const Analysis = struct {
     vminmax: bool = false,
     /// `v` is defined by an op that reads an FP operand from a register (`Source(null)`).
     fdef: []bool = &.{},
+    /// Function and arena for `useCount` (computed on the first shift-fusion candidate).
+    func: *const ir.Func,
+    arena: std.mem.Allocator,
+    uses: ?[]u8 = null,
+
+    /// Uses of `v` in the function (saturating at 255).
+    fn useCount(an: *Analysis, v: ir.VReg) ra.Error!u8 {
+        const u = an.uses orelse blk: {
+            const n = try an.arena.alloc(u8, an.cs.val.len);
+            @memset(n, 0);
+            const Count = struct {
+                n: []u8,
+                inline fn use(c: @This(), w: ir.VReg) void {
+                    c.n[w] +|= 1;
+                }
+            };
+            for (an.func.blocks.items) |blk| for (blk.ops.items) |*o| forUses(o, Count{ .n = n });
+            an.uses = n;
+            break :blk n;
+        };
+        return u[v];
+    }
 };
 
 const Block = struct {
@@ -718,9 +768,30 @@ fn Source(comptime class: ?rc.Class) type {
                 // emitter. Every block is a fresh constant state, so the order of the blocks
                 // does not change the result.
                 an.cs.begin();
-                for (b.insts.ops, masks) |*o, *m| {
+                const ops = b.insts.ops;
+                var i: usize = 0;
+                while (i < ops.len) : (i += 1) {
                     fp_use = false;
-                    m.* = try analyze(o, an, c);
+                    if (ops[i] == .arith and ops[i].arith.op == .shl) if (try fusedShl(an, ops, i)) |other| {
+                        // The shl reports nothing; the add/sub reads `other` and the shifted
+                        // `a` and defines its result.
+                        const sh = ops[i].arith;
+                        const y = ops[i + 1].arith;
+                        an.cs.set(sh.dst, null);
+                        masks[i] = plan_fshl;
+                        collector.next();
+                        an.needs[other] = true;
+                        an.needs[sh.a] = true;
+                        try c.useAs(other, false);
+                        try c.useAs(sh.a, false);
+                        try c.defAs(y.dst, false);
+                        an.cs.set(y.dst, null);
+                        masks[i + 1] = plan_fadd | 3;
+                        collector.next();
+                        i += 1;
+                        continue;
+                    };
+                    masks[i] = try analyze(&ops[i], an, c);
                     collector.next();
                 }
                 return;
@@ -1087,6 +1158,8 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
         .masks = try A.alloc(u8, nops),
         .types = types,
         .params = f.params,
+        .func = f,
+        .arena = A,
     };
     @memset(an.cs.gen, 0);
     if (nb != 0) {
@@ -1301,7 +1374,7 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
         e.cur = bi;
         an.cs.begin();
         const cs = &an.cs;
-        for (blk.ops.items) |*op| {
+        for (blk.ops.items, 0..) |*op, op_i| {
             defer oi += 1;
             switch (op.*) {
                 .@"const" => |x| {
@@ -1324,6 +1397,22 @@ pub fn lower(backing: std.mem.Allocator, f0: *const ir.Func, a: anytype, opts: O
                 },
                 .arith => |x| {
                     const m = an.masks[oi];
+                    if (m & (plan_fshl | plan_fadd) != 0) {
+                        // Shift fusion (`fusedShl`): nothing for the shl, one shifted-register
+                        // add/sub for its user.
+                        if (m & plan_fadd != 0 and an.needs[x.dst]) {
+                            const s = blk.ops.items[op_i - 1].arith;
+                            const other = if (x.a == s.dst) x.b else x.a;
+                            const k: u32 = @intCast(cs.get(s.b).? & 63);
+                            const rb = try e.get(other, s0, true);
+                            const rs = try e.get(s.a, s1, true);
+                            const d = e.dst(x.dst);
+                            try e.w(enc.rrr(if (x.op == .sub) enc.sub_r else enc.add_r, d, rb, rs) | k << 10);
+                            try e.put(x.dst, d);
+                        }
+                        cs.set(x.dst, null);
+                        continue;
+                    }
                     if (an.needs[x.dst]) {
                         const d = e.dst(x.dst);
                         switch (planOf(m, cs, x)) {

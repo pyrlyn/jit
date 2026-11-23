@@ -22,7 +22,7 @@ extern "C" {
 #endif
 
 #define PJIT_VERSION_MAJOR 0
-#define PJIT_VERSION_MINOR 3
+#define PJIT_VERSION_MINOR 4
 #define PJIT_VERSION_PATCH 0
 #define PJIT_MAKE_VERSION(major, minor, patch) ((uint32_t)(((major) << 16) | ((minor) << 8) | (patch)))
 #define PJIT_VERSION PJIT_MAKE_VERSION(PJIT_VERSION_MAJOR, PJIT_VERSION_MINOR, PJIT_VERSION_PATCH)
