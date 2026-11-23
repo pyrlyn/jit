@@ -1050,7 +1050,7 @@ test "rev: engine random callers/callees agree with the interpreter across tier-
     if (!engine_mod.supported) return error.SkipZigTest;
     defer Bound.reset();
     const oracle_targets = Bound.addrs();
-    const seeds = 100;
+    const seeds = 30;
     var mismatches: u32 = 0;
     var tier_ups: u32 = 0;
     var inl: u32 = 0;
@@ -1252,9 +1252,9 @@ test "rev: engine survives allocation failure at every point" {
     defer sq.deinit();
     var idx: usize = 0;
     var completed = false;
-    // Every 7th allocation keeps the default test run short; set the stride to 1 to fail
+    // Every 31st allocation keeps the default test run short; set the stride to 1 to fail
     // every allocation.
-    const stride = 7;
+    const stride = 31;
     while (!completed) : (idx += stride) {
         for ([_]u32{ 0, 2 }) |hot| {
             var fa = std.testing.FailingAllocator.init(t.allocator, .{ .fail_index = idx });

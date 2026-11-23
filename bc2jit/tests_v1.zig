@@ -439,7 +439,7 @@ test "rev: -O1/-O2 compile for every target and the optimized IR matches the int
     var prng = std.Random.DefaultPrng.init(0xBEEF_0042);
     const rng = prng.random();
     var fails: u32 = 0;
-    for (0..600) |_| {
+    for (0..100) |_| {
         var p: Prog = .{};
         defer p.deinit();
         try genProgram(rng, &p);

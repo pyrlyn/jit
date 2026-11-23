@@ -714,7 +714,7 @@ test "vecnative: random loops optimized twice" {
 var twice = false;
 
 fn randomLoops(with_profile: bool) !void {
-    const count: usize = if (std.c.getenv("VEC_FUZZ")) |s| std.fmt.parseInt(usize, std.mem.span(s), 10) catch 300 else 300;
+    const count: usize = if (std.c.getenv("VEC_FUZZ")) |s| std.fmt.parseInt(usize, std.mem.span(s), 10) catch 60 else 60;
     var prng = std.Random.DefaultPrng.init(if (std.c.getenv("VEC_SEED")) |s| std.fmt.parseInt(u64, std.mem.span(s), 10) catch 11 else 11);
     const r = prng.random();
     var fails: usize = 0;

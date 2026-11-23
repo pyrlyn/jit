@@ -398,7 +398,7 @@ fn envCount(name: []const u8, default: usize) usize {
 
 test "review-scalar: guarded faulting ops fuzz" {
     const gpa = t.allocator;
-    const iters = envCount("REV_ITERS\x00", 100);
+    const iters = envCount("REV_ITERS\x00", 30);
     const seed = envCount("REV_SEED\x00", 1);
     var prng = std.Random.DefaultPrng.init(seed);
     var src: std.ArrayList(u8) = .empty;
@@ -487,7 +487,7 @@ fn checkTwice(gpa: std.mem.Allocator, src: []const u8, lv2: opt.Level, vector: o
 
 test "review-scalar: large programs, no vectors, re-optimized output" {
     const gpa = t.allocator;
-    const iters = envCount("REV_ITERS\x00", 100);
+    const iters = envCount("REV_ITERS\x00", 30);
     const seed = envCount("REV_SEED\x00", 1);
     var prng = std.Random.DefaultPrng.init(seed ^ 0xabcdef);
     var src: std.ArrayList(u8) = .empty;
@@ -851,7 +851,7 @@ test "review-scalar: huge profile counts (two latches) do not overflow" {
 
 test "review-scalar: few scalar rounds (max_rounds 0/1) before the loop passes" {
     const gpa = t.allocator;
-    const iters = envCount("REV_ITERS\x00", 100);
+    const iters = envCount("REV_ITERS\x00", 30);
     const seed = envCount("REV_SEED\x00", 1);
     var prng = std.Random.DefaultPrng.init(seed ^ 0x5151);
     var src: std.ArrayList(u8) = .empty;

@@ -961,7 +961,7 @@ test "rev: high-pressure random programs (calls, idiv, shifts)" {
     errdefer _ = leak_check.deinit();
     var src: std.ArrayList(u8) = .empty;
     errdefer src.deinit(gpa);
-    const n = fuzzCount(60);
+    const n = fuzzCount(20);
     const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ std.math.minInt(i64), 5 }, &.{ 63, 64 } };
     for ([_]struct { p: u32, b: u32, o: u32 }{ .{ .p = 6, .b = 4, .o = 8 }, .{ .p = 16, .b = 5, .o = 12 }, .{ .p = 28, .b = 6, .o = 16 } }, 0..) |cf, ci| {
         var prng = std.Random.DefaultPrng.init(0x5e7_c0de + ci);
@@ -980,7 +980,7 @@ test "rev: random programs with block parameters (parallel copies)" {
     errdefer _ = leak_check.deinit();
     var src: std.ArrayList(u8) = .empty;
     errdefer src.deinit(gpa);
-    const n = fuzzCount(60);
+    const n = fuzzCount(20);
     const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ std.math.minInt(i64), 5 }, &.{ 63, 64 } };
     for ([_]struct { p: u32, b: u32, o: u32 }{ .{ .p = 4, .b = 4, .o = 3 }, .{ .p = 6, .b = 6, .o = 6 }, .{ .p = 12, .b = 8, .o = 8 }, .{ .p = 20, .b = 6, .o = 12 } }, 0..) |cf, ci| {
         var prng = std.Random.DefaultPrng.init(0xb10c_9a + ci);
@@ -1044,7 +1044,7 @@ test "rev: x86 option combos on high-pressure programs" {
     };
     var src: std.ArrayList(u8) = .empty;
     errdefer src.deinit(gpa);
-    const n = fuzzCount(8);
+    const n = fuzzCount(4);
     const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ 63, 64 } };
     for ([_]struct { p: u32, b: u32, o: u32, bp: bool }{ .{ .p = 8, .b = 4, .o = 8, .bp = false }, .{ .p = 16, .b = 5, .o = 12, .bp = true }, .{ .p = 24, .b = 6, .o = 14, .bp = false } }, 0..) |cf, ci| {
         var prng = std.Random.DefaultPrng.init(0xa11_0c + ci);

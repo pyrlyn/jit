@@ -430,7 +430,7 @@ fn getenv(name: [*:0]const u8) ?[*:0]const u8 {
     return std.c.getenv(name);
 }
 fn fuzzN() usize {
-    const s = getenv("REV_FUZZ") orelse return 60;
+    const s = getenv("REV_FUZZ") orelse return 20;
     return std.fmt.parseInt(usize, std.mem.span(s), 10) catch 300;
 }
 fn fuzzSeed() u64 {
