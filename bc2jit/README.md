@@ -73,7 +73,7 @@ Measure API paths and enabled/disabled library/binary sizes with
 The KotlinX AoT pipeline (`newkotlinc`) has no bytecode of its own: it prints LLVM IR text
 (`<output>.ll`, kept with `--emit-llvm`), runs LLVM `opt`, and links with clang. KXBC is the
 proposed compact hand-off format the AoT side would also emit for code the JIT should run. It
-lives here, next to the assemblers it targets; the KotlinX emitter is a separate change.
+lives here, next to the assemblers it targets; the ZKotlin emitter is a separate change.
 
 ## Command line
 
@@ -165,7 +165,7 @@ repeated calls, invalid IR rejection and CLI execution for both KXBC versions.
 Not a draft any more: the format is versioned (v0 frozen, v1 current), the decoder validates
 every module completely, both lowerings are tested against a reference interpreter
 (`bytecode.eval`) on every target, and the CLI contract (flags, exit codes, output) is covered by
-end-to-end tests. Not included: the KotlinX side that emits KXBC (separate change), calls,
+end-to-end tests. Not included: the ZKotlin side that emits KXBC (separate change), calls,
 floating point, more than four arguments.
 
 ## Format (KXBC v0)

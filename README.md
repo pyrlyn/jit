@@ -1,4 +1,8 @@
-# pyrlyn-jit
+# zjit
+
+Repository [pyrlyn/zjit](https://github.com/pyrlyn/zjit) (formerly `pyrlyn/jit`). The library keeps its
+package and artifact names: Zig module `pyrlyn_jit`, CMake package `pyrlyn-jit`, `libpyrlyn-jit`, header
+`pyrlyn_jit.h`, so existing consumers build unchanged.
 
 A small AsmJit-style machine code generator in Zig 0.17 (stdlib only by default).
 
