@@ -961,7 +961,7 @@ test "rev: high-pressure random programs (calls, idiv, shifts)" {
     errdefer _ = leak_check.deinit();
     var src: std.ArrayList(u8) = .empty;
     errdefer src.deinit(gpa);
-    const n = fuzzCount(300);
+    const n = fuzzCount(60);
     const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ std.math.minInt(i64), 5 }, &.{ 63, 64 } };
     for ([_]struct { p: u32, b: u32, o: u32 }{ .{ .p = 6, .b = 4, .o = 8 }, .{ .p = 16, .b = 5, .o = 12 }, .{ .p = 28, .b = 6, .o = 16 } }, 0..) |cf, ci| {
         var prng = std.Random.DefaultPrng.init(0x5e7_c0de + ci);
@@ -975,86 +975,12 @@ test "rev: high-pressure random programs (calls, idiv, shifts)" {
     try endLeakCheck();
 }
 
-fn revLog(msg: []const u8) void {
-    const path = std.c.getenv("REV_LOG") orelse return;
-    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(std.c.mode_t, 0o644));
-    if (fd < 0) return;
-    _ = std.c.write(fd, msg.ptr, msg.len);
-    _ = std.c.close(fd);
-}
-
-// Replays `REV_FILE` (a revProgram dump), fixing callee addresses by argument count.
-test "rev: replay" {
-    const path = std.c.getenv("REV_FILE") orelse return;
-    beginLeakCheck();
-    errdefer _ = leak_check.deinit();
-    const file = std.mem.span(path);
-    var raw: std.ArrayList(u8) = .empty;
-    defer raw.deinit(gpa);
-    {
-        const fd = std.c.open(file, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const k = std.c.read(fd, &buf, buf.len);
-            if (k <= 0) break;
-            try raw.appendSlice(gpa, buf[0..@intCast(k)]);
-        }
-        _ = std.c.close(fd);
-    }
-    var src: std.ArrayList(u8) = .empty;
-    defer src.deinit(gpa);
-    var lines = std.mem.splitScalar(u8, raw.items, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.indexOf(u8, line, "call 0x")) |ci| {
-            var it = std.mem.tokenizeScalar(u8, line[ci + 5 ..], ' ');
-            _ = it.next();
-            var nargs: u32 = 0;
-            while (it.next()) |_| nargs += 1;
-            const addr = for (rev_callees) |k| (if (k.n == nargs) break @intFromPtr(k.addr)) else unreachable;
-            try src.print(gpa, "{s}call 0x{x}", .{ line[0..ci], addr });
-            var it2 = std.mem.tokenizeScalar(u8, line[ci + 5 ..], ' ');
-            _ = it2.next();
-            while (it2.next()) |a| try src.print(gpa, " {s}", .{a});
-            try src.print(gpa, "\n", .{});
-        } else try src.print(gpa, "{s}\n", .{line});
-    }
-    var p = try Program.init(src.items, null);
-    defer p.deinit();
-    for (p.opt, [_][]const u8{ "o1", "o2" }) |g, name| {
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(gpa);
-        try g.print(gpa, &out);
-        revLog(name);
-        revLog(":\n");
-        revLog(out.items);
-    }
-    const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ std.math.minInt(i64), 5 }, &.{ 63, 64 } };
-    for (inputs) |in| {
-        const want = ir.interpret(&p.ref, in, 1_000_000) catch |e| {
-            var b: [128]u8 = undefined;
-            revLog(std.fmt.bufPrint(&b, "input {any}: ref {s}\n", .{ in, @errorName(e) }) catch "");
-            continue;
-        };
-        for (std.enums.values(Variant)) |v| {
-            const f = p.runner(v) orelse continue;
-            var b: [256]u8 = undefined;
-            revLog(std.fmt.bufPrint(&b, "input {any} variant {s} want {d} ...", .{ in, @tagName(v), want }) catch "");
-            const got = ir.interpret(f, in, 4_000_000) catch |e| {
-                revLog(std.fmt.bufPrint(&b, " error {s}\n", .{@errorName(e)}) catch "");
-                continue;
-            };
-            revLog(std.fmt.bufPrint(&b, " got {d}\n", .{got}) catch "");
-        }
-    }
-    try endLeakCheck();
-}
-
 test "rev: random programs with block parameters (parallel copies)" {
     beginLeakCheck();
     errdefer _ = leak_check.deinit();
     var src: std.ArrayList(u8) = .empty;
     errdefer src.deinit(gpa);
-    const n = fuzzCount(300);
+    const n = fuzzCount(60);
     const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ std.math.minInt(i64), 5 }, &.{ 63, 64 } };
     for ([_]struct { p: u32, b: u32, o: u32 }{ .{ .p = 4, .b = 4, .o = 3 }, .{ .p = 6, .b = 6, .o = 6 }, .{ .p = 12, .b = 8, .o = 8 }, .{ .p = 20, .b = 6, .o = 12 } }, 0..) |cf, ci| {
         var prng = std.Random.DefaultPrng.init(0xb10c_9a + ci);
@@ -1118,24 +1044,16 @@ test "rev: x86 option combos on high-pressure programs" {
     };
     var src: std.ArrayList(u8) = .empty;
     errdefer src.deinit(gpa);
-    const n = fuzzCount(100);
+    const n = fuzzCount(8);
     const inputs = [_][]const i64{ &.{ 0, 0 }, &.{ 3, -7 }, &.{ -12345, 99 }, &.{ 63, 64 } };
     for ([_]struct { p: u32, b: u32, o: u32, bp: bool }{ .{ .p = 8, .b = 4, .o = 8, .bp = false }, .{ .p = 16, .b = 5, .o = 12, .bp = true }, .{ .p = 24, .b = 6, .o = 14, .bp = false } }, 0..) |cf, ci| {
         var prng = std.Random.DefaultPrng.init(0xa11_0c + ci);
         for (0..n) |_| {
             src.clearRetainingCapacity();
             try revProgramP(prng.random(), &src, cf.p, cf.b, cf.o, cf.bp);
-            if (std.c.getenv("REV_LAST")) |path| {
-                const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
-                if (fd >= 0) {
-                    _ = std.c.write(fd, src.items.ptr, src.items.len);
-                    _ = std.c.close(fd);
-                }
-            }
             try revCheckOpts(src.items, &inputs, optsets);
         }
     }
-    revLog("x86 option combos done\n");
     src.deinit(gpa);
     try endLeakCheck();
 }

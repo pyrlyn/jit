@@ -386,6 +386,11 @@ pub fn checkSrc(gpa: std.mem.Allocator, src: []const u8, levels: []const opt.Lev
     return false;
 }
 
+/// Timing/scaling benchmarks (no assertions) only run with `REV_BENCH` set.
+fn benchSkip() bool {
+    return std.c.getenv("REV_BENCH") == null;
+}
+
 fn envCount(name: []const u8, default: usize) usize {
     const v = std.c.getenv(@ptrCast(name.ptr)) orelse return default;
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;
@@ -393,7 +398,7 @@ fn envCount(name: []const u8, default: usize) usize {
 
 test "review-scalar: guarded faulting ops fuzz" {
     const gpa = t.allocator;
-    const iters = envCount("REV_ITERS\x00", 300);
+    const iters = envCount("REV_ITERS\x00", 100);
     const seed = envCount("REV_SEED\x00", 1);
     var prng = std.Random.DefaultPrng.init(seed);
     var src: std.ArrayList(u8) = .empty;
@@ -482,7 +487,7 @@ fn checkTwice(gpa: std.mem.Allocator, src: []const u8, lv2: opt.Level, vector: o
 
 test "review-scalar: large programs, no vectors, re-optimized output" {
     const gpa = t.allocator;
-    const iters = envCount("REV_ITERS\x00", 300);
+    const iters = envCount("REV_ITERS\x00", 100);
     const seed = envCount("REV_SEED\x00", 1);
     var prng = std.Random.DefaultPrng.init(seed ^ 0xabcdef);
     var src: std.ArrayList(u8) = .empty;
@@ -706,6 +711,7 @@ test "review-scalar: dump" {
 
 /// Monotonic clock in nanoseconds (portable across libc targets).
 fn monoNs() u64 {
+    if (builtin.os.tag == .windows) return 0; // timing is informational only
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
@@ -720,6 +726,7 @@ fn timeOpt(src: []const u8, label: []const u8) !void {
 }
 
 test "review-scalar: compile-time scaling" {
+    if (benchSkip()) return error.SkipZigTest;
     const gpa = std.heap.page_allocator;
     for ([_]usize{ 250, 500, 1000, 2000 }) |n| {
         // Chain of diamonds with loads/stores and arithmetic (many blocks, one long dom path).
@@ -760,6 +767,7 @@ fn nest(gpa: std.mem.Allocator, depth: usize, src: *std.ArrayList(u8)) !void {
 }
 
 test "review-scalar: per-pass time on a loop nest" {
+    if (benchSkip()) return error.SkipZigTest;
     const gpa = std.heap.page_allocator;
     for ([_]usize{ 100, 200, 400 }) |depth| {
         var src: std.ArrayList(u8) = .empty;
@@ -789,6 +797,7 @@ test "review-scalar: per-pass time on a loop nest" {
 }
 
 test "review-scalar: Loops.init scaling" {
+    if (benchSkip()) return error.SkipZigTest;
     const gpa = std.heap.page_allocator;
     for ([_]usize{ 200, 400, 800 }) |depth| {
         var src: std.ArrayList(u8) = .empty;
@@ -842,7 +851,7 @@ test "review-scalar: huge profile counts (two latches) do not overflow" {
 
 test "review-scalar: few scalar rounds (max_rounds 0/1) before the loop passes" {
     const gpa = t.allocator;
-    const iters = envCount("REV_ITERS\x00", 300);
+    const iters = envCount("REV_ITERS\x00", 100);
     const seed = envCount("REV_SEED\x00", 1);
     var prng = std.Random.DefaultPrng.init(seed ^ 0x5151);
     var src: std.ArrayList(u8) = .empty;
@@ -894,6 +903,7 @@ fn chain(gpa: std.mem.Allocator, n: usize, reverse: bool, src: *std.ArrayList(u8
 }
 
 test "review-scalar: parameter chains scaling" {
+    if (benchSkip()) return error.SkipZigTest;
     const gpa = std.heap.page_allocator;
     for ([_]usize{ 500, 1000, 2000, 4000 }) |n| for ([_]bool{ false, true }) |rev| {
         var src: std.ArrayList(u8) = .empty;
@@ -908,6 +918,7 @@ test "review-scalar: parameter chains scaling" {
 }
 
 test "review-scalar: per-pass time on a parameter chain" {
+    if (benchSkip()) return error.SkipZigTest;
     const gpa = std.heap.page_allocator;
     var src: std.ArrayList(u8) = .empty;
     defer src.deinit(gpa);

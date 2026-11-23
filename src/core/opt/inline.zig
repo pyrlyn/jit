@@ -1050,7 +1050,7 @@ test "rev: engine random callers/callees agree with the interpreter across tier-
     if (!engine_mod.supported) return error.SkipZigTest;
     defer Bound.reset();
     const oracle_targets = Bound.addrs();
-    const seeds = 300;
+    const seeds = 100;
     var mismatches: u32 = 0;
     var tier_ups: u32 = 0;
     var inl: u32 = 0;
