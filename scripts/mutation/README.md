@@ -1,4 +1,4 @@
-# Mutation testing (pyrlyn/jit)
+# Mutation testing (pyrlyn/zjit)
 
 No source file in the repository is modified. `setup.sh` copies the tree (without `.git`, `zig-out`,
 `.zig-cache`) into a private slot directory, `mutate.py` writes one mutated line into that copy, and
